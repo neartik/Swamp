@@ -38,7 +38,10 @@ pub enum JournalEvent {
         task: Option<String>,
     },
     /// Full snapshot at creation. Everything after is a delta.
+    /// Serialized as `record`: `node` is already taken by the line-level node id, and a
+    /// flattened duplicate key makes the line impossible to read back.
     NodeSpawned {
+        #[serde(rename = "record")]
         node: Box<NodeRecord>,
     },
     AccountSelected {
