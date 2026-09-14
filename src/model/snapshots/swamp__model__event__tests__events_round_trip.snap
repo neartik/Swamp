@@ -1,0 +1,83 @@
+---
+source: src/model/event.rs
+expression: all
+---
+[
+  {
+    "e": "session_started",
+    "session": "0f0f",
+    "model": "model-a",
+    "auth_hint": "subscription"
+  },
+  {
+    "e": "assistant_text",
+    "text": "hello"
+  },
+  {
+    "e": "thinking",
+    "text": "hmm"
+  },
+  {
+    "e": "tool_call",
+    "id": "t1",
+    "name": "Edit",
+    "summary": "src/lib.rs"
+  },
+  {
+    "e": "tool_result",
+    "id": "t1",
+    "ok": true,
+    "summary": "applied"
+  },
+  {
+    "e": "file_changed",
+    "path": "src/lib.rs",
+    "kind": "modify"
+  },
+  {
+    "e": "usage",
+    "input_tokens": 10,
+    "cached_input_tokens": 2,
+    "cache_write_tokens": 1,
+    "output_tokens": 4,
+    "reasoning_tokens": 0
+  },
+  {
+    "e": "rate_limit",
+    "status": "warning",
+    "windows": [
+      {
+        "scope": "seven_day",
+        "utilization": 0.64,
+        "resets_at": null
+      }
+    ],
+    "resets_at": null
+  },
+  {
+    "e": "final",
+    "ok": true,
+    "subtype": "success",
+    "text": "done",
+    "usage": {
+      "input_tokens": 0,
+      "cached_input_tokens": 0,
+      "cache_write_tokens": 0,
+      "output_tokens": 0,
+      "reasoning_tokens": 0
+    },
+    "cost": {
+      "usd": 0.5,
+      "basis": "reported"
+    },
+    "api_error_status": null,
+    "num_turns": 3,
+    "permission_denials": 0
+  },
+  {
+    "e": "unknown",
+    "raw": {
+      "$serde_json::private::RawValue": "{\"type\":\"future_thing\"}"
+    }
+  }
+]

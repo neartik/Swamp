@@ -55,8 +55,11 @@ pub struct NodeRecord {
 }
 
 impl NodeRecord {
+    /// None while the node is still running, and on a clock that went backwards.
     pub fn duration(&self) -> Option<std::time::Duration> {
-        todo!("WP1")
+        let started = self.started_at?;
+        let ended = self.ended_at?;
+        (ended - started).try_into().ok()
     }
 }
 
@@ -75,4 +78,110 @@ pub struct WorkResultRef {
     pub insertions: u32,
     pub deletions: u32,
     pub empty: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::core::{ChangeKind, CostBasis, EvidenceSource};
+    use std::str::FromStr;
+
+    pub(crate) fn sample() -> NodeRecord {
+        NodeRecord {
+            id: NodeId::from_str("01ARZ3NDEKTSV4RRFFQ69G5FAV").unwrap(),
+            run_id: RunId::from_str("01ARZ3NDEKTSV4RRFFQ69G5FAW").unwrap(),
+            parent: None,
+            logical: NodeId::from_str("01ARZ3NDEKTSV4RRFFQ69G5FAV").unwrap(),
+            attempt: 2,
+            retry_of: Some(NodeId::from_str("01ARZ3NDEKTSV4RRFFQ69G5FAX").unwrap()),
+            kind: NodeKind::Worker,
+            title: "port the parser".into(),
+            prompt_path: "nodes/g5fav/prompt.md".into(),
+            prompt_sha256: "abc123".into(),
+            provider: Provider::Anthropic,
+            account: Some(AccountId("main".into())),
+            exec: Some("claude-main".into()),
+            argv: vec!["-p".into(), "--output-format".into()],
+            model: Some("model-a".into()),
+            tier: Tier::Mid,
+            workspace: WorkspaceRef::Worktree {
+                path: "/tmp/wt".into(),
+                branch: "swamp/g5faw/g5fav".into(),
+                base: "HEAD".into(),
+            },
+            session: Some(SessionHandle {
+                account: AccountId("main".into()),
+                id: "0f0f".into(),
+                preassigned: true,
+            }),
+            state: NodeState::Succeeded,
+            created_at: time::OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap(),
+            started_at: Some(time::OffsetDateTime::from_unix_timestamp(1_700_000_010).unwrap()),
+            ended_at: Some(time::OffsetDateTime::from_unix_timestamp(1_700_000_070).unwrap()),
+            usage: Usage {
+                input_tokens: 100,
+                cached_input_tokens: 40,
+                cache_write_tokens: 10,
+                output_tokens: 20,
+                reasoning_tokens: 5,
+            },
+            cost: Some(Cost {
+                usd: 0.25,
+                basis: CostBasis::Estimated,
+            }),
+            exit: Some(ExitInfo {
+                code: Some(0),
+                signal: None,
+                duration_ms: 60_000,
+            }),
+            files: vec![FileChange {
+                path: "src/lib.rs".into(),
+                kind: ChangeKind::Modify,
+                added: 12,
+                removed: 3,
+                source: EvidenceSource::Git,
+            }],
+            work: Some(WorkResultRef {
+                head: "deadbeef".into(),
+                branch: "swamp/g5faw/g5fav".into(),
+                patch: "nodes/g5fav/patch.diff".into(),
+                insertions: 12,
+                deletions: 3,
+                empty: false,
+            }),
+            summary: Some("done".into()),
+            stream_offset: 4096,
+            unparsed_lines: 1,
+        }
+    }
+
+    #[test]
+    fn duration_spans_start_to_end() {
+        let n = sample();
+        assert_eq!(n.duration(), Some(std::time::Duration::from_secs(60)));
+    }
+
+    #[test]
+    fn duration_is_none_until_the_node_ends() {
+        let mut n = sample();
+        n.ended_at = None;
+        assert_eq!(n.duration(), None);
+        n.started_at = None;
+        assert_eq!(n.duration(), None);
+    }
+
+    #[test]
+    fn duration_is_none_when_the_clock_went_backwards() {
+        let mut n = sample();
+        n.ended_at = Some(time::OffsetDateTime::from_unix_timestamp(1_699_999_000).unwrap());
+        assert_eq!(n.duration(), None);
+    }
+
+    #[test]
+    fn node_record_round_trips() {
+        let n = sample();
+        let json = serde_json::to_string(&n).unwrap();
+        assert_eq!(serde_json::from_str::<NodeRecord>(&json).unwrap(), n);
+        insta::assert_json_snapshot!(n);
+    }
 }

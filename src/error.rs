@@ -1,5 +1,3 @@
-#![allow(unused_variables)]
-
 use crate::model::core::{Provider, Tier};
 
 #[derive(Debug, thiserror::Error)]
@@ -37,6 +35,52 @@ pub enum SwampError {
 }
 
 /// Scripts branch on these. 3 vs 4 is "try again in an hour" vs "your task is broken".
+/// 5 = merge conflict, 6 = cancelled, 7 = budget exceeded: set by the cmd layer.
 pub fn exit_code(e: &anyhow::Error) -> i32 {
-    todo!("WP1")
+    match e.downcast_ref::<SwampError>() {
+        Some(SwampError::ConfigInvalid(_)) => 2,
+        Some(SwampError::NoAccountAvailable { .. }) => 3,
+        Some(SwampError::ExhaustedAttempts { .. }) => 4,
+        _ => 1,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::core::Provider;
+
+    #[test]
+    fn exit_codes_are_stable() {
+        let cases: [(SwampError, i32); 5] = [
+            (SwampError::ConfigInvalid("bad".into()), 2),
+            (
+                SwampError::NoAccountAvailable {
+                    provider: Provider::Anthropic,
+                    excluded: 1,
+                    cooling: 2,
+                },
+                3,
+            ),
+            (
+                SwampError::ExhaustedAttempts {
+                    title: "t".into(),
+                    attempts: 3,
+                },
+                4,
+            ),
+            (SwampError::DirtyTree, 1),
+            (SwampError::AlreadyRunning { pid: 7 }, 1),
+        ];
+        for (err, code) in cases {
+            assert_eq!(exit_code(&anyhow::Error::new(err)), code);
+        }
+        assert_eq!(exit_code(&anyhow::anyhow!("something else")), 1);
+    }
+
+    #[test]
+    fn a_wrapped_error_keeps_its_code() {
+        let e = anyhow::Error::new(SwampError::ConfigInvalid("bad".into())).context("loading");
+        assert_eq!(exit_code(&e), 2);
+    }
 }

@@ -1,5 +1,3 @@
-#![allow(unused_variables)]
-
 use crate::model::failure::Failure;
 use camino::Utf8PathBuf;
 use serde::{Deserialize, Serialize};
@@ -45,29 +43,57 @@ pub enum Tier {
     High,
 }
 
+impl Provider {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Anthropic => "anthropic",
+            Self::Openai => "openai",
+        }
+    }
+}
+
 impl std::fmt::Display for Provider {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        todo!("WP1")
+        f.write_str(self.as_str())
     }
 }
 
 impl std::str::FromStr for Provider {
     type Err = anyhow::Error;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        todo!("WP1")
+        match s.trim().to_ascii_lowercase().as_str() {
+            "anthropic" => Ok(Self::Anthropic),
+            "openai" => Ok(Self::Openai),
+            other => anyhow::bail!("unknown provider `{other}`, expected anthropic or openai"),
+        }
+    }
+}
+
+impl Tier {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Mid => "mid",
+            Self::High => "high",
+        }
     }
 }
 
 impl std::fmt::Display for Tier {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        todo!("WP1")
+        f.write_str(self.as_str())
     }
 }
 
 impl std::str::FromStr for Tier {
     type Err = anyhow::Error;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        todo!("WP1")
+        match s.trim().to_ascii_lowercase().as_str() {
+            "low" => Ok(Self::Low),
+            "mid" => Ok(Self::Mid),
+            "high" => Ok(Self::High),
+            other => anyhow::bail!("unknown tier `{other}`, expected low, mid or high"),
+        }
     }
 }
 
@@ -313,4 +339,165 @@ pub struct FinalSummary {
     /// writes a confident summary of work it never did. Non-empty is a failure signal.
     #[serde(default)]
     pub permission_denials: u32,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use proptest::prelude::*;
+    use std::str::FromStr;
+
+    fn usage(v: [u64; 5]) -> Usage {
+        Usage {
+            input_tokens: v[0],
+            cached_input_tokens: v[1],
+            cache_write_tokens: v[2],
+            output_tokens: v[3],
+            reasoning_tokens: v[4],
+        }
+    }
+
+    fn absorbed(a: &Usage, b: &Usage) -> Usage {
+        let mut out = *a;
+        out.absorb(b);
+        out
+    }
+
+    proptest! {
+        #[test]
+        fn absorb_is_commutative(a in any::<[u32; 5]>(), b in any::<[u32; 5]>()) {
+            let (a, b) = (usage(a.map(u64::from)), usage(b.map(u64::from)));
+            prop_assert_eq!(absorbed(&a, &b), absorbed(&b, &a));
+        }
+
+        #[test]
+        fn absorb_is_associative(
+            a in any::<[u32; 5]>(), b in any::<[u32; 5]>(), c in any::<[u32; 5]>()
+        ) {
+            let (a, b, c) = (usage(a.map(u64::from)), usage(b.map(u64::from)), usage(c.map(u64::from)));
+            prop_assert_eq!(
+                absorbed(&absorbed(&a, &b), &c),
+                absorbed(&a, &absorbed(&b, &c))
+            );
+        }
+    }
+
+    #[test]
+    fn billable_excludes_cached_and_reasoning() {
+        assert_eq!(usage([10, 5, 3, 7, 11]).billable(), 20);
+    }
+
+    #[test]
+    fn worst_utilization_keeps_the_near_exhausted_window() {
+        let snap = RateLimitSnapshot {
+            status: LimitStatus::Allowed,
+            windows: vec![
+                LimitWindow {
+                    scope: LimitScope::FiveHour,
+                    utilization: 0.06,
+                    resets_at: None,
+                },
+                LimitWindow {
+                    scope: LimitScope::SevenDay,
+                    utilization: 0.64,
+                    resets_at: None,
+                },
+            ],
+            resets_at: None,
+        };
+        assert_eq!(snap.worst_utilization(), 0.64);
+        assert_eq!(snap.worst_scope(), LimitScope::SevenDay);
+    }
+
+    #[test]
+    fn empty_snapshot_has_no_worst_scope() {
+        let snap = RateLimitSnapshot {
+            status: LimitStatus::Allowed,
+            windows: vec![],
+            resets_at: None,
+        };
+        assert_eq!(snap.worst_utilization(), 0.0);
+        assert_eq!(snap.worst_scope(), LimitScope::Unknown);
+    }
+
+    #[test]
+    fn soonest_reset_prefers_the_earliest_window() {
+        let early = time::OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
+        let late = time::OffsetDateTime::from_unix_timestamp(1_700_003_600).unwrap();
+        let snap = RateLimitSnapshot {
+            status: LimitStatus::Warning,
+            windows: vec![
+                LimitWindow {
+                    scope: LimitScope::SevenDay,
+                    utilization: 0.5,
+                    resets_at: Some(late),
+                },
+                LimitWindow {
+                    scope: LimitScope::FiveHour,
+                    utilization: 0.1,
+                    resets_at: Some(early),
+                },
+            ],
+            resets_at: Some(late),
+        };
+        assert_eq!(snap.soonest_reset(), Some(early));
+    }
+
+    #[test]
+    fn tier_is_ordered_by_capability() {
+        assert!(Tier::High > Tier::Low);
+        assert!(Tier::Mid > Tier::Low);
+    }
+
+    #[test]
+    fn provider_and_tier_round_trip_through_strings() {
+        for p in [Provider::Anthropic, Provider::Openai] {
+            assert_eq!(Provider::from_str(&p.to_string()).unwrap(), p);
+            assert_eq!(
+                serde_json::to_string(&p).unwrap(),
+                format!("\"{}\"", p.as_str())
+            );
+        }
+        for t in [Tier::Low, Tier::Mid, Tier::High] {
+            assert_eq!(Tier::from_str(&t.to_string()).unwrap(), t);
+            assert_eq!(Tier::from_str(&t.as_str().to_ascii_uppercase()).unwrap(), t);
+        }
+        assert!(Provider::from_str("mistral").is_err());
+        assert!(Tier::from_str("medium").is_err());
+    }
+
+    #[test]
+    fn workspace_ref_exposes_its_path() {
+        let w = WorkspaceRef::Worktree {
+            path: "/tmp/wt".into(),
+            branch: "swamp/a/b".into(),
+            base: "HEAD".into(),
+        };
+        assert_eq!(w.path(), "/tmp/wt");
+        assert_eq!(WorkspaceRef::Shared { path: "/r".into() }.path(), "/r");
+        assert_eq!(WorkspaceRef::ReadOnly { path: "/r".into() }.path(), "/r");
+    }
+
+    #[test]
+    fn node_state_terminality() {
+        let terminal = [
+            NodeState::Succeeded,
+            NodeState::Failed {
+                failure: Failure::Timeout { after_s: 1 },
+            },
+            NodeState::Cancelled {
+                by: CancelSource::User,
+            },
+        ];
+        for s in terminal {
+            assert!(s.is_terminal(), "{s:?}");
+        }
+        assert!(!NodeState::Queued.is_terminal());
+        assert!(
+            !NodeState::Leased {
+                account: AccountId("main".into())
+            }
+            .is_terminal()
+        );
+    }
 }

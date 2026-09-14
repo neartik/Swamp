@@ -1,0 +1,78 @@
+---
+source: src/model/node.rs
+expression: n
+---
+{
+  "id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+  "run_id": "01ARZ3NDEKTSV4RRFFQ69G5FAW",
+  "parent": null,
+  "logical": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+  "attempt": 2,
+  "retry_of": "01ARZ3NDEKTSV4RRFFQ69G5FAX",
+  "kind": "worker",
+  "title": "port the parser",
+  "prompt_path": "nodes/g5fav/prompt.md",
+  "prompt_sha256": "abc123",
+  "provider": "anthropic",
+  "account": "main",
+  "exec": "claude-main",
+  "argv": [
+    "-p",
+    "--output-format"
+  ],
+  "model": "model-a",
+  "tier": "mid",
+  "workspace": {
+    "kind": "worktree",
+    "path": "/tmp/wt",
+    "branch": "swamp/g5faw/g5fav",
+    "base": "HEAD"
+  },
+  "session": {
+    "account": "main",
+    "id": "0f0f",
+    "preassigned": true
+  },
+  "state": {
+    "state": "succeeded"
+  },
+  "created_at": "2023-11-14T22:13:20Z",
+  "started_at": "2023-11-14T22:13:30Z",
+  "ended_at": "2023-11-14T22:14:30Z",
+  "usage": {
+    "input_tokens": 100,
+    "cached_input_tokens": 40,
+    "cache_write_tokens": 10,
+    "output_tokens": 20,
+    "reasoning_tokens": 5
+  },
+  "cost": {
+    "usd": 0.25,
+    "basis": "estimated"
+  },
+  "exit": {
+    "code": 0,
+    "signal": null,
+    "duration_ms": 60000
+  },
+  "files": [
+    {
+      "path": "src/lib.rs",
+      "kind": "modify",
+      "added": 12,
+      "removed": 3,
+      "source": "git"
+    }
+  ],
+  "work": {
+    "head": "deadbeef",
+    "branch": "swamp/g5faw/g5fav",
+    "patch": "nodes/g5fav/patch.diff",
+    "insertions": 12,
+    "deletions": 3,
+    "empty": false
+  },
+  "summary": "done",
+  "stream_offset": 4096,
+  "unparsed_lines": 1
+}

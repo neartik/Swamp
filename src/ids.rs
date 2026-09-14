@@ -46,3 +46,31 @@ pub struct NodeIds {
     pub id: NodeId,
     pub session_uuid: uuid::Uuid,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::str::FromStr;
+
+    #[test]
+    fn ids_render_with_a_prefix_and_parse_back() {
+        let run = RunId::from_str("01ARZ3NDEKTSV4RRFFQ69G5FAV").unwrap();
+        assert_eq!(run.to_string(), "run_01ARZ3NDEKTSV4RRFFQ69G5FAV");
+        assert_eq!(RunId::from_str(&run.to_string()).unwrap(), run);
+        assert_eq!(run.short(), "9g5fav");
+
+        let node = NodeId::from_str("nd_01ARZ3NDEKTSV4RRFFQ69G5FAV").unwrap();
+        assert_eq!(node.short(), "9g5fav");
+        assert!(NodeId::from_str("not-a-ulid").is_err());
+    }
+
+    #[test]
+    fn ids_are_time_sortable_and_serialize_transparently() {
+        let first = RunId::from_str("01ARZ3NDEKTSV4RRFFQ69G5FAV").unwrap();
+        let later = RunId::from_str("01ARZ3NDEMTSV4RRFFQ69G5FAV").unwrap();
+        assert!(first < later, "ulids sort by their timestamp prefix");
+        let json = serde_json::to_string(&first).unwrap();
+        assert!(json.starts_with('"'), "{json}");
+        assert_eq!(serde_json::from_str::<RunId>(&json).unwrap(), first);
+    }
+}

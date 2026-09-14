@@ -1,5 +1,3 @@
-#![allow(unused_variables)]
-
 pub mod load;
 pub mod resolve;
 pub mod schema;
@@ -11,10 +9,13 @@ pub use schema::{
 };
 
 use crate::error::SwampError;
-use crate::model::core::{AccountId, Cost, Provider, Tier, Usage};
+use crate::model::core::{AccountId, Cost, CostBasis, Provider, Tier, Usage};
 use camino::{Utf8Path, Utf8PathBuf};
 use std::collections::BTreeMap;
 use std::time::Duration;
+
+/// Used only if every layer somehow lost `limits.worker_timeout`.
+const FALLBACK_NODE_TIMEOUT: Duration = Duration::from_secs(25 * 60);
 
 /// The merged, validated configuration. Fields mirror `schema.rs`.
 #[derive(Debug, Clone)]
@@ -47,13 +48,52 @@ impl Config {
         explicit: Option<&Utf8Path>,
         profile: Option<&str>,
     ) -> Result<Config, SwampError> {
-        todo!("WP1")
+        let mut layers = vec![load::default_layer()];
+        let mut sources = Vec::new();
+
+        let file_layer = |path: Utf8PathBuf,
+                          layers: &mut Vec<load::Layer>,
+                          sources: &mut Vec<Utf8PathBuf>|
+         -> Result<(), SwampError> {
+            layers.push(load::read_layer(&path)?);
+            sources.push(path);
+            Ok(())
+        };
+
+        if let Some(user) = load::user_config_path()
+            && user.is_file()
+        {
+            file_layer(user, &mut layers, &mut sources)?;
+        }
+        let repo_cfg = load::repo_config_path(repo);
+        if repo_cfg.is_file() {
+            file_layer(repo_cfg, &mut layers, &mut sources)?;
+        }
+        layers.push(load::env_layer()?);
+        if let Some(explicit) = explicit {
+            file_layer(explicit.to_owned(), &mut layers, &mut sources)?;
+        }
+
+        let mut schema = load::merge(layers);
+        if let Some(profile) = profile {
+            load::apply_profile(&mut schema, profile)?;
+        }
+
+        let mut cfg = resolve::from_schema(schema);
+        cfg.sources = sources;
+        validate::validate(&mut cfg)?;
+        Ok(cfg)
     }
+
+    /// The merged config as TOML. `swamp config show --effective` annotates it with origins.
     pub fn effective_toml(&self) -> String {
-        todo!("WP1")
+        toml::to_string_pretty(&self.to_schema()).unwrap_or_default()
     }
+
     pub fn sha256(&self) -> String {
-        todo!("WP1")
+        use sha2::{Digest, Sha256};
+        let digest = Sha256::digest(self.effective_toml().as_bytes());
+        digest.iter().map(|b| format!("{b:02x}")).collect()
     }
 
     pub fn model_for(
@@ -62,32 +102,117 @@ impl Config {
         t: Tier,
         account: Option<&AccountId>,
     ) -> Result<String, SwampError> {
-        todo!("WP1")
+        if let Some(a) = account.and_then(|a| self.account(a))
+            && let Some(m) = a.models.get(&t)
+        {
+            return Ok(m.clone());
+        }
+        self.providers
+            .get(&p)
+            .and_then(|pc| pc.models.get(&t))
+            .cloned()
+            .ok_or(SwampError::TierUnmapped {
+                provider: p,
+                tier: t,
+            })
     }
+
     pub fn tier_extra(&self, p: Provider, t: Tier) -> BTreeMap<String, String> {
-        todo!("WP1")
+        self.providers
+            .get(&p)
+            .and_then(|pc| pc.tier_extra.get(&t))
+            .cloned()
+            .unwrap_or_default()
     }
+
     pub fn account(&self, id: &AccountId) -> Option<&AccountCfg> {
-        todo!("WP1")
+        self.accounts.iter().find(|a| &a.id == id)
     }
+
     pub fn accounts_for(&self, p: Provider) -> Vec<&AccountCfg> {
-        todo!("WP1")
+        self.accounts.iter().filter(|a| a.provider == p).collect()
     }
+
+    /// An explicit `tiers.<t>.provider_order` is taken verbatim: a tier that lists one provider
+    /// is opting out of the others.
     pub fn provider_order(&self, t: Tier) -> Vec<Provider> {
-        todo!("WP1")
+        if let Some(order) = self.tiers.get(&t).map(|tc| &tc.provider_order)
+            && !order.is_empty()
+        {
+            return order.clone();
+        }
+        let mut order: Vec<Provider> = self.dispatch.default_provider.into_iter().collect();
+        for p in self.providers.keys() {
+            if !order.contains(p) {
+                order.push(*p);
+            }
+        }
+        order
     }
+
     pub fn failure_patterns(&self, p: Provider) -> Result<FailurePatterns, SwampError> {
-        todo!("WP1")
+        let empty = FailureCfg::default();
+        let cfg = self.failure.get(&p).unwrap_or(&empty);
+        let compile = |field: &str, pats: &[String]| -> Result<regex::RegexSet, SwampError> {
+            regex::RegexSet::new(pats)
+                .map_err(|e| SwampError::ConfigInvalid(format!("  failure.{p}.{field}: {e}")))
+        };
+        Ok(FailurePatterns {
+            rate_limit: compile("rate_limit", &cfg.rate_limit)?,
+            auth: compile("auth", &cfg.auth)?,
+            overloaded: compile("overloaded", &cfg.overloaded)?,
+            sources: BTreeMap::from([
+                ("rate_limit".to_owned(), cfg.rate_limit.clone()),
+                ("auth".to_owned(), cfg.auth.clone()),
+                ("overloaded".to_owned(), cfg.overloaded.clone()),
+            ]),
+        })
     }
+
     pub fn node_budget_usd(&self, t: Tier) -> Option<f64> {
-        todo!("WP1")
+        self.tiers
+            .get(&t)
+            .and_then(|tc| tc.node_budget_usd)
+            .or(self.limits.node_budget_usd)
     }
+
     pub fn node_timeout(&self, t: Tier) -> Duration {
-        todo!("WP1")
+        self.tiers
+            .get(&t)
+            .and_then(|tc| tc.timeout)
+            .or(self.limits.worker_timeout)
+            .unwrap_or(FALLBACK_NODE_TIMEOUT)
     }
+
     /// basis = Estimated. `None` when no `[pricing]` row exists, never `Some(0.0)`.
     pub fn estimate_cost(&self, model: &str, u: &Usage) -> Option<Cost> {
-        todo!("WP1")
+        let row = self.pricing.get(model)?;
+        let per_million = u.input_tokens as f64 * row.input
+            + u.cached_input_tokens as f64 * row.cached_input
+            + u.output_tokens as f64 * row.output;
+        Some(Cost {
+            usd: per_million / 1_000_000.0,
+            basis: CostBasis::Estimated,
+        })
+    }
+
+    fn to_schema(&self) -> Schema {
+        Schema {
+            version: self.version,
+            limits: self.limits.clone(),
+            brain: self.brain.clone(),
+            dispatch: self.dispatch.clone(),
+            cooldown: self.cooldown.clone(),
+            workspace: self.workspace.clone(),
+            journal: self.journal.clone(),
+            providers: self.providers.clone(),
+            accounts: self.accounts.clone(),
+            tiers: self.tiers.clone(),
+            failure: self.failure.clone(),
+            pricing: self.pricing.clone(),
+            ui: self.ui.clone(),
+            profiles: self.profiles.clone(),
+        }
     }
 }
 
@@ -103,12 +228,20 @@ pub struct FailurePatterns {
 
 impl FailurePatterns {
     pub fn rate_limit_match<'a>(&self, s: &'a str) -> Option<&'a str> {
-        todo!("WP1")
+        matching_line(&self.rate_limit, s)
     }
     pub fn auth_match<'a>(&self, s: &'a str) -> Option<&'a str> {
-        todo!("WP1")
+        matching_line(&self.auth, s)
     }
     pub fn overloaded_match<'a>(&self, s: &'a str) -> Option<&'a str> {
-        todo!("WP1")
+        matching_line(&self.overloaded, s)
     }
+}
+
+/// The evidence a classification is built on: the narrowest slice of `s` that still matches.
+fn matching_line<'a>(set: &regex::RegexSet, s: &'a str) -> Option<&'a str> {
+    if set.is_empty() || !set.is_match(s) {
+        return None;
+    }
+    Some(s.lines().find(|l| set.is_match(l)).unwrap_or(s))
 }

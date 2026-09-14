@@ -1,0 +1,52 @@
+---
+source: src/model/failure.rs
+expression: all
+---
+[
+  {
+    "kind": "rate_limited",
+    "resets_at": "2023-11-14T22:13:20Z",
+    "scope": "five_hour",
+    "detected_by": "telemetry",
+    "evidence": "usage limit reached"
+  },
+  {
+    "kind": "auth_expired",
+    "detail": "token expired",
+    "detected_by": "pattern"
+  },
+  {
+    "kind": "overloaded",
+    "detail": "529"
+  },
+  {
+    "kind": "budget_exceeded",
+    "limit_usd": 3.0,
+    "spent_usd": 3.5
+  },
+  {
+    "kind": "timeout",
+    "after_s": 1500
+  },
+  {
+    "kind": "worker_error",
+    "subtype": "error_during_execution",
+    "detail": "build failed"
+  },
+  {
+    "kind": "permission_denied",
+    "denials": 4
+  },
+  {
+    "kind": "crashed",
+    "signal": 9
+  },
+  {
+    "kind": "truncated",
+    "offset": 8192
+  },
+  {
+    "kind": "no_capacity",
+    "detail": "all cooling"
+  }
+]
