@@ -10,7 +10,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use swamp::config::FailurePatterns;
-use swamp::ids::{NodeId, NodeIds};
+use swamp::ids::{NodeId, NodeIds, RunId};
+use swamp::journal::paths::RunPaths;
 use swamp::journal::raw::{RawSink, Redactor};
 use swamp::model::core::{NodeKind, Provider, Tier};
 use swamp::model::event::WorkerEvent;
@@ -60,15 +61,20 @@ fn node(script: &str) -> Node {
     Node { _tmp: tmp, dir, io }
 }
 
-/// WP2 owns `RawSink::open`; these tests feed the follower lines that always parse, so the
-/// noise sink is never reached.
-fn sink(node: NodeId) -> RawSink {
-    RawSink {
-        node,
-        redact: Arc::new(Redactor {
-            set: RegexSet::empty(),
-        }),
-    }
+/// These tests feed the follower lines that always parse, so the noise sink is never reached.
+async fn sink(io: &NodeIo) -> RawSink {
+    let dir = io.stdout.parent().expect("node dir").to_owned();
+    let paths = RunPaths {
+        run: RunId::new(),
+        dir,
+    };
+    RawSink::open(
+        &paths,
+        io.node,
+        Arc::new(Redactor::new(&[]).expect("redactor")),
+    )
+    .await
+    .expect("raw sink")
 }
 
 fn patterns() -> FailurePatterns {
@@ -135,7 +141,7 @@ async fn follow_to_exit(
         out
     });
     let mut st = ParseState::default();
-    let mut sink = sink(io.node);
+    let mut sink = sink(io).await;
     let offset = follow(
         io.node,
         &io.stdout,
@@ -307,7 +313,7 @@ async fn a_worker_that_never_exits_is_timed_out_and_its_group_is_gone() {
     ));
     let s = spec(&n);
     let p = patterns();
-    let mut sink = sink(n.io.node);
+    let mut sink = sink(&n.io).await;
     let outcome = execute(ExecReq {
         adapter: adapter_for(Provider::Anthropic),
         spec: &s,

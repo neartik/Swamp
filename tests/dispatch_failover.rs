@@ -9,6 +9,7 @@ use swamp::config::{Config, load, resolve, validate};
 use swamp::dispatch::{AccountPool, Dispatcher, Health, NodeCtx, NodeRunner, run_node};
 use swamp::journal::JournalHandle;
 use swamp::journal::paths::{Paths, RunPaths};
+use swamp::journal::writer::{FsyncPolicy, Writer};
 use swamp::model::core::{
     AccountId, LimitScope, NodeKind, Provider, SessionHandle, Tier, WorkspaceRef,
 };
@@ -227,19 +228,25 @@ struct Fixture {
     pool: Arc<AccountPool>,
 }
 
-fn fixture(extra: &str) -> Fixture {
+async fn fixture(extra: &str) -> Fixture {
     let dir = tempfile::tempdir().expect("tempdir");
     let root = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).expect("utf8 tempdir");
     let cfg = config(extra);
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     let run = RunId::new();
+    let paths = RunPaths {
+        run,
+        dir: root.join("run"),
+    };
+    std::fs::create_dir_all(&paths.dir).expect("run dir");
+    let writer = Writer::open(&paths.journal(), FsyncPolicy::Never)
+        .await
+        .expect("journal writer");
     let journal = JournalHandle {
         run,
         tx,
-        paths: Arc::new(RunPaths {
-            run,
-            dir: root.join("run"),
-        }),
+        paths: Arc::new(paths),
+        writer: Arc::new(tokio::sync::Mutex::new(writer)),
     };
     let pool = AccountPool::new(
         Arc::clone(&cfg),
@@ -274,23 +281,25 @@ impl Fixture {
         }
     }
 
-    fn dispatcher(&self, runner: Arc<dyn NodeRunner>) -> Arc<Dispatcher> {
+    async fn dispatcher(&self, runner: Arc<dyn NodeRunner>) -> Arc<Dispatcher> {
         let exec = Arc::new(swamp::worker::Executor {
             journal: self.journal.clone(),
             cfg: Arc::clone(&self.cfg),
         });
-        let ws = Arc::new(WorkspaceManager {
-            git: Git {
+        let ws = WorkspaceManager::new(
+            Git {
                 root: self.root.clone(),
             },
-            paths: Arc::new(Paths {
+            Arc::new(Paths {
                 repo: self.root.clone(),
                 dot_swamp: self.root.join(".swamp"),
                 home_swamp: self.root.join("home"),
             }),
-            cfg: Arc::clone(&self.cfg),
-            journal: self.journal.clone(),
-        });
+            Arc::clone(&self.cfg),
+            self.journal.clone(),
+        )
+        .await
+        .expect("workspace manager");
         Dispatcher::with_runner(
             Arc::clone(&self.cfg),
             Arc::clone(&self.pool),
@@ -354,7 +363,7 @@ fn health_of(pool: &Arc<AccountPool>, who: &AccountId) -> Health {
 
 #[tokio::test]
 async fn a_rate_limit_fails_over_to_the_next_account() {
-    let f = fixture(TWO_ACCOUNTS);
+    let f = fixture(TWO_ACCOUNTS).await;
     let runner = Scripted::new(&f.root, vec![failed(rate_limited()), success()]);
     let cx = f.ctx(runner.clone(), Duration::from_secs(30));
     let out = run_node(&cx, spec(), &task("port the parser")).await;
@@ -383,7 +392,7 @@ async fn a_rate_limit_fails_over_to_the_next_account() {
 
 #[tokio::test]
 async fn a_task_failure_never_burns_a_second_subscription() {
-    let f = fixture(TWO_ACCOUNTS);
+    let f = fixture(TWO_ACCOUNTS).await;
     let runner = Scripted::new(
         &f.root,
         vec![failed(Failure::WorkerError {
@@ -421,7 +430,7 @@ async fn a_task_failure_never_burns_a_second_subscription() {
 
 #[tokio::test(start_paused = true)]
 async fn an_overload_retries_the_same_account_and_resumes_its_session() {
-    let f = fixture(TWO_ACCOUNTS);
+    let f = fixture(TWO_ACCOUNTS).await;
     let runner = Scripted::new(
         &f.root,
         vec![
@@ -457,7 +466,7 @@ async fn an_overload_retries_the_same_account_and_resumes_its_session() {
 
 #[tokio::test]
 async fn a_session_handle_never_crosses_accounts() {
-    let f = fixture(TWO_ACCOUNTS);
+    let f = fixture(TWO_ACCOUNTS).await;
     // The handle is minted on the first account, which is then rate limited away.
     let runner = Scripted::new(
         &f.root,
@@ -487,7 +496,7 @@ async fn a_session_handle_never_crosses_accounts() {
 
 #[tokio::test]
 async fn every_attempt_runs_in_a_fresh_worktree() {
-    let f = fixture(TWO_ACCOUNTS);
+    let f = fixture(TWO_ACCOUNTS).await;
     let runner = Scripted::new(&f.root, vec![failed(rate_limited()), success()]);
     let cx = f.ctx(runner.clone(), Duration::from_secs(30));
     let out = run_node(&cx, spec(), &task("two trees")).await;
@@ -511,7 +520,7 @@ async fn every_attempt_runs_in_a_fresh_worktree() {
 
 #[tokio::test]
 async fn the_prompt_is_written_once_per_attempt_and_hashed() {
-    let f = fixture(TWO_ACCOUNTS);
+    let f = fixture(TWO_ACCOUNTS).await;
     let runner = Scripted::new(&f.root, vec![failed(rate_limited()), success()]);
     let cx = f.ctx(runner.clone(), Duration::from_secs(30));
     let out = run_node(&cx, spec(), &task("hash me")).await;
@@ -527,7 +536,7 @@ async fn the_prompt_is_written_once_per_attempt_and_hashed() {
 
 #[tokio::test]
 async fn every_account_cooling_gives_up_with_no_account_available() {
-    let f = fixture(TWO_ACCOUNTS);
+    let f = fixture(TWO_ACCOUNTS).await;
     for who in ["main", "alt"] {
         f.pool
             .report(&AccountId(who.into()), Some(&rate_limited()), None);
@@ -552,7 +561,7 @@ async fn every_account_cooling_gives_up_with_no_account_available() {
 
 #[tokio::test(start_paused = true)]
 async fn attempts_are_capped_by_max_attempts() {
-    let f = fixture(&format!("{TWO_ACCOUNTS}\n[limits]\nmax_parallel = 8\n"));
+    let f = fixture(&format!("{TWO_ACCOUNTS}\n[limits]\nmax_parallel = 8\n")).await;
     let runner = Scripted::new(
         &f.root,
         vec![
@@ -574,9 +583,9 @@ async fn attempts_are_capped_by_max_attempts() {
 
 #[tokio::test]
 async fn the_dispatcher_rejects_dependent_tasks() {
-    let f = fixture(TWO_ACCOUNTS);
+    let f = fixture(TWO_ACCOUNTS).await;
     let runner = Scripted::new(&f.root, vec![]);
-    let disp = f.dispatcher(runner.clone());
+    let disp = f.dispatcher(runner.clone()).await;
     let mut t = task("second step");
     t.deps = vec![NodeId::new()];
 
@@ -593,9 +602,9 @@ async fn the_dispatcher_rejects_dependent_tasks() {
 
 #[tokio::test]
 async fn the_dispatcher_enforces_max_depth() {
-    let f = fixture(&format!("{TWO_ACCOUNTS}\n[limits]\nmax_depth = 0\n"));
+    let f = fixture(&format!("{TWO_ACCOUNTS}\n[limits]\nmax_depth = 0\n")).await;
     let runner = Scripted::new(&f.root, vec![]);
-    let disp = f.dispatcher(runner.clone());
+    let disp = f.dispatcher(runner.clone()).await;
     let result = disp.dispatch_one(NodeId::new(), task("too deep")).await;
     assert!(!result.ok);
     assert!(runner.calls().is_empty(), "a capped node is never spawned");
@@ -610,9 +619,10 @@ async fn the_dispatcher_enforces_max_depth() {
 async fn the_dispatcher_enforces_max_nodes_per_run() {
     let f = fixture(&format!(
         "{TWO_ACCOUNTS}\n[limits]\nmax_nodes_per_run = 1\n"
-    ));
+    ))
+    .await;
     let runner = Scripted::new(&f.root, vec![]);
-    let disp = f.dispatcher(runner.clone());
+    let disp = f.dispatcher(runner.clone()).await;
     let parent = NodeId::new();
     assert!(disp.dispatch_one(parent, task("first")).await.ok);
     let second = disp.dispatch_one(parent, task("second")).await;
@@ -627,9 +637,9 @@ async fn the_dispatcher_enforces_max_nodes_per_run() {
 
 #[tokio::test]
 async fn a_batch_returns_within_max_wait_with_running_nodes() {
-    let f = fixture(TWO_ACCOUNTS);
+    let f = fixture(TWO_ACCOUNTS).await;
     let runner = Scripted::slow(&f.root, Duration::from_secs(30));
-    let disp = f.dispatcher(runner.clone());
+    let disp = f.dispatcher(runner.clone()).await;
     let started = std::time::Instant::now();
     let results = disp
         .dispatch_batch(
@@ -653,9 +663,9 @@ async fn a_batch_returns_within_max_wait_with_running_nodes() {
 
 #[tokio::test]
 async fn a_completed_batch_carries_the_worker_result() {
-    let f = fixture(TWO_ACCOUNTS);
+    let f = fixture(TWO_ACCOUNTS).await;
     let runner = Scripted::new(&f.root, vec![success(), success()]);
-    let disp = f.dispatcher(runner.clone());
+    let disp = f.dispatcher(runner.clone()).await;
     let results = disp
         .dispatch_batch(
             NodeId::new(),
@@ -682,7 +692,7 @@ async fn cross_provider_failover_is_opt_in() {
          [[accounts]]\nid = \"codex\"\nprovider = \"openai\"\nexec = \"codex-main\"\n"
     );
     for (cross, want) in [(false, None), (true, Some(Provider::Openai))] {
-        let f = fixture(&toml);
+        let f = fixture(&toml).await;
         for who in ["main", "alt"] {
             f.pool
                 .report(&AccountId(who.into()), Some(&rate_limited()), None);
@@ -716,9 +726,10 @@ async fn cross_provider_failover_is_opt_in() {
 async fn max_parallel_dispatch_serializes_a_batch() {
     let f = fixture(&format!(
         "{TWO_ACCOUNTS}\n[limits]\nmax_parallel_dispatch = 1\n"
-    ));
+    ))
+    .await;
     let runner = Scripted::slow(&f.root, Duration::from_secs(30));
-    let disp = f.dispatcher(runner.clone());
+    let disp = f.dispatcher(runner.clone()).await;
     let results = disp
         .dispatch_batch(
             NodeId::new(),
@@ -733,7 +744,7 @@ async fn max_parallel_dispatch_serializes_a_batch() {
 
 #[tokio::test]
 async fn cancelling_an_unknown_node_is_an_error() {
-    let f = fixture(TWO_ACCOUNTS);
-    let disp = f.dispatcher(Scripted::new(&f.root, vec![]));
+    let f = fixture(TWO_ACCOUNTS).await;
+    let disp = f.dispatcher(Scripted::new(&f.root, vec![])).await;
     assert!(disp.cancel(NodeId::new()).await.is_err());
 }

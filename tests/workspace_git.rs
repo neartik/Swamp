@@ -12,6 +12,7 @@ use swamp::ids::{NodeId, RunId};
 use swamp::journal::JournalHandle;
 use swamp::journal::paths::{Paths, RunPaths};
 use swamp::journal::record::JournalEvent;
+use swamp::journal::writer::{FsyncPolicy, Writer};
 use swamp::model::core::{ChangeKind, EvidenceSource, Tier};
 use swamp::workspace::adopt::{AdoptResult, MergeStrategy, adopt};
 use swamp::workspace::{Git, NodeWorktree, WorkspaceManager};
@@ -91,10 +92,15 @@ async fn manager(repo: &Utf8Path, home: &Utf8Path, cfg: Config) -> (Arc<Workspac
     let run = RunId::new();
     let dir = home.join("runs").join(run.to_string());
     std::fs::create_dir_all(&dir).expect("run dir");
+    let paths_run = RunPaths { run, dir };
+    let writer = Writer::open(&paths_run.journal(), FsyncPolicy::Never)
+        .await
+        .expect("journal writer");
     let journal = JournalHandle {
         run,
         tx,
-        paths: Arc::new(RunPaths { run, dir }),
+        paths: Arc::new(paths_run),
+        writer: Arc::new(tokio::sync::Mutex::new(writer)),
     };
     let paths = Paths {
         repo: repo.to_owned(),

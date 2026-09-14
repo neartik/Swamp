@@ -456,9 +456,8 @@ fn write_prompt(dir: &Utf8PathBuf, prompt: &str) -> anyhow::Result<(Utf8PathBuf,
     Ok((path, sha))
 }
 
-/// WP2 owns the canonical layout; this mirrors DESIGN 7.1 until `RunPaths` lands.
 fn node_dir(cx: &NodeCtx, node: NodeId) -> Utf8PathBuf {
-    cx.journal.paths.dir.join("nodes").join(node.0.to_string())
+    cx.journal.paths.node_dir(node)
 }
 
 fn emit(cx: &NodeCtx, event: JournalEvent) {

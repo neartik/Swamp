@@ -35,9 +35,8 @@ const DEFAULT_MAX_HIGH_TIER: usize = 2;
 const DEFAULT_MAX_NODES_PER_RUN: u32 = 32;
 const DEFAULT_MAX_DEPTH: u32 = 2;
 
-/// WP2's writer task owns durability; every producer only enqueues.
 pub(crate) fn emit(h: &JournalHandle, node: Option<NodeId>, event: JournalEvent) {
-    let _ = h.tx.send((node, event));
+    h.emit(node, event);
 }
 
 /// Owns the pool and the semaphores. One per run.

@@ -305,14 +305,8 @@ impl WorkspaceManager {
             .replace("{run}", &self.journal.run.short())
     }
 
-    /// Mirrors `RunPaths::patch`, which lands with WP2.
     fn patch_path(&self, node: NodeId) -> Utf8PathBuf {
-        self.journal
-            .paths
-            .dir
-            .join("nodes")
-            .join(node.short())
-            .join("patch.diff")
+        self.journal.paths.patch(node)
     }
 
     async fn post_create(&self, path: &Utf8Path) -> anyhow::Result<()> {
@@ -400,9 +394,8 @@ impl WorkspaceManager {
         }
     }
 
-    /// `JournalHandle::emit` lands with WP2; the channel behind it is the same and never blocks.
     fn emit(&self, node: NodeId, event: JournalEvent) {
-        let _ = self.journal.tx.send((Some(node), event));
+        self.journal.emit(Some(node), event);
     }
 
     fn note(&self, node: NodeId, text: String) {

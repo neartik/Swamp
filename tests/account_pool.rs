@@ -8,6 +8,7 @@ use swamp::config::{Config, load, resolve, validate};
 use swamp::dispatch::{AccountPool, Health, NoCapacity, SelectionPolicy};
 use swamp::journal::JournalHandle;
 use swamp::journal::paths::RunPaths;
+use swamp::journal::writer::{FsyncPolicy, Writer};
 use swamp::model::core::{
     AccountId, LimitScope, LimitStatus, LimitWindow, Provider, RateLimitSnapshot,
 };
@@ -49,17 +50,22 @@ fn config(extra: &str) -> Arc<Config> {
     Arc::new(cfg)
 }
 
-fn journal(dir: &Utf8PathBuf) -> (JournalHandle, Events) {
+async fn journal(dir: &Utf8PathBuf) -> (JournalHandle, Events) {
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     let run = RunId::new();
+    let paths = RunPaths {
+        run,
+        dir: dir.clone(),
+    };
+    let writer = Writer::open(&paths.journal(), FsyncPolicy::Never)
+        .await
+        .expect("journal writer");
     (
         JournalHandle {
             run,
             tx,
-            paths: Arc::new(RunPaths {
-                run,
-                dir: dir.clone(),
-            }),
+            paths: Arc::new(paths),
+            writer: Arc::new(tokio::sync::Mutex::new(writer)),
         },
         rx,
     )
@@ -79,10 +85,10 @@ struct Harness {
     cfg: Arc<Config>,
 }
 
-fn harness(extra: &str) -> Harness {
+async fn harness(extra: &str) -> Harness {
     let (dir, root) = tmp();
     let cfg = config(extra);
-    let (handle, events) = journal(&root);
+    let (handle, events) = journal(&root).await;
     let state_path = root.join("accounts.json");
     let pool = AccountPool::new(Arc::clone(&cfg), state_path.clone(), handle).expect("pool");
     Harness {
@@ -146,7 +152,8 @@ fn least_loaded_is_the_v1_default_policy() {
 async fn round_robin_alternates_between_equal_accounts() {
     let h = harness(&format!(
         "{TWO_ACCOUNTS}\n[dispatch]\npolicy = \"round-robin\"\n"
-    ));
+    ))
+    .await;
     let first = acquire(&h.pool).await.expect("first lease").account.clone();
     let second = acquire(&h.pool)
         .await
@@ -165,7 +172,8 @@ async fn round_robin_alternates_between_equal_accounts() {
 async fn least_loaded_prefers_the_account_with_fewer_inflight() {
     let h = harness(&format!(
         "{TWO_ACCOUNTS}\n[dispatch]\npolicy = \"least-loaded\"\n"
-    ));
+    ))
+    .await;
     // Weight only breaks the tie for the first pick; load decides the second.
     let held = h
         .pool
@@ -180,7 +188,8 @@ async fn least_loaded_prefers_the_account_with_fewer_inflight() {
 async fn quota_aware_prefers_the_less_used_account_and_degrades_without_telemetry() {
     let h = harness(&format!(
         "{TWO_ACCOUNTS}\n[dispatch]\npolicy = \"quota-aware\"\n"
-    ));
+    ))
+    .await;
     h.pool.observe_quota(&id("alt"), quota(0.9));
     h.pool.observe_quota(&id("main"), quota(0.1));
     let lease = acquire(&h.pool).await.expect("lease");
@@ -191,7 +200,8 @@ async fn quota_aware_prefers_the_less_used_account_and_degrades_without_telemetr
     // still handed out rather than the pool stalling.
     let plain = harness(&format!(
         "{TWO_ACCOUNTS}\n[dispatch]\npolicy = \"quota-aware\"\n"
-    ));
+    ))
+    .await;
     assert!(acquire(&plain.pool).await.is_ok());
 }
 
@@ -211,7 +221,8 @@ provider = "anthropic"
 exec = "claude-main"
 max_concurrency = 2
 "#,
-    );
+    )
+    .await;
     let _a = acquire(&h.pool).await.expect("first");
     let _b = acquire(&h.pool).await.expect("second");
     let third = acquire(&h.pool).await;
@@ -223,14 +234,14 @@ max_concurrency = 2
 
 #[tokio::test]
 async fn the_global_semaphore_caps_total_leases_across_accounts() {
-    let h = harness(&format!("{TWO_ACCOUNTS}\n[limits]\nmax_parallel = 1\n"));
+    let h = harness(&format!("{TWO_ACCOUNTS}\n[limits]\nmax_parallel = 1\n")).await;
     let _a = acquire(&h.pool).await.expect("first");
     assert!(matches!(acquire(&h.pool).await, Err(NoCapacity::Saturated)));
 }
 
 #[tokio::test]
 async fn acquire_waits_without_spinning() {
-    let h = harness(&format!("{TWO_ACCOUNTS}\n[limits]\nmax_parallel = 1\n"));
+    let h = harness(&format!("{TWO_ACCOUNTS}\n[limits]\nmax_parallel = 1\n")).await;
     let _a = acquire(&h.pool).await.expect("first");
     let before = h.pool.wakeups();
     let denied = h
@@ -251,7 +262,7 @@ async fn acquire_waits_without_spinning() {
 
 #[tokio::test]
 async fn a_panicking_task_releases_its_permit_and_slot() {
-    let h = harness(&format!("{TWO_ACCOUNTS}\n[limits]\nmax_parallel = 1\n"));
+    let h = harness(&format!("{TWO_ACCOUNTS}\n[limits]\nmax_parallel = 1\n")).await;
     let pool = Arc::clone(&h.pool);
     let joined = tokio::spawn(async move {
         let _lease = acquire(&pool).await.expect("lease");
@@ -267,7 +278,7 @@ async fn a_panicking_task_releases_its_permit_and_slot() {
 
 #[tokio::test]
 async fn a_rate_limit_cools_the_account_until_the_provider_reset() {
-    let h = harness(TWO_ACCOUNTS);
+    let h = harness(TWO_ACCOUNTS).await;
     let resets_at = time::OffsetDateTime::now_utc() + Duration::from_secs(20 * 60);
     h.pool
         .report(&id("main"), Some(&rate_limited(Some(resets_at))), None);
@@ -293,7 +304,7 @@ async fn a_rate_limit_cools_the_account_until_the_provider_reset() {
 
 #[tokio::test]
 async fn a_task_failure_never_cools_an_account() {
-    let h = harness(TWO_ACCOUNTS);
+    let h = harness(TWO_ACCOUNTS).await;
     h.pool.report(
         &id("main"),
         Some(&Failure::WorkerError {
@@ -309,7 +320,8 @@ async fn a_task_failure_never_cools_an_account() {
 async fn consecutive_crashes_trip_the_circuit_breaker() {
     let h = harness(&format!(
         "{TWO_ACCOUNTS}\n[cooldown]\nbreaker_threshold = 3\n"
-    ));
+    ))
+    .await;
     for _ in 0..2 {
         h.pool.report(
             &id("main"),
@@ -330,7 +342,8 @@ async fn consecutive_crashes_trip_the_circuit_breaker() {
 async fn a_success_clears_the_breaker_count() {
     let h = harness(&format!(
         "{TWO_ACCOUNTS}\n[cooldown]\nbreaker_threshold = 2\n"
-    ));
+    ))
+    .await;
     h.pool
         .report(&id("main"), Some(&Failure::Crashed { signal: None }), None);
     h.pool.report(&id("main"), None, None);
@@ -358,7 +371,8 @@ provider = "anthropic"
 exec = "claude-main"
 max_concurrency = 2
 "#,
-    );
+    )
+    .await;
     let running = acquire(&h.pool).await.expect("lease");
     h.pool.observe_quota(&id("main"), quota(0.99));
 
@@ -373,7 +387,7 @@ max_concurrency = 2
 
 #[tokio::test]
 async fn quota_past_the_warning_threshold_only_degrades() {
-    let h = harness(TWO_ACCOUNTS);
+    let h = harness(TWO_ACCOUNTS).await;
     h.pool.observe_quota(&id("main"), quota(0.95));
     assert_eq!(health_of(&h.pool, "main"), Health::Degraded);
     assert!(acquire(&h.pool).await.is_ok());
@@ -381,7 +395,7 @@ async fn quota_past_the_warning_threshold_only_degrades() {
 
 #[tokio::test]
 async fn every_account_cooling_reports_all_cooling_with_a_retry_time() {
-    let h = harness(TWO_ACCOUNTS);
+    let h = harness(TWO_ACCOUNTS).await;
     for who in ["main", "alt"] {
         h.pool.report(&id(who), Some(&rate_limited(None)), None);
     }
@@ -396,12 +410,12 @@ async fn every_account_cooling_reports_all_cooling_with_a_retry_time() {
 
 #[tokio::test]
 async fn cooldowns_survive_a_new_pool_on_the_same_state_file() {
-    let h = harness(TWO_ACCOUNTS);
+    let h = harness(TWO_ACCOUNTS).await;
     h.pool.report(&id("main"), Some(&rate_limited(None)), None);
     drop(h.pool);
 
     let (_dir2, root2) = tmp();
-    let (handle, _events) = journal(&root2);
+    let (handle, _events) = journal(&root2).await;
     let fresh = AccountPool::new(Arc::clone(&h.cfg), h.state_path.clone(), handle).expect("pool");
     assert_eq!(health_of(&fresh, "main"), Health::Cooling);
     assert_eq!(acquire(&fresh).await.expect("lease").account, id("alt"));
@@ -409,13 +423,13 @@ async fn cooldowns_survive_a_new_pool_on_the_same_state_file() {
 
 #[tokio::test]
 async fn a_fresh_pool_does_not_inherit_stale_inflight_counts() {
-    let h = harness(TWO_ACCOUNTS);
+    let h = harness(TWO_ACCOUNTS).await;
     let lease = acquire(&h.pool).await.expect("lease");
     h.pool.report(&lease.account, None, None);
     std::mem::forget(lease);
 
     let (_dir2, root2) = tmp();
-    let (handle, _events) = journal(&root2);
+    let (handle, _events) = journal(&root2).await;
     let fresh = AccountPool::new(Arc::clone(&h.cfg), h.state_path.clone(), handle).expect("pool");
     let inflight: usize = fresh.snapshot().iter().map(|(_, _, s)| s.inflight).sum();
     assert_eq!(inflight, 0);
@@ -438,7 +452,8 @@ provider = "anthropic"
 exec = "claude-main"
 max_concurrency = 2
 "#,
-    );
+    )
+    .await;
     let reserved = h
         .pool
         .reserve_for_brain(Provider::Anthropic)
@@ -452,7 +467,7 @@ max_concurrency = 2
 
 #[tokio::test]
 async fn disable_and_clear_move_an_account_in_and_out_of_rotation() {
-    let h = harness(TWO_ACCOUNTS);
+    let h = harness(TWO_ACCOUNTS).await;
     h.pool.set_enabled(&id("main"), false);
     assert_eq!(health_of(&h.pool, "main"), Health::Disabled);
     assert_eq!(acquire(&h.pool).await.expect("lease").account, id("alt"));
@@ -469,7 +484,7 @@ async fn disable_and_clear_move_an_account_in_and_out_of_rotation() {
 
 #[tokio::test]
 async fn expired_auth_takes_the_account_out_until_a_human_fixes_it() {
-    let h = harness(TWO_ACCOUNTS);
+    let h = harness(TWO_ACCOUNTS).await;
     h.pool.report(
         &id("main"),
         Some(&Failure::AuthExpired {
@@ -484,7 +499,7 @@ async fn expired_auth_takes_the_account_out_until_a_human_fixes_it() {
 
 #[tokio::test]
 async fn reporting_accumulates_lifetime_counters() {
-    let h = harness(TWO_ACCOUNTS);
+    let h = harness(TWO_ACCOUNTS).await;
     h.pool.report(
         &id("main"),
         None,
