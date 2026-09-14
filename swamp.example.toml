@@ -1,0 +1,196 @@
+# ~/.config/swamp/config.toml  (or <repo>/.swamp/config.toml)
+version = 1
+
+# ---------------------------------------------------------------- limits
+[limits]
+max_parallel          = 4          # machine-wide concurrent worker processes
+max_nodes_per_run     = 32
+max_parallel_dispatch = 6          # per single swamp_dispatch call
+max_high_tier_concurrent = 2       # `high` is expensive and the brain will over-reach
+max_depth             = 2          # brain -> worker -> refused (also via SWAMP_DEPTH)
+worker_timeout        = "25m"
+brain_turn_timeout    = "15m"
+grace_period          = "5s"       # SIGTERM -> SIGKILL window
+run_budget_usd        = 25.0
+node_budget_usd       = 3.0        # -> claude --max-budget-usd; codex has no equivalent
+max_prompt_bytes      = 200000
+max_result_bytes      = 8000       # cap on worker output fed back to the brain
+unsafe_ack            = false      # required before any --dangerously-* flag is accepted
+
+# ---------------------------------------------------------------- brain
+[brain]
+transport = "cli"                  # "cli" (default, subscription-safe) | "api" (feature api-brain)
+provider  = "anthropic"
+account   = "main"
+tier      = "high"
+reserve_brain_slot = true          # keep this account out of the worker pool
+permission_mode    = "acceptEdits"
+include_partial_messages = true    # smooth chat streaming; workers keep this off
+# The brain plans and reads; workers write. Keeps the brain from corrupting parallel worktrees.
+allow_tools = [
+  "mcp__swamp__swamp_dispatch", "mcp__swamp__swamp_await", "mcp__swamp__swamp_status",
+  "mcp__swamp__swamp_result", "mcp__swamp__swamp_worker_diff", "mcp__swamp__swamp_note",
+  "Read", "Grep", "Glob",
+  "Bash(git log:*)", "Bash(git diff:*)", "Bash(git status:*)",
+]
+deny_tools = ["Edit", "Write", "MultiEdit", "NotebookEdit"]
+# Swamp reads this file and passes its TEXT via --append-system-prompt.
+system_prompt_file = ".swamp/brain.md"
+
+# ---------------------------------------------------------------- dispatch
+[dispatch]
+policy                  = "least-loaded"   # round-robin | least-loaded | quota-aware
+max_attempts            = 3
+cross_provider_failover = false
+default_provider        = "anthropic"
+default_tier            = "mid"
+
+[cooldown]
+min = "60s"
+max = "6h"
+default = "15m"
+breaker_threshold = 3
+quota_warn_at = 0.90
+quota_stop_at = 0.98
+
+# ---------------------------------------------------------------- workspace
+[workspace]
+isolation     = "worktree"        # worktree | shared | readonly
+root          = "~/.swamp/worktrees"   # outside the repo on purpose
+base          = "HEAD"
+branch_prefix = "swamp"           # -> swamp/<run_short>/<node_short>
+include_dirty = false             # true -> base from `git stash create`
+require_clean = true
+commit_on_success = true
+commit_template = "swamp({tier}): {title}\n\nnode: {node}\nrun: {run}"
+keep_on_failure = true            # never silently delete a failed worker's work
+# A fresh worktree has no node_modules, no target, no .env. A worker that cannot build
+# produces a useless diff, expensively. This is the most common cause of a bad first run.
+link = ["node_modules", "target", ".venv", ".direnv"]
+copy = [".env", ".env.local"]
+post_create = ""                  # optional one-shot, e.g. "just setup"
+post_create_timeout = "5m"
+
+# ---------------------------------------------------------------- journal
+[journal]
+fsync         = "barrier"         # always | barrier | interval:250ms | never
+max_line_bytes = 8388608          # a base64 blob on one line must truncate, not OOM
+keep_runs     = 200
+keep_runs_for = "30d"
+redact = [
+  '(?i)(api[_-]?key|authorization|bearer|secret|password)\s*[:=]\s*\S+',
+  'sk-[A-Za-z0-9_\-]{20,}',
+]
+
+# ---------------------------------------------------------------- providers
+# Model ids live ONLY here. Nothing is hardcoded in the binary.
+[providers.anthropic]
+adapter = "claude-cli"
+models  = { high = "opus", mid = "sonnet", low = "haiku" }
+tier_extra = { high = { effort = "high" }, mid = { effort = "medium" }, low = { effort = "low" } }
+
+  [providers.anthropic.worker]
+  permission_mode = "acceptEdits"
+  args = []
+  readonly_args = ["--permission-mode", "plan",
+                   "--disallowed-tools", "Edit", "Write", "MultiEdit", "NotebookEdit"]
+
+[providers.openai]
+adapter = "codex-cli"
+models  = { high = "gpt-5.3-pro", mid = "gpt-5.3-sol", low = "gpt-5.3-astra" }
+tier_extra = { high = { model_reasoning_effort = "high" },
+               mid  = { model_reasoning_effort = "medium" },
+               low  = { model_reasoning_effort = "low" } }
+
+  [providers.openai.worker]
+  sandbox = "workspace-write"
+  # `codex exec` has NO -a/--ask-for-approval; that is top-level only. Use the config override.
+  args = ["-c", "approval_policy=\"never\""]
+  readonly_args = ["-s", "read-only"]
+
+# ---------------------------------------------------------------- accounts
+# One entry per subscription. `exec` is a wrapper on PATH that sets CLAUDE_CONFIG_DIR / CODEX_HOME.
+# Swamp never touches credentials.
+[[accounts]]
+id = "main"
+provider = "anthropic"
+exec = "claude-main"
+max_concurrency = 3
+weight = 2
+
+[[accounts]]
+id = "alt"
+provider = "anthropic"
+exec = "claude-alt"
+max_concurrency = 2
+# Per-account tier override: this plan has no Opus.
+models = { high = "sonnet" }
+
+[[accounts]]
+id = "work"
+provider = "anthropic"
+exec = "claude"                        # no wrapper: point at the config dir directly
+env = { CLAUDE_CONFIG_DIR = "~/.claude-work" }
+max_concurrency = 1
+
+[[accounts]]
+id = "codex-main"
+provider = "openai"
+exec = "codex-main"
+max_concurrency = 2
+
+# ---------------------------------------------------------------- tiers
+# Cross-provider order, consulted ONLY when every account of the current provider is cooling
+# and dispatch.cross_provider_failover = true.
+[tiers.high]
+provider_order = ["anthropic", "openai"]
+node_budget_usd = 8.0
+timeout = "45m"
+
+[tiers.mid]
+provider_order = ["anthropic", "openai"]
+
+[tiers.low]
+provider_order = ["anthropic"]
+node_budget_usd = 0.75
+timeout = "10m"
+
+# ---------------------------------------------------------------- failure patterns
+# Layer 3 of the classifier. Editable in the field when a CLI changes its wording, with no new
+# Swamp release. Detector::Pattern usage is journaled, so `doctor --schema` shows when Swamp has
+# silently degraded to these.
+[failure.anthropic]
+rate_limit = ['(?i)usage limit reached', '(?i)rate.?limit', '(?i)\brate_limit_error\b',
+              '(?i)\b5-hour limit\b', '(?i)\b429\b']
+auth       = ['(?i)invalid_api_key', '(?i)oauth token has expired',
+              '(?i)credit balance is too low', '(?i)please run .?claude.* login']
+overloaded = ['(?i)overloaded_error', '(?i)\b529\b']
+
+[failure.openai]
+rate_limit = ['usage_limit_reached', "(?i)you've hit your usage limit",
+              '(?i)\b429\b', '(?i)too many requests']
+auth       = ['(?i)not logged in', '(?i)unauthorized', '(?i)run `codex login`']
+overloaded = ['server_overloaded', '(?i)\b503\b']
+
+# ---------------------------------------------------------------- pricing
+# Only used to ESTIMATE cost where the CLI reports none (codex). USD per 1M tokens.
+# Anything computed here is stamped basis="estimated" and is never presented as a measurement.
+# Omit the table and cost stays blank.
+[pricing."gpt-5.3-sol"]
+input        = 0.25
+cached_input = 0.025
+output       = 2.00
+
+# ---------------------------------------------------------------- ui
+[ui]
+refresh_hz    = 20
+tree_width    = 46
+show_thinking = false
+tail_lines    = 200
+
+# ---------------------------------------------------------------- profiles
+# `swamp --profile cheap run "..."` layers this over everything above.
+[profiles.cheap]
+"dispatch.default_tier" = "low"
+"limits.max_parallel"   = 2
+"brain.tier"            = "mid"

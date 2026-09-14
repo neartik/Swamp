@@ -1,0 +1,90 @@
+[package]
+name = "swamp"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.98"
+resolver = "3"
+
+[dependencies]
+# async runtime and process supervision
+tokio        = { version = "1.47", features = ["rt-multi-thread", "macros", "process", "fs",
+                                               "io-util", "io-std", "net", "sync", "time", "signal"] }
+tokio-util   = { version = "0.7", features = ["rt"] }        # CancellationToken
+futures      = "0.3"
+async-trait  = "0.1"                                          # trait Brain only; adapters are sync
+
+# CLI
+clap          = { version = "4.5", features = ["derive", "env", "wrap_help", "unicode"] }
+clap_complete = "4.5"
+
+# serialization
+serde        = { version = "1.0", features = ["derive", "rc"] }
+serde_json   = { version = "1.0", features = ["raw_value", "preserve_order"] }
+toml         = "0.9"
+toml_edit    = "0.23"                                         # span-accurate config errors
+humantime-serde = "1.1"                                       # "25m" / "6h" in TOML
+
+# errors and logging
+anyhow    = "1.0"
+thiserror = "2.0"
+tracing   = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "fmt"] }
+tracing-appender   = "0.2"                                    # .swamp/swamp.log, never the journal
+
+# domain primitives
+ulid    = { version = "1.2", features = ["serde"] }           # sortable ids
+uuid    = { version = "1.11", features = ["v4", "serde"] }    # claude --session-id needs a UUID
+time    = { version = "0.3", features = ["serde-well-known", "macros", "formatting", "parsing"] }
+camino  = { version = "1.1", features = ["serde1"] }          # Utf8Path everywhere; no OsString in the journal
+sha2    = "0.10"
+
+# fs, locking, process introspection
+fs4         = { version = "0.13", features = ["sync"] }       # advisory lock on accounts.json
+tempfile    = "3.14"                                          # atomic temp-and-rename
+directories = "6.0"
+which       = "7.0"                                           # PATH resolution + precise doctor diagnosis
+shellexpand = "3.1"                                           # "~/.claude-work" in config env maps
+shell-words = "1.1"
+
+# matching and text
+regex         = "1.11"                                        # RegexSet for failure patterns + redaction
+smallvec      = { version = "1.13", features = ["union", "serde"] }
+indexmap      = { version = "2.7", features = ["serde"] }
+parking_lot   = "0.12"
+rand          = "0.9"                                         # retry jitter
+unicode-width = "0.2"
+textwrap      = "0.16"
+owo-colors    = "4.1"
+
+# TUI and REPL
+ratatui   = { version = "0.29", features = ["crossterm"] }
+crossterm = { version = "0.28", features = ["event-stream"] }
+rustyline = { version = "15.0", default-features = false, features = ["with-file-history"] }
+
+[target.'cfg(unix)'.dependencies]
+nix     = { version = "0.29", features = ["process", "signal"] }   # setsid, killpg, kill(pid,0)
+sysinfo = "0.33"                                                   # process start time -> PID-reuse-safe liveness
+
+[dev-dependencies]
+insta             = { version = "1.41", features = ["json", "redactions"] }
+assert_cmd        = "2.0"
+predicates        = "3.1"
+proptest          = "1.6"
+tokio-test        = "0.4"
+pretty_assertions = "1.4"
+tempfile          = "3.14"
+
+[features]
+default   = ["tui"]
+tui       = []
+api-brain = []    # stub; would add reqwest + eventsource-stream
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "debuginfo"
+
+# WP0: makes the shared test helpers run their own self-checks.
+[[test]]
+name = "common"
+path = "tests/common/mod.rs"
