@@ -1,0 +1,637 @@
+//! WP3: the anthropic adapter, argv and classification, against the recorded sample stream.
+
+mod common;
+
+use camino::Utf8PathBuf;
+use regex::RegexSet;
+use std::collections::BTreeMap;
+use std::str::FromStr;
+use swamp::config::FailurePatterns;
+use swamp::ids::{NodeId, NodeIds};
+use swamp::model::core::{
+    ChangeKind, Cost, CostBasis, EvidenceSource, FinalSummary, LimitScope, LimitStatus, NodeKind,
+    Provider, RateLimitSnapshot, SessionHandle, Tier, Usage,
+};
+use swamp::model::event::WorkerEvent;
+use swamp::model::failure::{Detector, Failure};
+use swamp::model::node::ExitInfo;
+use swamp::model::result::IsolationMode;
+use swamp::worker::adapter::{McpAttach, gate_unsafe_args};
+use swamp::worker::classify::MAX_LINE;
+use swamp::worker::follow::read_capped_line;
+use swamp::worker::{
+    ExitContext, LaunchSpec, ParseState, ProviderAdapter, SessionPlan, adapter_for,
+};
+
+const SAMPLE: &str = "claude-stream-sample.jsonl";
+
+fn claude() -> std::sync::Arc<dyn ProviderAdapter> {
+    adapter_for(Provider::Anthropic)
+}
+
+fn spec() -> LaunchSpec {
+    LaunchSpec {
+        node: NodeIds {
+            id: NodeId::from_str("01ARZ3NDEKTSV4RRFFQ69G5FAV").unwrap(),
+            session_uuid: uuid::Uuid::from_u128(0x0123_4567_89ab_cdef_0123_4567_89ab_cdef),
+        },
+        provider: Provider::Anthropic,
+        exec: "claude-main".into(),
+        env: BTreeMap::from([("CLAUDE_CONFIG_DIR".to_owned(), "/tmp/cfg".to_owned())]),
+        model: "tier-high-model".into(),
+        tier: Tier::High,
+        cwd: Utf8PathBuf::from("/tmp/wt"),
+        isolation: IsolationMode::Worktree,
+        session: SessionPlan::New { preassigned: None },
+        kind: NodeKind::Worker,
+        permission_mode: "acceptEdits".into(),
+        sandbox: "workspace-write".into(),
+        budget_usd: None,
+        append_system_prompt: None,
+        allow_tools: Vec::new(),
+        deny_tools: Vec::new(),
+        mcp: None,
+        last_message_path: Utf8PathBuf::from("/tmp/wt/last-message.txt"),
+        extra_args: Vec::new(),
+        attempt: 1,
+    }
+}
+
+fn argv_of(spec: &LaunchSpec) -> Vec<String> {
+    claude()
+        .build_argv(spec)
+        .expect("argv")
+        .into_iter()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect()
+}
+
+fn patterns() -> FailurePatterns {
+    FailurePatterns {
+        rate_limit: RegexSet::new([r"(?i)usage limit reached", r"(?i)\b429\b"]).unwrap(),
+        auth: RegexSet::new([r"(?i)oauth token has expired"]).unwrap(),
+        overloaded: RegexSet::new([r"(?i)overloaded_error"]).unwrap(),
+        sources: BTreeMap::new(),
+    }
+}
+
+fn parse_sample() -> (Vec<WorkerEvent>, ParseState) {
+    let a = claude();
+    let mut st = ParseState::default();
+    let mut events = Vec::new();
+    for line in common::fixture_lines(SAMPLE) {
+        let po = a.parse_line(&line, &mut st);
+        assert!(
+            !po.noise,
+            "the recorded sample must parse cleanly: {line:.80}"
+        );
+        events.extend(po.events);
+    }
+    (events, st)
+}
+
+fn final_of(subtype: &str, text: &str) -> FinalSummary {
+    FinalSummary {
+        ok: subtype == "success",
+        subtype: subtype.to_owned(),
+        text: Some(text.to_owned()),
+        usage: Usage::default(),
+        cost: None,
+        api_error_status: None,
+        num_turns: 1,
+        permission_denials: 0,
+    }
+}
+
+fn classify_with(
+    state: &ParseState,
+    exit: Option<ExitInfo>,
+    deadline_hit: bool,
+) -> Option<Failure> {
+    let p = patterns();
+    claude().classify(&ExitContext {
+        exit,
+        state,
+        patterns: &p,
+        deadline_hit,
+    })
+}
+
+#[test]
+fn worker_argv_is_exact_and_carries_no_mcp_config() {
+    let argv = argv_of(&spec());
+    assert_eq!(
+        argv,
+        vec![
+            "claude-main",
+            "-p",
+            "--output-format",
+            "stream-json",
+            "--verbose",
+            "--model",
+            "tier-high-model",
+            "--session-id",
+            "01234567-89ab-cdef-0123-456789abcdef",
+            "--permission-mode",
+            "acceptEdits",
+            "--permission-prompts",
+            "none",
+            "--strict-mcp-config",
+        ]
+    );
+    assert!(!argv.iter().any(|a| a == "--mcp-config"));
+    assert!(!argv.iter().any(|a| a == "--include-partial-messages"));
+}
+
+#[test]
+fn the_prompt_is_never_on_argv_even_at_two_megabytes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let prompt = tmp.path().join("prompt.md");
+    std::fs::write(&prompt, "x".repeat(2 * 1024 * 1024)).unwrap();
+    let argv = argv_of(&spec());
+    let bytes: usize = argv.iter().map(String::len).sum();
+    assert!(bytes < 4096, "argv grew to {bytes} bytes");
+    assert!(!argv.iter().any(|a| a.len() > 1024));
+}
+
+#[test]
+fn brain_argv_adds_streaming_stdin_and_an_inline_mcp_config() {
+    let mut s = spec();
+    s.kind = NodeKind::Brain;
+    s.mcp = Some(McpAttach {
+        command: Utf8PathBuf::from("/usr/local/bin/swamp"),
+        args: vec![
+            "mcp-bridge".to_owned(),
+            "--socket".to_owned(),
+            "/tmp/ctl.sock".to_owned(),
+        ],
+    });
+    s.allow_tools = vec!["Read".to_owned(), "Grep".to_owned()];
+    let argv = argv_of(&s);
+    for flag in [
+        "--input-format",
+        "--mcp-config",
+        "--strict-mcp-config",
+        "--include-partial-messages",
+        "--allowed-tools",
+    ] {
+        assert!(argv.iter().any(|a| a == flag), "brain argv lacks {flag}");
+    }
+    let cfg = argv
+        .iter()
+        .skip_while(|a| *a != "--mcp-config")
+        .nth(1)
+        .expect("inline config");
+    let parsed: serde_json::Value = serde_json::from_str(cfg).expect("inline mcp config is json");
+    assert_eq!(
+        parsed["mcpServers"]["swamp"]["command"],
+        "/usr/local/bin/swamp"
+    );
+    assert_eq!(parsed["mcpServers"]["swamp"]["args"][0], "mcp-bridge");
+}
+
+#[test]
+fn budget_and_resume_flags_appear_only_when_asked_for() {
+    let plain = argv_of(&spec());
+    assert!(!plain.iter().any(|a| a == "--max-budget-usd"));
+    assert!(!plain.iter().any(|a| a == "--resume"));
+
+    let mut s = spec();
+    s.budget_usd = Some(3.0);
+    s.session = SessionPlan::Resume(SessionHandle {
+        account: swamp::model::core::AccountId("main".into()),
+        id: "sess-1".into(),
+        preassigned: true,
+    });
+    let argv = argv_of(&s);
+    assert!(argv.windows(2).any(|w| w[0] == "--max-budget-usd"));
+    assert_eq!(
+        argv.iter()
+            .skip_while(|a| *a != "--resume")
+            .nth(1)
+            .map(String::as_str),
+        Some("sess-1")
+    );
+    assert!(!argv.iter().any(|a| a == "--session-id"));
+}
+
+#[test]
+fn a_system_prompt_file_is_passed_as_text_not_as_a_path() {
+    let mut s = spec();
+    s.append_system_prompt = Some("you are a careful worker".to_owned());
+    let argv = argv_of(&s);
+    assert!(!argv.iter().any(|a| a == "--append-system-prompt-file"));
+    assert_eq!(
+        argv.iter()
+            .skip_while(|a| *a != "--append-system-prompt")
+            .nth(1)
+            .map(String::as_str),
+        Some("you are a careful worker")
+    );
+}
+
+#[test]
+fn readonly_isolation_denies_the_writing_tools() {
+    let mut s = spec();
+    s.isolation = IsolationMode::ReadOnly;
+    let argv = argv_of(&s);
+    let denied: Vec<&String> = argv
+        .iter()
+        .skip_while(|a| *a != "--disallowed-tools")
+        .skip(1)
+        .collect();
+    assert_eq!(denied, vec!["Edit", "Write", "MultiEdit", "NotebookEdit"]);
+}
+
+#[test]
+fn dangerously_skip_permissions_is_dropped_unless_unsafe_ack_is_set() {
+    let args = vec![
+        "--dangerously-skip-permissions".to_owned(),
+        "--effort".to_owned(),
+    ];
+    let (kept, refused) = gate_unsafe_args(&args, false);
+    assert_eq!(kept, vec!["--effort"]);
+    assert_eq!(refused, vec!["--dangerously-skip-permissions"]);
+
+    let (kept, refused) = gate_unsafe_args(&args, true);
+    assert_eq!(kept, args);
+    assert!(refused.is_empty());
+
+    let mut s = spec();
+    s.extra_args = gate_unsafe_args(&args, true).0;
+    assert!(
+        argv_of(&s)
+            .iter()
+            .any(|a| a == "--dangerously-skip-permissions")
+    );
+}
+
+#[test]
+fn the_sample_stream_yields_the_documented_event_sequence() {
+    let (events, st) = parse_sample();
+    let shape: Vec<&str> = events
+        .iter()
+        .map(|e| match e {
+            WorkerEvent::SessionStarted { .. } => "session",
+            WorkerEvent::RateLimit(_) => "rate_limit",
+            WorkerEvent::AssistantText { .. } => "text",
+            WorkerEvent::Usage(_) => "usage",
+            WorkerEvent::Final(_) => "final",
+            other => panic!("unexpected event {other:?}"),
+        })
+        .collect();
+    assert_eq!(
+        shape,
+        vec![
+            "session",
+            "rate_limit",
+            "text",
+            "usage",
+            "rate_limit",
+            "final"
+        ]
+    );
+    assert!(matches!(
+        &events[0],
+        WorkerEvent::SessionStarted { auth_hint: Some(h), .. } if h == "none"
+    ));
+    assert_eq!(st.unparsed, 0);
+    assert_eq!(
+        st.session.as_deref(),
+        Some("d9dae377-a57f-40d3-8a4d-ec0caa369607")
+    );
+}
+
+#[test]
+fn a_rate_limit_event_keeps_every_window() {
+    let (events, _) = parse_sample();
+    let WorkerEvent::RateLimit(snap) = &events[1] else {
+        panic!("expected a rate limit event");
+    };
+    assert_eq!(snap.status, LimitStatus::Allowed);
+    assert_eq!(snap.windows.len(), 2, "collapsing to one window is a bug");
+    assert_eq!(snap.windows[0].scope, LimitScope::FiveHour);
+    assert_eq!(snap.windows[0].utilization, 0.06);
+    assert_eq!(snap.windows[1].scope, LimitScope::SevenDay);
+    assert_eq!(snap.windows[1].utilization, 0.64);
+    assert_eq!(snap.worst_utilization(), 0.64);
+    assert_eq!(snap.worst_scope(), LimitScope::SevenDay);
+}
+
+#[test]
+fn the_final_event_carries_reported_cost_and_run_totals() {
+    let (events, st) = parse_sample();
+    let WorkerEvent::Final(f) = events.last().expect("final") else {
+        panic!("last event is not final");
+    };
+    assert!(f.ok);
+    assert_eq!(f.subtype, "success");
+    assert_eq!(f.permission_denials, 0);
+    let cost = f.cost.expect("reported cost");
+    assert_eq!(cost.basis, CostBasis::Reported);
+    assert!((cost.usd - 0.153_239).abs() < 1e-9, "{}", cost.usd);
+    assert_eq!(
+        f.usage,
+        Usage {
+            input_tokens: 2,
+            cached_input_tokens: 10_480,
+            cache_write_tokens: 7_472,
+            output_tokens: 4,
+            reasoning_tokens: 0,
+        }
+    );
+    assert_eq!(
+        st.usage, f.usage,
+        "the result line replaces the running sum"
+    );
+}
+
+#[test]
+fn an_assistant_message_with_text_and_a_tool_use_yields_two_events() {
+    let line = r#"{"type":"assistant","message":{"content":[
+        {"type":"text","text":"looking"},
+        {"type":"tool_use","id":"t1","name":"Bash","input":{"command":"ls -la"}}]}}"#;
+    let mut st = ParseState::default();
+    let po = claude().parse_line(line, &mut st);
+    assert_eq!(
+        po.events.len(),
+        2,
+        "returning only the first block drops work"
+    );
+    assert_eq!(
+        po.events[0],
+        WorkerEvent::AssistantText {
+            text: "looking".into()
+        }
+    );
+    assert_eq!(
+        po.events[1],
+        WorkerEvent::ToolCall {
+            id: "t1".into(),
+            name: "Bash".into(),
+            summary: "ls -la".into()
+        }
+    );
+    assert_eq!(st.tool_names.get("t1").map(String::as_str), Some("Bash"));
+}
+
+#[test]
+fn an_edit_tool_use_is_advisory_evidence_of_a_file_change() {
+    let line = r#"{"type":"assistant","message":{"content":[
+        {"type":"tool_use","id":"t2","name":"Edit","input":{"file_path":"src/lib.rs"}}]}}"#;
+    let mut st = ParseState::default();
+    let po = claude().parse_line(line, &mut st);
+    assert!(po.events.contains(&WorkerEvent::FileChanged {
+        path: Utf8PathBuf::from("src/lib.rs"),
+        kind: ChangeKind::Modify,
+    }));
+    assert_eq!(st.files.len(), 1);
+    assert_eq!(st.files[0].source, EvidenceSource::EventStream);
+}
+
+#[test]
+fn an_unknown_type_is_counted_and_never_fatal() {
+    let mut st = ParseState::default();
+    let po = claude().parse_line(r#"{"type":"future_thing","x":1}"#, &mut st);
+    assert_eq!(po.events.len(), 1);
+    assert!(matches!(po.events[0], WorkerEvent::Unknown { .. }));
+    assert_eq!(st.unparsed, 1);
+}
+
+#[test]
+fn an_unknown_field_on_a_known_type_is_ignored() {
+    let mut st = ParseState::default();
+    let po = claude().parse_line(
+        r#"{"type":"assistant","brand_new":7,"message":{"brand_new":8,
+            "content":[{"type":"text","text":"hi","brand_new":9}]}}"#,
+        &mut st,
+    );
+    assert_eq!(po.events.len(), 1);
+    assert_eq!(st.unparsed, 0);
+}
+
+#[test]
+fn a_twenty_megabyte_line_is_capped_before_the_parser_sees_it() {
+    let blob = "a".repeat(20 * 1024 * 1024);
+    let line = format!("{{\"type\":\"assistant\",\"blob\":\"{blob}\"}}\n");
+    let total = line.len();
+    let mut buf = Vec::new();
+    let capped = tokio_test::block_on(async {
+        let mut rdr = tokio::io::BufReader::new(line.as_bytes());
+        read_capped_line(&mut rdr, &mut buf, MAX_LINE)
+            .await
+            .unwrap()
+    });
+    assert_eq!(capped.consumed as usize, total);
+    assert!(capped.complete && capped.truncated);
+    assert_eq!(
+        buf.len(),
+        MAX_LINE,
+        "the reader caps before anything parses"
+    );
+
+    let mut st = ParseState::default();
+    let po = claude().parse_line(std::str::from_utf8(&buf).unwrap(), &mut st);
+    assert!(po.noise);
+    assert!(po.events.is_empty());
+}
+
+#[test]
+fn telemetry_outranks_a_clean_exit() {
+    let st = ParseState {
+        last_rate_limit: Some(RateLimitSnapshot {
+            status: LimitStatus::Rejected,
+            windows: vec![swamp::model::core::LimitWindow {
+                scope: LimitScope::SevenDay,
+                utilization: 1.0,
+                resets_at: None,
+            }],
+            resets_at: None,
+        }),
+        ..ParseState::default()
+    };
+    let f = classify_with(
+        &st,
+        Some(ExitInfo {
+            code: Some(0),
+            signal: None,
+            duration_ms: 1,
+        }),
+        false,
+    );
+    assert!(matches!(
+        f,
+        Some(Failure::RateLimited {
+            detected_by: Detector::Telemetry,
+            scope: LimitScope::SevenDay,
+            ..
+        })
+    ));
+}
+
+#[test]
+fn api_error_status_drives_rate_limit_and_overload() {
+    for (status, want_rate_limited) in [(429i64, true), (529, false), (503, false)] {
+        let mut f = final_of("error_during_execution", "");
+        f.api_error_status = Some(status);
+        let st = ParseState {
+            last_final: Some(f),
+            ..ParseState::default()
+        };
+        match classify_with(&st, None, false) {
+            Some(Failure::RateLimited { detected_by, .. }) => {
+                assert!(want_rate_limited);
+                assert_eq!(detected_by, Detector::StructuredResult);
+            }
+            Some(Failure::Overloaded { .. }) => assert!(!want_rate_limited),
+            other => panic!("{status} classified as {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn the_budget_subtype_is_our_own_guard_not_a_provider_failure() {
+    let mut f = final_of("error_max_budget_usd", "");
+    f.cost = Some(Cost {
+        usd: 3.4,
+        basis: CostBasis::Reported,
+    });
+    let st = ParseState {
+        last_final: Some(f),
+        ..ParseState::default()
+    };
+    let failure = classify_with(&st, None, false).expect("a failure");
+    assert!(matches!(failure, Failure::BudgetExceeded { spent_usd, .. } if spent_usd == 3.4));
+    assert!(failure.is_terminal());
+}
+
+#[test]
+fn denials_fail_a_node_that_reports_success() {
+    let mut f = final_of("success", "all done");
+    f.permission_denials = 1;
+    let st = ParseState {
+        last_final: Some(f),
+        ..ParseState::default()
+    };
+    assert_eq!(
+        classify_with(&st, None, false),
+        Some(Failure::PermissionDenied { denials: 1 })
+    );
+}
+
+#[test]
+fn a_clean_result_is_not_a_failure() {
+    let st = ParseState {
+        last_final: Some(final_of("success", "done")),
+        ..ParseState::default()
+    };
+    assert_eq!(classify_with(&st, None, false), None);
+}
+
+#[test]
+fn a_configured_regex_fires_last_and_records_its_evidence() {
+    let long = format!("prelude\n{} usage limit reached", "z".repeat(600));
+    let st = ParseState {
+        last_final: Some(final_of("error_during_execution", &long)),
+        ..ParseState::default()
+    };
+    let Some(Failure::RateLimited {
+        detected_by,
+        evidence,
+        ..
+    }) = classify_with(&st, None, false)
+    else {
+        panic!("expected a pattern-detected rate limit");
+    };
+    assert_eq!(detected_by, Detector::Pattern);
+    assert_eq!(evidence.len(), 400);
+    assert!(evidence.starts_with("zzz"));
+}
+
+#[test]
+fn error_during_execution_is_terminal_and_never_rotates_the_account() {
+    let st = ParseState {
+        last_final: Some(final_of("error_during_execution", "the build failed")),
+        ..ParseState::default()
+    };
+    let failure = classify_with(&st, None, false).expect("a failure");
+    assert_eq!(
+        failure,
+        Failure::WorkerError {
+            subtype: "error_during_execution".into(),
+            detail: "the build failed".into(),
+        }
+    );
+    assert!(
+        !failure.rotates_account(),
+        "a bad prompt must not drain every subscription"
+    );
+    assert!(failure.is_terminal());
+}
+
+#[test]
+fn a_stream_with_no_terminal_event_falls_back_to_the_exit_status() {
+    let st = ParseState::default();
+    let cases = [
+        (
+            ExitInfo {
+                code: None,
+                signal: Some(9),
+                duration_ms: 1,
+            },
+            Failure::Crashed { signal: Some(9) },
+        ),
+        (
+            ExitInfo {
+                code: Some(0),
+                signal: None,
+                duration_ms: 1,
+            },
+            Failure::Truncated { offset: 0 },
+        ),
+        (
+            ExitInfo {
+                code: Some(127),
+                signal: None,
+                duration_ms: 1,
+            },
+            Failure::AuthExpired {
+                detail: "exec not found (127)".into(),
+                detected_by: Detector::ExitCode,
+            },
+        ),
+    ];
+    for (exit, want) in cases {
+        assert_eq!(classify_with(&st, Some(exit), false), Some(want));
+    }
+    assert!(matches!(
+        classify_with(&st, None, true),
+        Some(Failure::Timeout { .. })
+    ));
+}
+
+#[test]
+fn stderr_is_searched_when_the_stream_says_nothing() {
+    let st = ParseState {
+        stderr_tail: ["boom", "OAuth token has expired"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect(),
+        ..ParseState::default()
+    };
+    assert!(matches!(
+        classify_with(
+            &st,
+            Some(ExitInfo {
+                code: Some(1),
+                signal: None,
+                duration_ms: 1
+            }),
+            false
+        ),
+        Some(Failure::AuthExpired {
+            detected_by: Detector::Pattern,
+            ..
+        })
+    ));
+}

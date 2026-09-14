@@ -1,19 +1,18 @@
-#![allow(dead_code, unused_variables)]
-
 use crate::config::FailurePatterns;
 use crate::ids::NodeIds;
 use crate::model::core::{
     FileChange, FinalSummary, NodeKind, Provider, RateLimitSnapshot, SessionHandle, Tier, Usage,
 };
-use crate::model::event::WorkerEvent;
+use crate::model::event::{RawLine, WorkerEvent};
 use crate::model::failure::Failure;
 use crate::model::node::ExitInfo;
 use crate::model::result::IsolationMode;
 use camino::Utf8PathBuf;
+use serde_json::value::RawValue;
 use smallvec::SmallVec;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::ffi::OsString;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 #[derive(Debug, Clone)]
 pub struct LaunchSpec {
@@ -114,6 +113,66 @@ pub enum BrainTransport {
     ResumePerTurn,
 }
 
+impl ParseOutput {
+    pub fn empty() -> Self {
+        Self {
+            events: SmallVec::new(),
+            noise: false,
+        }
+    }
+    /// A line neither provider could make sense of: kept verbatim in noise.log.
+    pub fn unparsable() -> Self {
+        Self {
+            events: SmallVec::new(),
+            noise: true,
+        }
+    }
+    pub fn one(ev: WorkerEvent) -> Self {
+        let mut events = SmallVec::new();
+        events.push(ev);
+        Self {
+            events,
+            noise: false,
+        }
+    }
+    pub fn many(events: SmallVec<[WorkerEvent; 4]>) -> Self {
+        Self {
+            events,
+            noise: false,
+        }
+    }
+}
+
+/// Raw JSON kept for `WorkerEvent::Unknown`; the caller has already checked it parses.
+pub(crate) fn raw_line(line: &str) -> RawLine {
+    RawLine(
+        RawValue::from_string(line.to_owned())
+            .unwrap_or_else(|_| RawValue::from_string("null".to_owned()).expect("null is json")),
+    )
+}
+
+/// `--dangerously-*` is inert unless the operator acknowledged it in config. Returns the
+/// arguments to use and the ones that were refused, so the caller can report them.
+pub fn gate_unsafe_args(args: &[String], unsafe_ack: bool) -> (Vec<String>, Vec<String>) {
+    if unsafe_ack {
+        return (args.to_vec(), Vec::new());
+    }
+    let (dropped, kept): (Vec<String>, Vec<String>) = args
+        .iter()
+        .cloned()
+        .partition(|a| a.starts_with("--dangerously"));
+    (kept, dropped)
+}
+
 pub fn adapter_for(p: Provider) -> Arc<dyn ProviderAdapter> {
-    todo!("WP3")
+    static CLAUDE: OnceLock<Arc<dyn ProviderAdapter>> = OnceLock::new();
+    static CODEX: OnceLock<Arc<dyn ProviderAdapter>> = OnceLock::new();
+    match p {
+        Provider::Anthropic => CLAUDE
+            .get_or_init(|| Arc::new(crate::worker::claude::ClaudeAdapter))
+            .clone(),
+        Provider::Openai => CODEX
+            .get_or_init(|| Arc::new(crate::worker::codex::CodexAdapter))
+            .clone(),
+    }
 }
