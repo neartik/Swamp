@@ -185,6 +185,48 @@ async fn least_loaded_prefers_the_account_with_fewer_inflight() {
     assert_ne!(held.account, next.account);
 }
 
+/// Two idle accounts scored identically and the tie fell to the map order, so every
+/// sequential single-worker run went to the same subscription.
+#[tokio::test]
+async fn sequential_runs_alternate_between_two_idle_accounts() {
+    let h = harness(&format!(
+        "{TWO_ACCOUNTS}\n[dispatch]\npolicy = \"least-loaded\"\n"
+    ))
+    .await;
+    let mut picks = Vec::new();
+    for _ in 0..4 {
+        let lease = acquire(&h.pool).await.expect("lease");
+        let who = lease.account.clone();
+        drop(lease);
+        h.pool.report(&who, None, None);
+        picks.push(who);
+    }
+    assert_eq!(picks[0], picks[2], "{picks:?}");
+    assert_eq!(picks[1], picks[3], "{picks:?}");
+    assert_ne!(
+        picks[0], picks[1],
+        "one subscription took every run: {picks:?}"
+    );
+}
+
+/// The counter that breaks the tie lives in accounts.json, so a second process keeps alternating.
+#[tokio::test]
+async fn a_fresh_pool_keeps_alternating_from_the_persisted_node_counts() {
+    let h = harness(&format!(
+        "{TWO_ACCOUNTS}\n[dispatch]\npolicy = \"least-loaded\"\n"
+    ))
+    .await;
+    let first = acquire(&h.pool).await.expect("lease").account.clone();
+    h.pool.report(&first, None, None);
+    drop(h.pool);
+
+    let (_dir2, root2) = tmp();
+    let (handle, _events) = journal(&root2).await;
+    let fresh = AccountPool::new(Arc::clone(&h.cfg), h.state_path.clone(), handle).expect("pool");
+    let second = acquire(&fresh).await.expect("lease").account.clone();
+    assert_ne!(first, second, "the second run repeated the first account");
+}
+
 #[tokio::test]
 async fn quota_aware_prefers_the_less_used_account_and_degrades_without_telemetry() {
     let h = harness(&format!(

@@ -23,7 +23,7 @@ use crate::journal::paths::{Paths, RunPaths};
 use crate::journal::record::{JournalEvent, SCHEMA_VERSION};
 use crate::journal::writer::FsyncPolicy;
 use crate::journal::{Journal, JournalHandle};
-use crate::model::core::{NodeState, Usage};
+use crate::model::core::{NodeKind, NodeState, Usage};
 use crate::model::node::NodeRecord;
 use crate::worker::Executor;
 use crate::workspace::{Git, WorkspaceManager};
@@ -57,21 +57,37 @@ impl Ctx {
             .with_context(|| format!("reading the journal of run {}", run.run))
     }
 
-    /// A node id, a short id, or a unique prefix, searched newest run first.
+    /// A node id, a short id or a prefix, searched across every run newest first; `last` and
+    /// `-N` name a run instead and resolve to that run's node.
     pub fn find_node(&self, spec: &str) -> anyhow::Result<(RunPaths, NodeRecord)> {
         let spec = spec.trim();
         anyhow::ensure!(!spec.is_empty(), "empty node specifier");
+        if is_run_alias(spec) {
+            let rp = self.run_paths(Some(spec))?;
+            let view = self.view(&rp, false)?;
+            let node = run_node(&view, &rp)?;
+            return Ok((rp, node));
+        }
+        let exact = NodeId::from_str(spec).is_ok();
+        let mut hits: Vec<(RunPaths, NodeRecord)> = Vec::new();
         for run in self.paths.list_runs()? {
             let rp = self.paths.run_paths(run);
             let Ok(view) = RunView::load(&rp.dir, false) else {
                 continue;
             };
-            let hit = view.nodes.values().find(|n| node_matches(n.id, spec));
-            if let Some(n) = hit {
-                return Ok((rp, n.clone()));
+            for n in view.nodes.values().filter(|n| node_matches(n.id, spec)) {
+                // A full id is unique by construction; only a prefix can collide.
+                if exact {
+                    return Ok((rp, n.clone()));
+                }
+                hits.push((rp.clone(), n.clone()));
             }
         }
-        anyhow::bail!("no node matches `{spec}`")
+        match hits.len() {
+            1 => Ok(hits.remove(0)),
+            0 => anyhow::bail!("no node matches `{spec}`"),
+            _ => anyhow::bail!("node `{spec}` is ambiguous: {}", candidates(&hits)),
+        }
     }
 
     pub fn out(&self, text: &str) {
@@ -80,6 +96,59 @@ impl Ctx {
         let _ = out.write_all(text.as_bytes());
         let _ = out.flush();
     }
+}
+
+/// `last` and `-2` name a run, never a node: no short id is ever spelled that way.
+fn is_run_alias(spec: &str) -> bool {
+    spec.eq_ignore_ascii_case("last")
+        || spec
+            .strip_prefix('-')
+            .is_some_and(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()))
+}
+
+/// What `swamp diff last` means: the run's only node, or the last one that finished.
+fn run_node(view: &RunView, rp: &RunPaths) -> anyhow::Result<NodeRecord> {
+    let mut pool: Vec<&NodeRecord> = view
+        .nodes
+        .values()
+        .filter(|n| n.kind != NodeKind::Brain)
+        .collect();
+    if pool.is_empty() {
+        pool = view.nodes.values().collect();
+    }
+    anyhow::ensure!(!pool.is_empty(), "run {} recorded no nodes", rp.run);
+    if let [only] = pool[..] {
+        return Ok(only.clone());
+    }
+    let finished = pool
+        .iter()
+        .filter(|n| n.ended_at.is_some())
+        .max_by_key(|n| (n.ended_at, n.id));
+    finished.map(|n| (*n).clone()).ok_or_else(|| {
+        let listed: Vec<(RunPaths, NodeRecord)> =
+            pool.iter().map(|n| (rp.clone(), (*n).clone())).collect();
+        anyhow::anyhow!(
+            "run {} has no finished node; name one: {}",
+            rp.run,
+            candidates(&listed)
+        )
+    })
+}
+
+/// `short (run, title)` per hit, for an error the user can act on.
+fn candidates(hits: &[(RunPaths, NodeRecord)]) -> String {
+    hits.iter()
+        .take(8)
+        .map(|(rp, n)| {
+            format!(
+                "{} (run {}, {})",
+                n.id.short(),
+                rp.run.short(),
+                crate::ui::fmt::truncate(&n.title, 40)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn node_matches(id: NodeId, spec: &str) -> bool {

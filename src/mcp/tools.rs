@@ -28,6 +28,15 @@ pub struct ToolSchema {
     pub input_schema: Value,
 }
 
+/// `mcp__<server>__<tool>` for every registered tool: the exact spelling both CLIs want in an
+/// allow list. Derived from `schemas()`, so a new tool can never be missed here.
+pub fn qualified_names() -> Vec<String> {
+    schemas()
+        .into_iter()
+        .map(|t| format!("mcp__{}__{}", crate::mcp::server::SERVER_NAME, t.name))
+        .collect()
+}
+
 pub fn schemas() -> Vec<ToolSchema> {
     vec![
         ToolSchema {

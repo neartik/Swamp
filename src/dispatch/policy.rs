@@ -44,6 +44,51 @@ pub fn score(
     })
 }
 
+/// Two scores this close are a tie: they are small rationals, so this only absorbs
+/// floating-point noise.
+const TIE: f64 = 1e-9;
+
+/// A total order over eligible accounts. A tied score is settled by lifetime load and then by
+/// a rotating cursor, so two idle accounts alternate instead of the first name always winning.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Rank {
+    pub score: f64,
+    pub lifetime_nodes: u64,
+    pub lifetime_cost_usd: f64,
+    pub rotation: usize,
+}
+
+impl Rank {
+    /// Lower is better, like `score`.
+    pub fn compare(&self, other: &Rank) -> std::cmp::Ordering {
+        if (self.score - other.score).abs() > TIE {
+            return self.score.total_cmp(&other.score);
+        }
+        self.lifetime_nodes
+            .cmp(&other.lifetime_nodes)
+            .then_with(|| self.lifetime_cost_usd.total_cmp(&other.lifetime_cost_usd))
+            .then_with(|| self.rotation.cmp(&other.rotation))
+    }
+}
+
+/// `score` plus its tie-breakers. `rotation` is the caller's position in a list rotated by a
+/// per-pool cursor, which is what makes sequential runs alternate.
+pub fn rank(
+    policy: SelectionPolicy,
+    a: &Account,
+    s: &AccountState,
+    quota_stop_at: f64,
+    now: OffsetDateTime,
+    rotation: usize,
+) -> Option<Rank> {
+    Some(Rank {
+        score: score(policy, a, s, quota_stop_at, now)?,
+        lifetime_nodes: s.lifetime_nodes,
+        lifetime_cost_usd: s.lifetime_cost_usd,
+        rotation,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -125,5 +170,67 @@ mod tests {
         let sa = score(SelectionPolicy::QuotaAware, &a, &idle, 0.98, now).unwrap();
         let sb = score(SelectionPolicy::QuotaAware, &b, &busy, 0.98, now).unwrap();
         assert!(sa < sb, "{sa} < {sb}");
+    }
+
+    /// Two idle accounts scored identically, so selection fell back to the map order and
+    /// every sequential run went to the same one.
+    #[test]
+    fn a_tie_goes_to_the_account_with_fewer_lifetime_nodes() {
+        let now = OffsetDateTime::now_utc();
+        let (a, b) = (account("alt", 2), account("main", 2));
+        let used = AccountState {
+            lifetime_nodes: 5,
+            ..Default::default()
+        };
+        let fresh = AccountState::default();
+        let ra = rank(SelectionPolicy::LeastLoaded, &a, &used, 0.98, now, 0).unwrap();
+        let rb = rank(SelectionPolicy::LeastLoaded, &b, &fresh, 0.98, now, 1).unwrap();
+        assert_eq!(ra.compare(&rb), std::cmp::Ordering::Greater);
+        assert_eq!(rb.compare(&ra), std::cmp::Ordering::Less);
+    }
+
+    /// Equal on every counter: the rotating cursor decides, and it is deterministic.
+    #[test]
+    fn a_full_tie_falls_back_to_the_rotating_cursor() {
+        let now = OffsetDateTime::now_utc();
+        let (a, b) = (account("alt", 2), account("main", 2));
+        let idle = AccountState::default();
+        let first = rank(SelectionPolicy::LeastLoaded, &a, &idle, 0.98, now, 1).unwrap();
+        let second = rank(SelectionPolicy::LeastLoaded, &b, &idle, 0.98, now, 0).unwrap();
+        assert_eq!(first.compare(&second), std::cmp::Ordering::Greater);
+    }
+
+    /// Load still outranks lifetime history: a busy account is never preferred.
+    #[test]
+    fn lifetime_history_never_outweighs_current_load() {
+        let now = OffsetDateTime::now_utc();
+        let (a, b) = (account("alt", 2), account("main", 2));
+        let idle_but_used = AccountState {
+            lifetime_nodes: 99,
+            ..Default::default()
+        };
+        let busy_and_fresh = AccountState {
+            inflight: 1,
+            ..Default::default()
+        };
+        let ra = rank(
+            SelectionPolicy::LeastLoaded,
+            &a,
+            &idle_but_used,
+            0.98,
+            now,
+            0,
+        )
+        .unwrap();
+        let rb = rank(
+            SelectionPolicy::LeastLoaded,
+            &b,
+            &busy_and_fresh,
+            0.98,
+            now,
+            1,
+        )
+        .unwrap();
+        assert_eq!(ra.compare(&rb), std::cmp::Ordering::Less);
     }
 }

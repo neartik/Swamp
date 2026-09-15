@@ -26,10 +26,9 @@ tier      = "high"
 reserve_brain_slot = true          # keep this account out of the worker pool
 permission_mode    = "acceptEdits"
 include_partial_messages = true    # smooth chat streaming; workers keep this off
-# The brain plans and reads; workers write. Keeps the brain from corrupting parallel worktrees.
+# Every mcp__swamp__* tool is allowed automatically, from the registry: the brain answers no
+# permission prompt, so a missing name would be denied. These are the extras it also gets.
 allow_tools = [
-  "mcp__swamp__swamp_dispatch", "mcp__swamp__swamp_await", "mcp__swamp__swamp_status",
-  "mcp__swamp__swamp_result", "mcp__swamp__swamp_worker_diff", "mcp__swamp__swamp_note",
   "Read", "Grep", "Glob",
   "Bash(git log:*)", "Bash(git diff:*)", "Bash(git status:*)",
 ]

@@ -12,7 +12,7 @@ use crate::worker::adapter::{
 use camino::Utf8PathBuf;
 use serde::Deserialize;
 use smallvec::SmallVec;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use time::OffsetDateTime;
 
@@ -88,20 +88,20 @@ impl ProviderAdapter for ClaudeAdapter {
             a.push("--append-system-prompt".into());
             a.push(text.clone().into());
         }
+        // One flag per list: a repeated variadic option overwrites, so the readonly denials
+        // and the configured ones have to be merged before they reach the argv.
+        let mut allow: Vec<String> = Vec::new();
+        if spec.kind == NodeKind::Brain && spec.mcp.is_some() {
+            allow.extend(crate::mcp::tools::qualified_names());
+        }
+        allow.extend(spec.allow_tools.iter().cloned());
+        let mut deny: Vec<String> = Vec::new();
         if spec.isolation == IsolationMode::ReadOnly {
-            a.push("--disallowed-tools".into());
-            for t in EDIT_TOOLS {
-                a.push(t.into());
-            }
+            deny.extend(EDIT_TOOLS.iter().map(|t| (*t).to_owned()));
         }
-        if !spec.allow_tools.is_empty() {
-            a.push("--allowed-tools".into());
-            a.extend(spec.allow_tools.iter().map(OsString::from));
-        }
-        if !spec.deny_tools.is_empty() {
-            a.push("--disallowed-tools".into());
-            a.extend(spec.deny_tools.iter().map(OsString::from));
-        }
+        deny.extend(spec.deny_tools.iter().cloned());
+        push_list(&mut a, "--allowed-tools", &allow);
+        push_list(&mut a, "--disallowed-tools", &deny);
         for (k, v) in &spec.extra {
             a.push(format!("--{k}").into());
             a.push(v.clone().into());
@@ -156,10 +156,22 @@ impl ProviderAdapter for ClaudeAdapter {
 fn mcp_config_json(mcp: &crate::worker::adapter::McpAttach) -> String {
     serde_json::json!({
         "mcpServers": {
-            "swamp": { "command": mcp.command.as_str(), "args": mcp.args }
+            crate::mcp::server::SERVER_NAME: { "command": mcp.command.as_str(), "args": mcp.args }
         }
     })
     .to_string()
+}
+
+/// `--allowed-tools A B C`, deduplicated and in order; nothing at all when the list is empty,
+/// since a bare flag with no values is an argv error.
+fn push_list(a: &mut Vec<OsString>, flag: &str, tools: &[String]) {
+    let mut seen = BTreeSet::new();
+    let unique: Vec<&String> = tools.iter().filter(|t| seen.insert(t.as_str())).collect();
+    if unique.is_empty() {
+        return;
+    }
+    a.push(flag.into());
+    a.extend(unique.into_iter().map(OsString::from));
 }
 
 fn system_event(s: SystemLine, st: &mut ParseState) -> ParseOutput {

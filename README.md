@@ -110,8 +110,8 @@ Layers, lowest priority first: built-in defaults, `~/.config/swamp/config.toml`,
 swamp doctor                                       # PATH, git, tiers, account collisions
 swamp run --no-brain --tier mid "fix the flaky test in tests/api.rs"   # commit first: a dirty tree is refused
 swamp trace last                                   # the run tree, with the diff summary
-swamp diff <node> --stat
-swamp adopt <node>                                 # applies the patch to your checkout
+swamp diff last --stat                             # `last` is the run; <node> works from any run
+swamp adopt last                                   # applies the patch to your checkout
 ```
 
 `swamp` with no arguments, or `swamp chat`, starts an interactive session with a brain: a CLI
@@ -129,7 +129,7 @@ edits files itself.
 | `swamp chat` | Interactive brain session. |
 | `swamp runs`, `swamp resume`, `swamp cancel` | List runs, recover an interrupted one (`--plan` first, it spends nothing), stop one. |
 | `swamp accounts` | Health, in-flight count, quota windows, cooldowns, lifetime spend. Also `cooldown`, `clear`, `enable`, `disable`, `reset`. |
-| `swamp diff`, `swamp adopt`, `swamp worktrees` | Inspect a worker's patch, land it, manage the worktrees. |
+| `swamp diff`, `swamp adopt`, `swamp worktrees` | Inspect a worker's patch, land it, manage the worktrees. A node is named by its full id, its short id or a prefix, searched across every run; `last` and `-2` name a run and resolve to its node. |
 | `swamp gc`, `swamp replay`, `swamp config`, `swamp completions` | Housekeeping, re-render or re-derive a recorded run, inspect config, shell completions. |
 
 Exit codes: `0` ok, `1` generic, `2` config invalid, `3` no capacity (all accounts cooling),

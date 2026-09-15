@@ -9,7 +9,7 @@ use std::io::Write;
 
 /// Static tree render of a recorded run.
 pub async fn run(ctx: &Ctx, args: &TraceArgs) -> anyhow::Result<i32> {
-    let paths = ctx.run_paths(args.run.as_deref())?;
+    let (paths, node) = locate(ctx, args)?;
     let opts = TraceOpts {
         node: None,
         events: args.events,
@@ -21,21 +21,11 @@ pub async fn run(ctx: &Ctx, args: &TraceArgs) -> anyhow::Result<i32> {
     };
 
     if args.follow {
-        let node = args
-            .node
-            .as_deref()
-            .map(|spec| resolve(ctx, &paths, spec))
-            .transpose()?;
         follow(&paths, &TraceOpts { node, ..opts }).await?;
         return Ok(0);
     }
 
     let mut view = ctx.view(&paths, args.events)?;
-    let node = args
-        .node
-        .as_deref()
-        .map(|spec| resolve(ctx, &paths, spec))
-        .transpose()?;
 
     if args.raw || args.stderr {
         let node = node
@@ -72,6 +62,23 @@ fn only_node(view: &RunView) -> Option<NodeId> {
     match view.nodes.len() {
         1 => view.nodes.keys().next().copied(),
         _ => None,
+    }
+}
+
+/// The run that actually holds the node: without an explicit run, `--node <id>` searches
+/// every run rather than only the one `last` points at.
+fn locate(ctx: &Ctx, args: &TraceArgs) -> anyhow::Result<(RunPaths, Option<NodeId>)> {
+    let paths = ctx.run_paths(args.run.as_deref())?;
+    let Some(spec) = args.node.as_deref() else {
+        return Ok((paths, None));
+    };
+    match resolve(ctx, &paths, spec) {
+        Ok(id) => Ok((paths, Some(id))),
+        Err(e) if args.run.is_some() => Err(e),
+        Err(_) => {
+            let (rp, node) = ctx.find_node(spec)?;
+            Ok((rp, Some(node.id)))
+        }
     }
 }
 

@@ -293,3 +293,55 @@ fn a_worker_that_dies_before_its_first_line_fails_fast_with_its_stderr() {
     assert!(matches!(node.state, NodeState::Failed { .. }));
     assert_eq!(view.nodes.len(), 1, "an argv error is never retried");
 }
+
+/// `swamp diff <id>` and `swamp adopt <id>` used to see only the run `last` points at, so a
+/// node from any earlier run answered "no node matches", and `last` was not a node spec at all.
+#[test]
+fn diff_adopt_and_trace_find_a_node_from_an_older_run() {
+    let h = Harness::new().scenario(
+        "main",
+        Scenario::claude().edits("first.txt", "from the first run\n"),
+    );
+    h.swamp(&["run", "--no-brain", TASK]).assert().success();
+    let older = h.last_view();
+    let first = older.nodes.values().next().expect("the first node");
+    let first_id = first.id.short();
+
+    let h = h.scenario(
+        "main",
+        Scenario::claude().edits("second.txt", "from the second run\n"),
+    );
+    h.swamp(&["run", "--no-brain", TASK]).assert().success();
+    assert_eq!(h.runs().len(), 2, "two recorded runs");
+    assert_ne!(
+        h.last_run().run,
+        first.run_id,
+        "the node is not in the last run"
+    );
+
+    h.swamp(&["diff", &first_id])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("first.txt"));
+    h.swamp(&["trace", "--node", &first_id]).assert().success();
+    h.swamp(&["adopt", &first_id, "--dry-run"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("adopted"));
+
+    // `last` is a run alias everywhere, node commands included: one node, so it is that node.
+    h.swamp(&["diff", "last"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("second.txt"));
+    h.swamp(&["diff", "--", "-2"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("first.txt"));
+
+    // A prefix that matches a node in both runs names neither.
+    h.swamp(&["diff", "0"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("ambiguous"));
+}

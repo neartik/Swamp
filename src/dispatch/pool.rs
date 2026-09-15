@@ -3,7 +3,7 @@ use crate::config::resolve::expand_env;
 use crate::dispatch::account::{Account, AccountState, Health};
 use crate::dispatch::cooldown::cooldown_for;
 use crate::dispatch::persist::{self, StateMap};
-use crate::dispatch::policy::{SelectionPolicy, score};
+use crate::dispatch::policy::{SelectionPolicy, rank, score};
 use crate::journal::{JournalEvent, JournalHandle};
 use crate::model::core::{AccountId, Cost, Provider, RateLimitSnapshot};
 use crate::model::failure::Failure;
@@ -38,6 +38,8 @@ pub struct AccountPool {
     returned: Notify,
     reserved: Mutex<Option<AccountId>>,
     wakeups: AtomicU64,
+    /// Rotates the candidate order, so accounts tied on every counter still alternate.
+    cursor: AtomicU64,
 }
 
 /// Drop decrements inflight and notifies waiters, so a panicking node cannot leak a slot.
@@ -154,6 +156,7 @@ impl AccountPool {
             returned: Notify::new(),
             reserved: Mutex::new(None),
             wakeups: AtomicU64::new(0),
+            cursor: AtomicU64::new(0),
         }))
     }
 
@@ -391,11 +394,12 @@ impl AccountPool {
             .accounts
             .values()
             .filter(|a| a.provider == p)
-            .filter_map(|a| {
+            .enumerate()
+            .filter_map(|(i, a)| {
                 let s = state.get(&a.id).cloned().unwrap_or_default();
-                score(self.policy, a, &s, stop, now).map(|sc| (sc, a.id.clone()))
+                rank(self.policy, a, &s, stop, now, i).map(|r| (r, a.id.clone()))
             })
-            .min_by(|a, b| a.0.total_cmp(&b.0))
+            .min_by(|a, b| a.0.compare(&b.0))
             .map(|(_, id)| id)?;
         *self.reserved.lock() = Some(best.clone());
         Some(best)
@@ -494,15 +498,21 @@ impl AccountPool {
             None => self.candidates(provider, exclude),
         };
         let stop = self.quota_stop_at();
+        // Rotate the candidate order by one per selection: two accounts tied on load and on
+        // lifetime nodes then alternate instead of the first name always winning.
+        let turn = self.cursor.fetch_add(1, Ordering::Relaxed) as usize;
+        let len = candidates.len().max(1);
         let mut state = self.state.lock();
         let best = candidates
             .iter()
-            .filter_map(|a| {
+            .enumerate()
+            .filter_map(|(i, a)| {
                 let s = state.get(&a.id).cloned().unwrap_or_default();
-                score(self.policy, a, &s, stop, now).map(|sc| (sc, *a))
+                let rotation = (i + len - turn % len) % len;
+                rank(self.policy, a, &s, stop, now, rotation).map(|r| (r, *a))
             })
-            .min_by(|a, b| a.0.total_cmp(&b.0))
-            .map(|(sc, a)| (sc, a.id.clone(), a.exec.clone(), a.env.clone()))?;
+            .min_by(|a, b| a.0.compare(&b.0))
+            .map(|(r, a)| (r.score, a.id.clone(), a.exec.clone(), a.env.clone()))?;
         let (sc, id, exec, env) = best;
         let entry = state.entry(id.clone()).or_default();
         entry.inflight += 1;

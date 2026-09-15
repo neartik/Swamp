@@ -91,6 +91,22 @@ fn the_brain_dispatches_two_workers_and_they_hang_off_its_node() {
         "the control socket is not an absolute path"
     );
 
+    // Every Swamp tool is on the allow list: --permission-prompts none auto-denies anything
+    // that is not, and an auto-denied swamp_dispatch leaves the brain with nothing to do.
+    let allowed: Vec<&String> = brain_call
+        .argv
+        .iter()
+        .skip_while(|a| *a != "--allowed-tools")
+        .skip(1)
+        .take_while(|a| !a.starts_with("--"))
+        .collect();
+    for name in swamp::mcp::tools::qualified_names() {
+        assert!(
+            allowed.contains(&&name),
+            "{name} is missing from {allowed:?}"
+        );
+    }
+
     // Three invocations of one wrapper: one brain, two workers, none of them with MCP.
     let calls = h.invocations("main");
     assert_eq!(calls.len(), 3, "one brain and two workers");

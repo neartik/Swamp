@@ -201,6 +201,63 @@ fn brain_argv_adds_streaming_stdin_and_an_inline_mcp_config() {
     assert_eq!(parsed["mcpServers"]["swamp"]["args"][0], "mcp-bridge");
 }
 
+/// The brain runs with --permission-prompts none, so a Swamp MCP tool that is not on the
+/// allow list is auto-denied and the brain cannot dispatch anything at all.
+#[test]
+fn the_brain_allows_every_registered_swamp_mcp_tool() {
+    let mut s = spec();
+    s.kind = NodeKind::Brain;
+    s.isolation = IsolationMode::ReadOnly;
+    s.mcp = Some(McpAttach {
+        command: Utf8PathBuf::from("/usr/local/bin/swamp"),
+        args: vec!["mcp-bridge".to_owned()],
+    });
+    s.allow_tools = vec!["Read".to_owned(), "Grep".to_owned()];
+    s.deny_tools = vec!["WebFetch".to_owned()];
+    let argv = argv_of(&s);
+
+    let allowed: Vec<&String> = argv
+        .iter()
+        .skip_while(|a| *a != "--allowed-tools")
+        .skip(1)
+        .take_while(|a| !a.starts_with("--"))
+        .collect();
+    let registered = swamp::mcp::tools::qualified_names();
+    assert!(!registered.is_empty(), "the tool registry is empty");
+    for name in &registered {
+        assert!(name.starts_with("mcp__swamp__"), "{name}");
+        assert!(
+            allowed.contains(&name),
+            "{name} is missing from {allowed:?}"
+        );
+    }
+    assert!(allowed.contains(&&"Read".to_owned()), "{allowed:?}");
+
+    // The read-only denials and the configured ones compose into one flag: a repeated
+    // variadic option overwrites, which would have dropped one of the two lists.
+    let denied: Vec<&String> = argv
+        .iter()
+        .skip_while(|a| *a != "--disallowed-tools")
+        .skip(1)
+        .take_while(|a| !a.starts_with("--"))
+        .collect();
+    assert_eq!(
+        denied,
+        vec!["Edit", "Write", "MultiEdit", "NotebookEdit", "WebFetch"]
+    );
+    assert_eq!(
+        argv.iter().filter(|a| *a == "--disallowed-tools").count(),
+        1
+    );
+}
+
+/// A worker has no MCP server at all, so it must not be handed MCP tool names either.
+#[test]
+fn a_worker_gets_no_mcp_allow_list() {
+    let argv = argv_of(&spec());
+    assert!(!argv.iter().any(|a| a.starts_with("mcp__")), "{argv:?}");
+}
+
 #[test]
 fn budget_and_resume_flags_appear_only_when_asked_for() {
     let plain = argv_of(&spec());

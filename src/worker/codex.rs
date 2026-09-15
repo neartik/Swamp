@@ -150,9 +150,10 @@ fn sandbox(spec: &LaunchSpec) -> String {
 
 fn mcp_config_args(mcp: &McpAttach) -> [String; 2] {
     let args = serde_json::to_string(&mcp.args).unwrap_or_else(|_| "[]".to_owned());
+    let name = crate::mcp::server::SERVER_NAME;
     [
-        format!("mcp_servers.swamp.command=\"{}\"", mcp.command),
-        format!("mcp_servers.swamp.args={args}"),
+        format!("mcp_servers.{name}.command=\"{}\"", mcp.command),
+        format!("mcp_servers.{name}.args={args}"),
     ]
 }
 

@@ -923,9 +923,17 @@ Brain adds, and removes `--strict-mcp-config`-without-config:
 ```
   --input-format stream-json
   --mcp-config '<inline json>'  --strict-mcp-config
-  --allowed-tools mcp__swamp__swamp_dispatch mcp__swamp__swamp_await ... Read Grep Glob
+  --allowed-tools mcp__swamp__swamp_dispatch ... mcp__swamp__swamp_note [...brain.allow_tools]
   --include-partial-messages     # smooth streaming in the chat UI; off for workers
 ```
+
+The allow list is generated from the tool registry in `mcp/tools.rs`, never written out by
+hand: the brain runs with `--permission-prompts none`, so a tool the list forgets is denied
+automatically and the brain loses the only way it has to do anything. `--allowed-tools` and
+`--disallowed-tools` are variadic, so a repeat overwrites rather than accumulates: the
+read-only denials and `brain.deny_tools` are merged into one flag, and so are the MCP names
+and `brain.allow_tools`. A read-only brain therefore still calls every Swamp tool while Edit,
+Write, MultiEdit and NotebookEdit stay denied.
 
 `--include-partial-messages` is deliberately off for workers: roughly 10x the raw volume for no
 benefit, since nobody reads a worker's stream token by token. The brain gets it only when
@@ -968,7 +976,9 @@ Brain adds:
 ```
 
 `-c` takes a dotted TOML path, and `codex mcp` manages "external MCP servers for Codex", so
-`mcp_servers.*` is the right key. `doctor --probe` verifies this end to end rather than assuming it
+`mcp_servers.*` is the right key. No allow list is needed on this side: `approval_policy`
+gates "when the model requires human approval before executing a command", and an MCP tool
+call is not a command, so `approval_policy="never"` leaves the swamp tools callable. `doctor --probe` verifies this end to end rather than assuming it
 (section 9).
 
 `--dangerously-skip-permissions` (claude) and `--dangerously-bypass-approvals-and-sandbox` (codex)
@@ -1387,6 +1397,13 @@ impl AccountPool {
     }
 }
 ```
+
+A score alone leaves two idle accounts exactly tied, and the tie then fell to the map order, so
+every sequential single-worker run burned the same subscription. Equal scores are therefore
+settled in order by fewest `lifetime_nodes`, then lowest `lifetime_cost_usd` (both persisted in
+`~/.swamp/accounts.json`, so the rotation survives the process), then by a per-pool cursor that
+rotates the candidate list once per selection. Load always outranks history: a busy account is
+never preferred to an idle one.
 
 `LeastLoaded` is the **v1 default**. `QuotaAware` is implemented and selectable, but it is not the
 default because the telemetry that feeds it exists for Anthropic only: claude emits
@@ -1823,6 +1840,8 @@ swamp run <TASK...>                         One-shot, non-interactive
 
 swamp trace [RUN|last]                      RUN accepts a full id, a unique prefix, `last`, or `-2`
       --node <ID> --events --raw --stderr --follow --json --depth <N> --failed --since <DUR>
+                                            With no RUN, --node searches every run, so a node of
+                                            an older run renders that run
 
 swamp watch [RUN|last]                      Live TUI, read-only, attachable from another terminal
 
@@ -1839,6 +1858,11 @@ swamp accounts [list]                       Health, inflight, 5h/7d, cooldown, n
 
 swamp diff <NODE> [--stat|--name-only|--patch]
 swamp adopt <NODE>...                       Land a worker's work in the user's tree
+                                            NODE is a full id, a short id or a prefix, searched
+                                            across every run newest first and refused when the
+                                            prefix matches nodes in more than one; `last` and
+                                            `-2` name a run and resolve to its only node, or to
+                                            its most recently finished one
       --strategy <apply|merge|cherry-pick>  Default apply
       --into <BRANCH> --dry-run --force     Refuses on a dirty tree unless --force
 
