@@ -1,5 +1,6 @@
 ---
 source: src/model/failure.rs
+assertion_line: 202
 expression: all
 ---
 [
@@ -48,5 +49,9 @@ expression: all
   {
     "kind": "no_capacity",
     "detail": "all cooling"
+  },
+  {
+    "kind": "cancelled",
+    "by": "user"
   }
 ]

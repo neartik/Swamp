@@ -32,7 +32,9 @@ pub async fn follow(
     sink: &mut RawSink,
     out: mpsc::Sender<(NodeId, WorkerEvent, u64)>,
     alive: Arc<dyn Fn() -> bool + Send + Sync>,
+    max_line: usize,
 ) -> anyhow::Result<u64> {
+    let max_line = max_line.clamp(1024, MAX_LINE);
     let mut offset = offset;
     let mut f = tokio::fs::File::open(path).await?;
     f.seek(std::io::SeekFrom::Start(offset)).await?;
@@ -40,7 +42,7 @@ pub async fn follow(
     let mut buf = Vec::with_capacity(8 * 1024);
     loop {
         buf.clear();
-        let line = read_capped_line(&mut rdr, &mut buf, MAX_LINE).await?;
+        let line = read_capped_line(&mut rdr, &mut buf, max_line).await?;
         if line.consumed == 0 {
             if !alive() {
                 break;
@@ -61,7 +63,7 @@ pub async fn follow(
         offset += line.consumed;
         let text = String::from_utf8_lossy(&buf);
         // Lossy replacement can grow the byte count, so cap once more before parsing.
-        let text = truncate_line(text.trim_end_matches(['\n', '\r']), MAX_LINE);
+        let text = truncate_line(text.trim_end_matches(['\n', '\r']), max_line);
         let po = adapter.parse_line(text, st);
         if po.noise {
             st.unparsed += 1;

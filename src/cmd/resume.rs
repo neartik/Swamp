@@ -82,6 +82,7 @@ impl Recovery {
 
 /// Recover an interrupted run.
 pub async fn run(ctx: &Ctx, args: &ResumeArgs) -> anyhow::Result<i32> {
+    crate::cmd::guard_depth(&ctx.cfg)?;
     let paths = ctx.run_paths(args.run.as_deref())?;
     let view = ctx.view(&paths, false)?;
     let mut steps = plan(&view, &paths);
@@ -241,6 +242,15 @@ async fn attach(
         _ => finalize_offline(session, record)?,
     };
 
+    // A limit learned while recovering is still a limit: without this the next run leases the
+    // same account and burns a node against a live 429.
+    if let Some(account) = &record.account {
+        session.pool.report(account, out.failure.as_ref(), out.cost);
+        if let Some(snap) = out.rate_limit.clone() {
+            session.pool.observe_quota(account, snap);
+        }
+    }
+
     let state = match &out.failure {
         None => NodeState::Succeeded,
         Some(f) => NodeState::Failed { failure: f.clone() },
@@ -378,6 +388,11 @@ fn spec_for(session: &RunSession, record: &NodeRecord) -> LaunchSpec {
         .and_then(|a| session.cfg.account(a))
         .map(|a| crate::config::resolve::expand_env(&a.env))
         .unwrap_or_default();
+    let isolation = session
+        .cfg
+        .workspace
+        .isolation
+        .unwrap_or(IsolationMode::Worktree);
     LaunchSpec {
         node: NodeIds {
             id: record.id,
@@ -389,7 +404,7 @@ fn spec_for(session: &RunSession, record: &NodeRecord) -> LaunchSpec {
         model: record.model.clone().unwrap_or_default(),
         tier: record.tier,
         cwd: record.workspace.path().to_path_buf(),
-        isolation: IsolationMode::Worktree,
+        isolation,
         session: match record.session.clone() {
             Some(h) => SessionPlan::Resume(h),
             None => SessionPlan::New { preassigned: None },
@@ -403,7 +418,9 @@ fn spec_for(session: &RunSession, record: &NodeRecord) -> LaunchSpec {
         deny_tools: Vec::new(),
         mcp: None,
         last_message_path: session.paths.last_message(record.id),
-        extra_args: worker.args.clone(),
+        extra_args: worker.args_for(isolation),
+        extra: session.cfg.tier_extra(record.provider, record.tier),
+        partial_messages: false,
         attempt: record.attempt,
     }
 }

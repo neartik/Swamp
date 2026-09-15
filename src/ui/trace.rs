@@ -97,7 +97,7 @@ fn footer(view: &RunView) -> String {
     );
     let unknown = view.nodes.values().filter(|n| n.cost.is_none()).count();
     out.push_str(&format!("cost   {}", total_cost(view)));
-    if !view.cost_complete {
+    if unknown > 0 {
         let plural = if unknown == 1 { "node" } else { "nodes" };
         out.push_str(&format!("   ({unknown} {plural} reported no cost data)"));
     }
@@ -252,6 +252,7 @@ fn failure_summary(f: &Failure) -> String {
         Failure::Crashed { .. } => "crashed".to_owned(),
         Failure::Truncated { .. } => "truncated".to_owned(),
         Failure::NoCapacity { .. } => "no_capacity".to_owned(),
+        Failure::Cancelled { .. } => "cancelled".to_owned(),
     }
 }
 
@@ -284,6 +285,7 @@ fn failure_detail(f: &Failure) -> String {
             format!("Truncated: the stream ended at byte {offset} with no final event")
         }
         Failure::Timeout { after_s } => format!("Timeout: no terminal event after {after_s}s"),
+        Failure::Cancelled { by } => format!("Cancelled by {by:?}"),
     }
 }
 
@@ -335,7 +337,7 @@ pub fn event_text(e: &WorkerEvent) -> String {
 }
 
 fn one_line(s: &str, n: usize) -> String {
-    fmt::truncate(&s.replace(['\n', '\r'], " "), n)
+    fmt::truncate(s, n)
 }
 
 /// The run's wall time, taken from the nodes so that the same journal always renders the
@@ -493,12 +495,25 @@ pub async fn follow(paths: &RunPaths, o: &TraceOpts) -> anyhow::Result<()> {
 
 /// `--since`: drop everything older than the cutoff before rendering.
 pub fn keep_since(view: &mut RunView, cutoff: OffsetDateTime) {
-    let keep: Vec<NodeId> = view
+    let mut keep: Vec<NodeId> = view
         .nodes
         .iter()
         .filter(|(_, n)| n.created_at >= cutoff)
         .map(|(id, _)| *id)
         .collect();
+    // `tree()` walks down from the roots, so dropping an ancestor would hide every recent
+    // node under it. The brain node is older than everything it dispatched.
+    let mut at = 0;
+    while at < keep.len() {
+        let parent = view.nodes.get(&keep[at]).and_then(|n| n.parent);
+        at += 1;
+        if let Some(p) = parent
+            && view.nodes.contains_key(&p)
+            && !keep.contains(&p)
+        {
+            keep.push(p);
+        }
+    }
     view.nodes.retain(|id, _| keep.contains(id));
     view.roots.retain(|id| keep.contains(id));
     view.children.retain(|p, _| keep.contains(p));
@@ -510,4 +525,6 @@ pub fn keep_since(view: &mut RunView, cutoff: OffsetDateTime) {
         !chain.is_empty()
     });
     view.events.retain(|id, _| keep.contains(id));
+    // Totals describe what is rendered; without this the footer reports the whole run.
+    view.recompute();
 }

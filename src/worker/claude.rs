@@ -57,8 +57,11 @@ impl ProviderAdapter for ClaudeAdapter {
             }
         }
 
-        a.push("--permission-mode".into());
-        a.push(spec.permission_mode.clone().into());
+        // An unset config key must not become `--permission-mode ''`, which claude rejects.
+        if !spec.permission_mode.trim().is_empty() {
+            a.push("--permission-mode".into());
+            a.push(spec.permission_mode.clone().into());
+        }
         a.push("--permission-prompts".into());
         a.push("none".into());
 
@@ -69,7 +72,9 @@ impl ProviderAdapter for ClaudeAdapter {
                 a.push("--mcp-config".into());
                 a.push(mcp_config_json(mcp).into());
                 a.push("--strict-mcp-config".into());
-                a.push("--include-partial-messages".into());
+                if spec.partial_messages {
+                    a.push("--include-partial-messages".into());
+                }
             }
             // No --mcp-config alongside it: workers get exactly zero MCP servers.
             _ => a.push("--strict-mcp-config".into()),
@@ -96,6 +101,10 @@ impl ProviderAdapter for ClaudeAdapter {
         if !spec.deny_tools.is_empty() {
             a.push("--disallowed-tools".into());
             a.extend(spec.deny_tools.iter().map(OsString::from));
+        }
+        for (k, v) in &spec.extra {
+            a.push(format!("--{k}").into());
+            a.push(v.clone().into());
         }
         a.extend(spec.extra_args.iter().map(OsString::from));
         Ok(a)
@@ -127,6 +136,7 @@ impl ProviderAdapter for ClaudeAdapter {
                 ParseOutput::one(WorkerEvent::RateLimit(snap))
             }
             ClaudeLine::Result(r) => result_event(*r, st),
+            ClaudeLine::StreamEvent => ParseOutput::empty(),
             ClaudeLine::Other => {
                 st.unparsed += 1;
                 ParseOutput::one(WorkerEvent::Unknown { raw: raw_line(t) })
@@ -346,6 +356,9 @@ enum ClaudeLine {
         rate_limit_info: RateLimitInfo,
     },
     Result(Box<ResultLine>),
+    /// --include-partial-messages chunks: nothing downstream consumes a delta, and counting
+    /// thousands of them as unparsed would bury the real noise.
+    StreamEvent,
     #[serde(other)]
     Other,
 }

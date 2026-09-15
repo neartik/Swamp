@@ -22,7 +22,7 @@ use crate::model::failure::Failure;
 use crate::model::node::ExitInfo;
 use crate::worker::follow::{POLL, follow};
 use crate::worker::liveness::wait_exit;
-use crate::worker::spawn::{spawn_detached, terminate};
+use crate::worker::spawn::{Reaper, spawn_detached, terminate};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -65,6 +65,8 @@ pub struct ExecReq<'a> {
     pub resume: Option<(i32, u64)>,
     pub timeout: Duration,
     pub grace: Duration,
+    /// journal.max_line_bytes: a base64 blob on one line must truncate, not OOM.
+    pub max_line: usize,
     pub cancel: CancellationToken,
 }
 
@@ -141,6 +143,11 @@ impl Executor {
             resume,
             timeout,
             grace: self.cfg.limits.grace_period.unwrap_or(DEFAULT_GRACE),
+            max_line: self
+                .cfg
+                .journal
+                .max_line_bytes
+                .unwrap_or(crate::worker::classify::MAX_LINE),
             cancel,
         })
         .await?;
@@ -166,6 +173,7 @@ pub async fn execute(req: ExecReq<'_>) -> anyhow::Result<RunOutcome> {
         resume,
         timeout,
         grace,
+        max_line,
         cancel,
     } = req;
 
@@ -214,10 +222,10 @@ pub async fn execute(req: ExecReq<'_>) -> anyhow::Result<RunOutcome> {
                 _ = done_rx => {}
                 _ = tokio::time::sleep(timeout) => {
                     deadline_hit.store(true, Ordering::SeqCst);
-                    let _ = terminate(pgid, grace).await;
+                    let _ = terminate(pgid, grace, Reaper::Elsewhere).await;
                 }
                 _ = cancel.cancelled() => {
-                    let _ = terminate(pgid, grace).await;
+                    let _ = terminate(pgid, grace, Reaper::Elsewhere).await;
                 }
             }
         }
@@ -249,11 +257,14 @@ pub async fn execute(req: ExecReq<'_>) -> anyhow::Result<RunOutcome> {
         sink,
         tx,
         alive,
+        max_line,
     )
     .await?;
     let _ = consumer.await;
     let exit = waiter.await.ok().flatten();
-    supervisor.abort();
+    // NOT aborted: the direct child can die on SIGTERM while a grandchild in the same group
+    // does not, and aborting here would drop `terminate` before it ever sends SIGKILL.
+    let _ = supervisor.await;
 
     st.stderr_tail = stderr_tail(&io.stderr);
     let failure = adapter

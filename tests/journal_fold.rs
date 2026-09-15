@@ -150,6 +150,7 @@ fn sandbox() -> Sandbox {
         paths: RunPaths {
             run: rid(0),
             dir: dir.join("runs").join(rid(0).to_string()),
+            sock_dir: dir.join("sock"),
         },
     }
 }
@@ -274,6 +275,7 @@ async fn durable_emit_child() {
     };
     let paths = RunPaths {
         run: rid(0),
+        sock_dir: Utf8PathBuf::from(&dir),
         dir: Utf8PathBuf::from(dir),
     };
     let (handle, _task) = Journal::open(paths, FsyncPolicy::Never, &[])
@@ -849,7 +851,9 @@ fn run_paths_name_every_node_artifact_and_link_last() {
     assert!(rp.last_message(n).ends_with("last-message.txt"));
     assert!(rp.patch(n).ends_with("patch.diff"));
     assert!(rp.pidfile(n).ends_with("pid"));
-    assert!(rp.socket().ends_with("ctl.sock"));
+    assert!(rp.socket().as_str().ends_with(".sock"));
+    // SUN_LEN is 104 bytes on macOS: the socket must not inherit the repo's depth.
+    assert!(!rp.socket().starts_with(&rp.dir));
 
     std::fs::create_dir_all(&rp.dir).unwrap();
     rp.link_last().expect("link");
@@ -921,4 +925,46 @@ fn a_detector_tagged_failure_still_renders_in_the_digest() {
     }
     let out = d.finish();
     assert!(out.contains("FAIL rate_limited"), "{out}");
+}
+
+/// `swamp resume` calls `RunSession::start` with the existing run id, so a second RunStarted
+/// lands in the same journal. The run's origin is the first one: its task, base and clock.
+#[test]
+fn a_second_run_started_never_overwrites_the_run_header() {
+    let mut view = RunView::default();
+    view.apply(&line(
+        0,
+        None,
+        JournalEvent::RunStarted {
+            swamp_version: "0.1.0".into(),
+            schema: 1,
+            argv: vec!["swamp".into(), "run".into(), "port the parser".into()],
+            cwd: Utf8PathBuf::from("/repo"),
+            repo: Some(Utf8PathBuf::from("/repo")),
+            base: Some("aaaa111".into()),
+            config_sha256: "abc".into(),
+            task: Some("port the parser".into()),
+        },
+    ));
+    let first = view.header.as_ref().expect("a header").started_at;
+
+    view.apply(&line(
+        1,
+        None,
+        JournalEvent::RunStarted {
+            swamp_version: "0.1.0".into(),
+            schema: 1,
+            argv: vec!["swamp".into(), "resume".into(), "last".into()],
+            cwd: Utf8PathBuf::from("/repo"),
+            repo: Some(Utf8PathBuf::from("/repo")),
+            base: Some("bbbb222".into()),
+            config_sha256: "abc".into(),
+            task: None,
+        },
+    ));
+    let h = view.header.as_ref().expect("a header");
+    assert_eq!(h.task.as_deref(), Some("port the parser"));
+    assert_eq!(h.base.as_deref(), Some("aaaa111"));
+    assert_eq!(h.argv[1], "run");
+    assert_eq!(h.started_at, first, "elapsed would measure from the resume");
 }

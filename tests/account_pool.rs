@@ -56,6 +56,7 @@ async fn journal(dir: &Utf8PathBuf) -> (JournalHandle, Events) {
     let paths = RunPaths {
         run,
         dir: dir.clone(),
+        sock_dir: dir.clone(),
     };
     let writer = Writer::open(&paths.journal(), FsyncPolicy::Never)
         .await
@@ -454,15 +455,65 @@ max_concurrency = 2
 "#,
     )
     .await;
-    let reserved = h
+    // The only account of a provider is never held back: reserving it would leave the
+    // workers with nothing to lease at all.
+    assert_eq!(h.pool.reserve_for_brain(Provider::Anthropic), None);
+    assert!(acquire(&h.pool).await.is_ok(), "the solo account is usable");
+
+    let two = harness(TWO_ACCOUNTS).await;
+    let reserved = two
         .pool
         .reserve_for_brain(Provider::Anthropic)
         .expect("a brain account");
-    assert_eq!(reserved, id("main"));
-    assert!(
-        matches!(acquire(&h.pool).await, Err(NoCapacity::Exhausted { .. })),
+    let worker = acquire(&two.pool).await.expect("a worker lease");
+    assert_ne!(
+        worker.account, reserved,
         "a worker batch must not take the brain's account"
     );
+    let second = acquire(&two.pool).await.expect("a second worker lease");
+    assert_ne!(second.account, reserved);
+}
+
+/// The brain's permit comes out of its own slot, never out of the worker budget, and the
+/// account it leases is the one `brain.account` names.
+#[tokio::test]
+async fn the_brain_lease_does_not_consume_a_worker_permit() {
+    let h = harness(
+        r#"
+[limits]
+max_parallel = 4
+[brain]
+reserve_brain_slot = false
+[providers.anthropic]
+models = { mid = "tier-mid" }
+[[accounts]]
+id = "main"
+provider = "anthropic"
+exec = "claude-main"
+max_concurrency = 4
+[[accounts]]
+id = "alt"
+provider = "anthropic"
+exec = "claude-alt"
+max_concurrency = 4
+"#,
+    )
+    .await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let brain = h
+        .pool
+        .acquire_brain(Provider::Anthropic, Some(&id("main")), deadline)
+        .await
+        .expect("a brain lease");
+    assert_eq!(brain.account, id("main"));
+
+    // max_parallel defaults to 4 and reserve_brain_slot is off in this fixture, so four
+    // worker leases must still be available with the brain holding its own.
+    let mut leases = Vec::new();
+    for _ in 0..4 {
+        leases.push(acquire(&h.pool).await.expect("a worker lease"));
+    }
+    assert_eq!(leases.len(), 4);
 }
 
 #[tokio::test]

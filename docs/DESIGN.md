@@ -91,12 +91,14 @@ we inherit vendor stream-schema churn. Both are mitigated (section 4.7, section 
 
 The MCP tools must share live state with the dispatcher (account pool, journal writer, running
 worker handles), so the server is in-process: Swamp hosts JSON-RPC 2.0 over a Unix domain socket at
-`.swamp/runs/<run>/ctl.sock`. The CLIs only spawn stdio children, so Swamp passes itself as that
-child:
+`~/.swamp/sock/<run_short>.sock`. The socket does NOT live under the run directory: macOS caps a
+`sockaddr_un` path at 104 bytes (SUN_LEN) and a repo can sit arbitrarily deep, so a run inside a
+long path would fail to bind before anything ran. The real path is recorded in `run.json`. The CLIs
+only spawn stdio children, so Swamp passes itself as that child:
 
 ```json
 {"mcpServers":{"swamp":{"command":"/abs/path/to/swamp",
-  "args":["mcp-bridge","--socket","/repo/.swamp/runs/<run>/ctl.sock"]}}}
+  "args":["mcp-bridge","--socket","/Users/me/.swamp/sock/<run_short>.sock"]}}}
 ```
 
 `swamp mcp-bridge` is a hidden subcommand: a byte pump between stdin/stdout and the socket. No
@@ -129,8 +131,14 @@ Workers keep running throughout, because they are detached (section 4.1). Losing
 loses worker work.
 
 `reserve_brain_slot = true` (default) keeps one healthy account of the brain's provider out of the
-worker pool. Without it the system deadlocks: the brain blocks in `swamp_await`, workers hold every
-account, and nothing can finish because the brain never gets to run an integration node.
+worker pool, unless that provider has only one account, in which case nothing is held back: holding
+the only account would leave the workers with none. Without the reservation the system deadlocks:
+the brain blocks in `swamp_await`, workers hold every account, and nothing can finish because the
+brain never gets to run an integration node.
+
+The brain's permit comes from a dedicated one-slot semaphore, never from `max_parallel`. The
+reservation already subtracts a worker permit; charging the brain a second one out of the same
+budget leaves `max_parallel - 2` workers and deadlocks outright at `max_parallel <= 2`.
 
 ### MCP tool surface
 
@@ -892,7 +900,10 @@ Worker:
   --verbose                        # required alongside stream-json in print mode
   --model <models[tier]>           # from config; never hardcoded
   --session-id <uuid>              # pre-generated, journaled BEFORE spawn -> resume always possible
-  --permission-mode acceptEdits    # from config; never bypassPermissions unless opted in
+  [--permission-mode acceptEdits]  # from config, and ONLY when it sets one: the flag has a
+                                   # closed choice list, so an empty argument is an argv error
+                                   # that kills the CLI before it emits one stream line.
+                                   # Never bypassPermissions unless opted in.
   --permission-prompts none        # nobody is at the keyboard; prompts are denied, not hung
   --strict-mcp-config              # with no --mcp-config: workers get exactly zero MCP servers
   [--max-budget-usd <n>]           # when a per-node budget is set
@@ -917,7 +928,10 @@ Brain adds, and removes `--strict-mcp-config`-without-config:
 ```
 
 `--include-partial-messages` is deliberately off for workers: roughly 10x the raw volume for no
-benefit, since nobody reads a worker's stream token by token.
+benefit, since nobody reads a worker's stream token by token. The brain gets it only when
+`brain.include_partial_messages` is set, and the `stream_event` lines it produces are parsed to
+nothing: they are partial chunks, not unparsable noise, and journaling one event per chunk would
+inflate a run's journal tenfold for deltas no renderer consumes.
 
 ### 5.4 OpenAI argv
 
@@ -928,7 +942,9 @@ Worker:
   --json
   -m <models[tier]>
   -C <worktree>
-  -s workspace-write                       # "read-only" for IsolationMode::ReadOnly
+  [-s workspace-write]                     # "read-only" for IsolationMode::ReadOnly; omitted
+                                           # entirely when the config names no sandbox, since
+                                           # `-s ''` is a clap error and exits 2
   -o <node_dir>/last-message.txt           # the vendor's own "final answer", parse-independent
   -c approval_policy="never"
   [-c model_reasoning_effort="high"]       # from providers.openai.tier_extra
@@ -948,7 +964,7 @@ Brain adds:
 
 ```
   -c mcp_servers.swamp.command="<abs path to swamp>"
-  -c 'mcp_servers.swamp.args=["mcp-bridge","--socket","<ctl.sock>"]'
+  -c 'mcp_servers.swamp.args=["mcp-bridge","--socket","<~/.swamp/sock/<run_short>.sock>"]'
 ```
 
 `-c` takes a dotted TOML path, and `codex mcp` manages "external MCP servers for Codex", so
@@ -1336,7 +1352,10 @@ Three levels of backpressure, all real semaphores:
    all complete or `max_wait_s` elapses.
 
 `reserve_brain_slot = true` holds one permit and one healthy account of the brain's provider out of
-the worker pool.
+the worker pool. The held permit is the subtraction from `max_parallel`; the brain's own lease is
+taken from a separate one-slot semaphore, so the reservation costs exactly one slot. `brain.account`
+pins which account the brain leases, and a pin that cannot be leased is an error, never a silent
+fallback to another account.
 
 ### 6.4 Selection
 
@@ -1532,7 +1551,6 @@ absence is exactly why `QuotaAware` is not the v1 default.
     journal.jsonl                         # THE tree: append-only JournalLine stream
     mcp.json                              # generated MCP config handed to the brain
     brain.md                              # the system prompt actually used, verbatim
-    ctl.sock                              # UDS control socket, 0600 in a 0700 dir
     swamp.pid
     nodes/<node_id>/
       prompt.md                           # the exact bytes fed to fd0
@@ -2004,7 +2022,7 @@ tier_extra = { high = { effort = "high" }, mid = { effort = "medium" }, low = { 
 
 [providers.openai]
 adapter = "codex-cli"
-models  = { high = "gpt-5.3-pro", mid = "gpt-5.3-sol", low = "gpt-5.3-astra" }
+models  = { high = "gpt-6-astra", mid = "gpt-5.6-sol", low = "gpt-5.6-terra" }
 tier_extra = { high = { model_reasoning_effort = "high" },
                mid  = { model_reasoning_effort = "medium" },
                low  = { model_reasoning_effort = "low" } }
@@ -2083,7 +2101,7 @@ overloaded = ['server_overloaded', '(?i)\b503\b']
 # Only used to ESTIMATE cost where the CLI reports none (codex). USD per 1M tokens.
 # Anything computed here is stamped basis="estimated" and is never presented as a measurement.
 # Omit the table and cost stays blank.
-[pricing."gpt-5.3-sol"]
+[pricing."gpt-5.6-sol"]
 input        = 0.25
 cached_input = 0.025
 output       = 2.00

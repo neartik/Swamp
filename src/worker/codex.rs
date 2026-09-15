@@ -44,8 +44,12 @@ impl ProviderAdapter for CodexAdapter {
         a.push(spec.model.clone().into());
         a.push("-C".into());
         a.push(spec.cwd.as_str().into());
-        a.push("-s".into());
-        a.push(sandbox(spec).into());
+        // An unset providers.openai.worker.sandbox must not become `-s ''`, which clap rejects.
+        let sandbox = sandbox(spec);
+        if !sandbox.trim().is_empty() {
+            a.push("-s".into());
+            a.push(sandbox.into());
+        }
         a.push("-o".into());
         a.push(spec.last_message_path.as_str().into());
         // `codex exec` has NO -a/--ask-for-approval; that flag is top-level only.
@@ -62,6 +66,10 @@ impl ProviderAdapter for CodexAdapter {
         }
         if !spec.cwd.join(".git").exists() {
             a.push("--skip-git-repo-check".into());
+        }
+        for (k, v) in &spec.extra {
+            a.push("-c".into());
+            a.push(format!("{k}=\"{v}\"").into());
         }
         a.extend(spec.extra_args.iter().map(OsString::from));
         a.push("-".into());
@@ -244,9 +252,11 @@ fn change_kind(k: &str) -> ChangeKind {
     }
 }
 
+/// Codex reports `input_tokens` as the WHOLE prompt with `cached_input_tokens` inside it;
+/// everything downstream uses Anthropic semantics, where the two are disjoint.
 fn usage_of(u: &CodexUsage) -> Usage {
     Usage {
-        input_tokens: u.input_tokens,
+        input_tokens: u.input_tokens.saturating_sub(u.cached_input_tokens),
         cached_input_tokens: u.cached_input_tokens,
         cache_write_tokens: u.cache_write_input_tokens,
         output_tokens: u.output_tokens,

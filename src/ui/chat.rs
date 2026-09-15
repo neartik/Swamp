@@ -51,7 +51,22 @@ pub async fn repl(
             }
         }
         brain.send(&text).await?;
-        code = drain_turn(&mut brain, ctx).await;
+        code = {
+            let turn = drain_turn(&mut brain, ctx);
+            tokio::pin!(turn);
+            tokio::select! {
+                code = &mut turn => code,
+                () = crate::cmd::shutdown_signal() => {
+                    // Workers run in their own process groups: a terminal signal never
+                    // reaches them, so the shutdown path has to stop them itself.
+                    eprintln!("\ninterrupted: cancelling {} nodes", disp.cancel_all());
+                    6
+                }
+            }
+        };
+        if code == 6 {
+            break;
+        }
     }
     brain.shutdown().await?;
     Ok(code)

@@ -34,6 +34,7 @@ transport = "cli"
 provider = "anthropic"
 tier = "high"
 reserve_brain_slot = true
+permission_mode = "acceptEdits"
 include_partial_messages = true
 system_prompt_file = ".swamp/brain.md"
 

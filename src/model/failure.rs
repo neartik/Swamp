@@ -53,6 +53,10 @@ pub enum Failure {
     NoCapacity {
         detail: String,
     },
+    /// The operator or the brain stopped this node. Never retried, never a cooldown.
+    Cancelled {
+        by: crate::model::core::CancelSource,
+    },
 }
 
 /// Which layer of the classifier fired. Journaled so `swamp doctor --schema` can report
@@ -87,6 +91,7 @@ impl Failure {
                 | Self::Timeout { .. }
                 | Self::PermissionDenied { .. }
                 | Self::NoCapacity { .. }
+                | Self::Cancelled { .. }
         )
     }
 }
@@ -115,6 +120,7 @@ mod tests {
             Failure::WorkerError { .. } => Class::Terminal,
             Failure::PermissionDenied { .. } => Class::Terminal,
             Failure::NoCapacity { .. } => Class::Terminal,
+            Failure::Cancelled { .. } => Class::Terminal,
         }
     }
 
@@ -147,6 +153,9 @@ mod tests {
             Failure::Truncated { offset: 8192 },
             Failure::NoCapacity {
                 detail: "all cooling".into(),
+            },
+            Failure::Cancelled {
+                by: crate::model::core::CancelSource::User,
             },
         ]
     }

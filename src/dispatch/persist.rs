@@ -22,13 +22,52 @@ pub fn load_state(path: &Utf8Path) -> anyhow::Result<StateMap> {
     serde_json::from_str(&text).with_context(|| format!("parsing {path}"))
 }
 
+/// Read-modify-write under the lock. Another repo's run may have learned a cooldown since we
+/// loaded, and overwriting the whole file with our snapshot would erase it.
+pub fn merge_state(path: &Utf8Path, mine: &StateMap) -> anyhow::Result<StateMap> {
+    let dir = path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("{path} has no parent directory"))?;
+    std::fs::create_dir_all(dir).with_context(|| format!("creating {dir}"))?;
+    let _guard = lock(path)?;
+    let mut merged = read_unlocked(path).unwrap_or_default();
+    for (id, ours) in mine {
+        let keep = match merged.get(id) {
+            Some(theirs) if theirs.updated_at > ours.updated_at => continue,
+            Some(theirs) => theirs.lifetime_nodes.max(ours.lifetime_nodes),
+            None => ours.lifetime_nodes,
+        };
+        let mut entry = ours.clone();
+        entry.lifetime_nodes = keep;
+        // inflight is this process's runtime state and means nothing to anyone else.
+        entry.inflight = 0;
+        merged.insert(id.clone(), entry);
+    }
+    write_locked(path, dir, &merged)?;
+    Ok(merged)
+}
+
 pub fn save_state(path: &Utf8Path, s: &StateMap) -> anyhow::Result<()> {
     let dir = path
         .parent()
         .ok_or_else(|| anyhow::anyhow!("{path} has no parent directory"))?;
     std::fs::create_dir_all(dir).with_context(|| format!("creating {dir}"))?;
     let _guard = lock(path)?;
+    write_locked(path, dir, s)
+}
 
+fn read_unlocked(path: &Utf8Path) -> anyhow::Result<StateMap> {
+    if !path.is_file() {
+        return Ok(StateMap::new());
+    }
+    let text = std::fs::read_to_string(path).with_context(|| format!("reading {path}"))?;
+    if text.trim().is_empty() {
+        return Ok(StateMap::new());
+    }
+    serde_json::from_str(&text).with_context(|| format!("parsing {path}"))
+}
+
+fn write_locked(path: &Utf8Path, dir: &Utf8Path, s: &StateMap) -> anyhow::Result<()> {
     let mut tmp = tempfile::NamedTempFile::new_in(dir.as_std_path())
         .with_context(|| format!("creating a temp file in {dir}"))?;
     let body = serde_json::to_vec_pretty(s)?;
@@ -98,6 +137,49 @@ mod tests {
         assert_eq!(got.health, Health::Cooling);
         assert_eq!(got.consecutive_infra_failures, 2);
         assert_eq!(got.lifetime_nodes, 7);
+    }
+
+    /// Repo A learns a 5h cooldown; repo B, which loaded before that, writes its own snapshot.
+    /// A whole-file overwrite used to erase the cooldown and route straight back into the limit.
+    #[test]
+    fn a_merge_never_erases_another_process_entry() {
+        let (_dir, path) = tmp_dir();
+        let now = time::OffsetDateTime::now_utc();
+        let mut a = StateMap::new();
+        a.insert(
+            AccountId("main".into()),
+            AccountState {
+                health: Health::Cooling,
+                cooldown_until: Some(now + std::time::Duration::from_secs(5 * 3600)),
+                updated_at: Some(now),
+                ..Default::default()
+            },
+        );
+        merge_state(&path, &a).unwrap();
+
+        // B's view of `main` predates the cooldown; it only means to record its own account.
+        let mut b = StateMap::new();
+        b.insert(
+            AccountId("main".into()),
+            AccountState {
+                updated_at: Some(now - std::time::Duration::from_secs(60)),
+                ..Default::default()
+            },
+        );
+        b.insert(
+            AccountId("alt".into()),
+            AccountState {
+                lifetime_nodes: 3,
+                updated_at: Some(now),
+                ..Default::default()
+            },
+        );
+        let merged = merge_state(&path, &b).unwrap();
+
+        assert_eq!(merged[&AccountId("main".into())].health, Health::Cooling);
+        assert!(merged[&AccountId("main".into())].cooldown_until.is_some());
+        assert_eq!(merged[&AccountId("alt".into())].lifetime_nodes, 3);
+        assert_eq!(load_state(&path).unwrap().len(), 2);
     }
 
     #[test]

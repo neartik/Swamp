@@ -44,6 +44,8 @@ fn spec(cwd: &str) -> LaunchSpec {
         mcp: None,
         last_message_path: Utf8PathBuf::from("/tmp/node/last-message.txt"),
         extra_args: Vec::new(),
+        extra: Default::default(),
+        partial_messages: false,
         attempt: 1,
     }
 }
@@ -234,10 +236,12 @@ fn the_sample_stream_yields_session_text_and_a_final() {
     };
     assert!(f.ok);
     assert_eq!(f.cost, None, "codex reports no cost; never invent one");
+    // Codex reports 15_300 total prompt tokens INCLUDING 12_160 cache reads; Usage keeps the
+    // two disjoint the way claude reports them, or estimate_cost bills the cache twice.
     assert_eq!(
         f.usage,
         Usage {
-            input_tokens: 15_300,
+            input_tokens: 3_140,
             cached_input_tokens: 12_160,
             cache_write_tokens: 0,
             output_tokens: 5,
@@ -289,4 +293,33 @@ fn an_unknown_type_is_counted_and_never_fatal() {
     );
     assert_eq!(po.events.len(), 1);
     assert_eq!(st.unparsed, 1, "a new field on a known type is not drift");
+}
+
+/// `providers.openai.worker.sandbox` has no built-in default; `-s ''` is rejected by clap
+/// with exit 2 before codex reads a single byte of the prompt.
+#[test]
+fn an_empty_sandbox_drops_the_flag_rather_than_passing_an_empty_argument() {
+    let mut s = spec("/tmp/wt");
+    s.sandbox = String::new();
+    let argv = argv_of(&s);
+    assert!(!argv.iter().any(|a| a == "-s"), "{argv:?}");
+    assert!(!argv.iter().any(String::is_empty), "{argv:?}");
+
+    // read-only isolation still forces the sandbox regardless of the config.
+    s.isolation = IsolationMode::ReadOnly;
+    let argv = argv_of(&s);
+    let at = argv.iter().position(|a| a == "-s").expect("-s");
+    assert_eq!(argv[at + 1], "read-only");
+}
+
+/// providers.openai.tier_extra is journaled as applied; it has to actually reach the argv.
+#[test]
+fn tier_extra_reaches_the_argv_as_config_overrides() {
+    let mut s = spec("/tmp/wt");
+    s.extra = BTreeMap::from([("model_reasoning_effort".to_owned(), "high".to_owned())]);
+    let argv = argv_of(&s);
+    assert!(
+        argv.iter().any(|a| a == "model_reasoning_effort=\"high\""),
+        "{argv:?}"
+    );
 }

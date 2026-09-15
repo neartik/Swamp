@@ -3,7 +3,7 @@ use crate::cmd::Ctx;
 use crate::journal::fold::RunView;
 use crate::journal::paths::RunPaths;
 use crate::model::core::NodeState;
-use crate::worker::spawn::terminate;
+use crate::worker::spawn::{Reaper, terminate};
 use std::time::Duration;
 
 /// Cancel a run or a node by killing its process group. Detached workers do not care that
@@ -50,10 +50,17 @@ pub async fn run(ctx: &Ctx, args: &CancelArgs) -> anyhow::Result<i32> {
             let NodeState::Running { pid, pgid, .. } = node.state else {
                 continue;
             };
-            if !crate::worker::liveness::running(pid) {
+            // A recycled pid can belong to anything; the pidfile carries the start time.
+            if !crate::worker::liveness::is_ours(&paths.pidfile(*id)) {
+                if crate::worker::liveness::running(pid) {
+                    println!(
+                        "skipping node {}: pid {pid} is not ours any more",
+                        id.short()
+                    );
+                }
                 continue;
             }
-            terminate(pgid, grace).await?;
+            terminate(pgid, grace, Reaper::Here).await?;
             killed += 1;
             println!(
                 "cancelled node {} (pgid {pgid}) in run {}",

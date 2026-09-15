@@ -246,17 +246,18 @@ impl WorkspaceManager {
     /// Drops finished runs' worktrees. Anything still carrying uncommitted work is kept.
     pub async fn prune(&self) -> anyhow::Result<u32> {
         let current = self.root.join(self.journal.run.short());
+        let keep = self.cfg.workspace.keep_on_failure != Some(false);
         let mut removed = 0;
         for wt in self.list().await? {
             if wt.path.starts_with(&current) {
                 continue;
             }
-            if !self.git.is_clean_at(&wt.path).await.unwrap_or(false) {
+            if keep && !self.git.is_clean_at(&wt.path).await.unwrap_or(false) {
                 continue;
             }
             let _gate = self.gate.lock().await;
             let _flock = self.flock().await?;
-            if worktree::remove(&self.git, &wt.path, false).await.is_ok() {
+            if worktree::remove(&self.git, &wt.path, !keep).await.is_ok() {
                 removed += 1;
             }
         }

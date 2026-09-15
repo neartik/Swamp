@@ -474,3 +474,41 @@ fn formatting_holds_at_the_boundaries() {
             .join("\n")
     );
 }
+
+/// `tree()` walks down from the roots. Pruning an ancestor used to make every recent node
+/// unreachable, and in a normal run the brain is the only root and the oldest node there is.
+#[test]
+fn since_keeps_the_ancestors_of_the_nodes_it_keeps() {
+    let mut v = view();
+    let recent = nid(6);
+    v.nodes.get_mut(&recent).expect("node").created_at = at(1_000);
+    swamp::ui::trace::keep_since(&mut v, at(500));
+
+    let rows = v.tree();
+    assert!(
+        rows.iter().any(|r| r.logical == recent),
+        "the recent node went with its pruned parent: {rows:?}"
+    );
+    assert!(rows.iter().any(|r| r.logical == nid(1)), "{rows:?}");
+    assert_eq!(
+        rows.len(),
+        2,
+        "only the brain and the recent node: {rows:?}"
+    );
+}
+
+/// Totals describe what is rendered. `keep_since` used to leave `cost_complete` and the
+/// run total describing the whole run, so the footer claimed "0 nodes reported no cost data".
+#[test]
+fn since_recomputes_the_totals_it_renders() {
+    let mut v = view();
+    v.nodes.get_mut(&nid(6)).expect("node").created_at = at(1_000);
+    swamp::ui::trace::keep_since(&mut v, at(500));
+
+    let text = render(&v, &TraceOpts::default());
+    assert!(!text.contains("(0 node"), "{text}");
+    assert!(
+        text.contains("cost   ~$1.21"),
+        "the footer still totals pruned nodes: {text}"
+    );
+}

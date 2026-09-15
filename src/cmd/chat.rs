@@ -4,13 +4,13 @@ use crate::config::Config;
 use crate::ids::RunId;
 use crate::mcp::McpServer;
 use crate::model::core::{AccountId, NodeState, Provider, Tier};
-use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::time::Instant;
 
 /// Interactive brain session. The brain is just another account in the same pool.
 pub async fn run(ctx: &Ctx, args: &ChatArgs) -> anyhow::Result<i32> {
     let cfg = Arc::new(overrides(ctx, args)?);
+    let depth = crate::cmd::guard_depth(&cfg)?;
     let resume = match args.resume.as_deref() {
         Some(spec) => Some(ctx.paths.resolve_run(spec)?),
         None => None,
@@ -20,6 +20,7 @@ pub async fn run(ctx: &Ctx, args: &ChatArgs) -> anyhow::Result<i32> {
 
     let provider = cfg.brain.provider.unwrap_or(Provider::Anthropic);
     let dispatcher = session.dispatcher();
+    dispatcher.set_base_depth(depth);
     let (server, socket) = McpServer::bind(
         &session.paths,
         dispatcher.clone(),
@@ -31,9 +32,9 @@ pub async fn run(ctx: &Ctx, args: &ChatArgs) -> anyhow::Result<i32> {
     let tier = cfg.brain.tier.unwrap_or(Tier::High);
     let lease = session
         .pool
-        .acquire(
+        .acquire_brain(
             provider,
-            &HashSet::new(),
+            cfg.brain.account.as_ref(),
             Instant::now() + cfg.node_timeout(tier),
         )
         .await

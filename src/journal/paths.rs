@@ -49,6 +49,7 @@ impl Paths {
         RunPaths {
             run,
             dir: self.run_dir(run),
+            sock_dir: self.home_swamp.join("sock"),
         }
     }
 
@@ -190,6 +191,8 @@ fn home_swamp() -> Result<Utf8PathBuf, SwampError> {
 pub struct RunPaths {
     pub run: RunId,
     pub dir: Utf8PathBuf,
+    /// Where the control socket lives, kept away from the run directory on purpose.
+    pub sock_dir: Utf8PathBuf,
 }
 
 impl RunPaths {
@@ -223,8 +226,10 @@ impl RunPaths {
     pub fn result(&self, n: NodeId) -> Utf8PathBuf {
         self.node_dir(n).join("result.json")
     }
+    /// Short by construction. macOS caps a unix socket path at 104 bytes (SUN_LEN) and a repo
+    /// can sit arbitrarily deep, so the control socket never lives under the run directory.
     pub fn socket(&self) -> Utf8PathBuf {
-        self.dir.join("ctl.sock")
+        self.sock_dir.join(format!("{}.sock", self.run.short()))
     }
     pub fn link_last(&self) -> anyhow::Result<()> {
         let runs = self

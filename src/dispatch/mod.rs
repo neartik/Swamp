@@ -54,6 +54,8 @@ pub struct Dispatcher {
     results: Mutex<HashMap<NodeId, NodeResult>>,
     cancels: Mutex<HashMap<NodeId, CancellationToken>>,
     depths: Mutex<HashMap<NodeId, u32>>,
+    /// SWAMP_DEPTH of this process: a nested swamp starts counting where its parent left off.
+    base_depth: AtomicU32,
     spawned: AtomicU32,
     settled: Notify,
 }
@@ -104,6 +106,7 @@ impl Dispatcher {
             results: Mutex::new(HashMap::new()),
             cancels: Mutex::new(HashMap::new()),
             depths: Mutex::new(HashMap::new()),
+            base_depth: AtomicU32::new(0),
             spawned: AtomicU32::new(0),
             settled: Notify::new(),
         })
@@ -137,6 +140,11 @@ impl Dispatcher {
     pub async fn await_nodes(&self, ids: &[NodeId], timeout: Option<Duration>) -> Vec<NodeResult> {
         let deadline = timeout.map(|t| tokio::time::Instant::now() + t);
         loop {
+            // Registered BEFORE the pending count is read: `settle` notifies only waiters that
+            // have already subscribed, and a result landing in that window would be missed.
+            let settled = self.settled.notified();
+            tokio::pin!(settled);
+            settled.as_mut().enable();
             let pending = {
                 let results = self.results.lock();
                 ids.iter()
@@ -150,11 +158,11 @@ impl Dispatcher {
                 Some(at) if tokio::time::Instant::now() >= at => break,
                 Some(at) => {
                     tokio::select! {
-                        _ = self.settled.notified() => {}
+                        _ = &mut settled => {}
                         _ = tokio::time::sleep_until(at) => {}
                     }
                 }
-                None => self.settled.notified().await,
+                None => settled.await,
             }
         }
         let results = self.results.lock();
@@ -172,6 +180,23 @@ impl Dispatcher {
             }
             None => anyhow::bail!("no dispatched node {id}"),
         }
+    }
+
+    pub fn set_base_depth(&self, depth: u32) {
+        self.base_depth.store(depth, Ordering::Relaxed);
+    }
+
+    /// Every live node, for shutdown. Cancelling an already-settled node is a no-op.
+    pub fn cancel_all(&self) -> usize {
+        let tokens: Vec<CancellationToken> = self.cancels.lock().values().cloned().collect();
+        let mut n = 0;
+        for t in tokens {
+            if !t.is_cancelled() {
+                t.cancel();
+                n += 1;
+            }
+        }
+        n
     }
 
     pub fn result(&self, id: NodeId) -> Option<NodeResult> {
@@ -199,7 +224,7 @@ impl Dispatcher {
             return self.settle(finished(id, &task, tier, provider, None, Some(reason)));
         }
 
-        let depth = self.depths.lock().get(&parent).copied().unwrap_or(0) + 1;
+        let depth = self.depth_of(parent) + 1;
         self.depths.lock().insert(id, depth);
         self.results
             .lock()
@@ -249,7 +274,7 @@ impl Dispatcher {
             });
         }
         let max_depth = self.cfg.limits.max_depth.unwrap_or(DEFAULT_MAX_DEPTH);
-        let depth = self.depths.lock().get(&parent).copied().unwrap_or(0) + 1;
+        let depth = self.depth_of(parent) + 1;
         if depth > max_depth {
             return Some(Failure::WorkerError {
                 subtype: "max_depth".into(),
@@ -268,6 +293,14 @@ impl Dispatcher {
             });
         }
         None
+    }
+
+    fn depth_of(&self, parent: NodeId) -> u32 {
+        self.depths
+            .lock()
+            .get(&parent)
+            .copied()
+            .unwrap_or_else(|| self.base_depth.load(Ordering::Relaxed))
     }
 
     fn provider_order(&self, task: &TaskRequest, tier: Tier) -> Vec<Provider> {
@@ -300,6 +333,10 @@ impl Dispatcher {
             .get(&provider)
             .map(|p| p.worker.clone())
             .unwrap_or_default();
+        let isolation = task
+            .isolation
+            .or(self.cfg.workspace.isolation)
+            .unwrap_or(IsolationMode::Worktree);
         LaunchSpec {
             node: NodeIds {
                 id: NodeId::new(),
@@ -311,10 +348,7 @@ impl Dispatcher {
             model: String::new(),
             tier,
             cwd: self.journal.paths.dir.clone(),
-            isolation: task
-                .isolation
-                .or(self.cfg.workspace.isolation)
-                .unwrap_or(IsolationMode::Worktree),
+            isolation,
             session: SessionPlan::New { preassigned: None },
             kind: NodeKind::Worker,
             permission_mode: worker.permission_mode.clone().unwrap_or_default(),
@@ -325,7 +359,9 @@ impl Dispatcher {
             deny_tools: Vec::new(),
             mcp: None,
             last_message_path: self.journal.paths.dir.join("last-message.txt"),
-            extra_args: worker.args.clone(),
+            extra_args: worker.args_for(isolation),
+            extra: self.cfg.tier_extra(provider, tier),
+            partial_messages: false,
             attempt: 1,
         }
     }
@@ -372,10 +408,10 @@ fn finished(
 ) -> NodeResult {
     NodeResult {
         ok: failure.is_none(),
-        state: if failure.is_none() {
-            "succeeded"
-        } else {
-            "failed"
+        state: match &failure {
+            None => "succeeded",
+            Some(Failure::Cancelled { .. }) => "cancelled",
+            Some(_) => "failed",
         },
         summary,
         failure,

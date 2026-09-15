@@ -104,6 +104,23 @@ pub fn classify(cx: &ExitContext<'_>) -> Option<Failure> {
             detected_by: Detector::Pattern,
         });
     }
+    // A nonzero exit with not one line of stream output means the process never started work:
+    // a bad argv, a broken wrapper, a config dir that does not exist. Retrying replays it.
+    if let Some(ExitInfo {
+        code: Some(code),
+        signal: None,
+        ..
+    }) = cx.exit
+        && code != 0
+        // 127 is "exec not found", which has its own arm below.
+        && code != 127
+        && cx.state.session.is_none()
+    {
+        return Some(Failure::WorkerError {
+            subtype: "launch_failed".into(),
+            detail: truncate(&tail, EVIDENCE_MAX),
+        });
+    }
     match cx.exit {
         Some(ExitInfo {
             signal: Some(s), ..

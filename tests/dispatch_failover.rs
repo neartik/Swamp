@@ -237,6 +237,7 @@ async fn fixture(extra: &str) -> Fixture {
     let paths = RunPaths {
         run,
         dir: root.join("run"),
+        sock_dir: root.join("sock"),
     };
     std::fs::create_dir_all(&paths.dir).expect("run dir");
     let writer = Writer::open(&paths.journal(), FsyncPolicy::Never)
@@ -347,6 +348,8 @@ fn spec() -> LaunchSpec {
         mcp: None,
         last_message_path: "/nonexistent".into(),
         extra_args: Vec::new(),
+        extra: Default::default(),
+        partial_messages: false,
         attempt: 1,
     }
 }
@@ -747,4 +750,91 @@ async fn cancelling_an_unknown_node_is_an_error() {
     let f = fixture(TWO_ACCOUNTS).await;
     let disp = f.dispatcher(Scripted::new(&f.root, vec![])).await;
     assert!(disp.cancel(NodeId::new()).await.is_err());
+}
+
+/// `/cancel <node>` kills the process group; the classifier only sees SIGTERM and used to
+/// call that a crash, which retries on the same account with a brand new worktree.
+#[tokio::test]
+async fn a_cancelled_node_is_never_respawned() {
+    let f = fixture(TWO_ACCOUNTS).await;
+    let runner = Scripted::new(
+        &f.root,
+        vec![
+            failed(Failure::Crashed { signal: Some(15) }),
+            failed(Failure::Crashed { signal: Some(15) }),
+            failed(Failure::Crashed { signal: Some(15) }),
+        ],
+    );
+    let cx = f.ctx(runner.clone(), Duration::from_secs(30));
+    cx.cancel.cancel();
+    let out = run_node(&cx, spec(), &task("cancelled")).await;
+
+    assert_eq!(runner.calls().len(), 0, "a cancelled node never spawns");
+    assert_eq!(
+        out.failure,
+        Some(Failure::Cancelled {
+            by: swamp::model::core::CancelSource::User
+        })
+    );
+    assert!(out.failure.as_ref().expect("failure").is_terminal());
+}
+
+/// Cancellation arriving while the worker runs outranks whatever the classifier made of the
+/// kill signal: one attempt, one worktree, and a cancelled node rather than a failed one.
+#[tokio::test]
+async fn cancellation_during_a_run_stops_the_attempt_loop() {
+    let f = fixture(TWO_ACCOUNTS).await;
+    let runner = Scripted::slow(&f.root, Duration::from_millis(200));
+    let cx = f.ctx(runner.clone(), Duration::from_secs(30));
+    let token = cx.cancel.clone();
+    let request = task("cancelled");
+    let (out, ()) = tokio::join!(run_node(&cx, spec(), &request), async {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        token.cancel();
+    });
+
+    assert_eq!(runner.calls().len(), 1, "{:?}", runner.calls());
+    assert_eq!(runner.worktrees().len(), 1, "no retry worktree");
+    assert_eq!(out.attempts.len(), 1);
+    assert!(matches!(
+        out.attempts[0].state,
+        swamp::model::core::NodeState::Cancelled { .. }
+    ));
+    assert!(matches!(out.failure, Some(Failure::Cancelled { .. })));
+}
+
+/// Quota telemetry has to reach the pool, or `quota_stop_at`, `Degraded` health and the
+/// quota-aware policy are all arithmetic on a permanent zero.
+#[tokio::test]
+async fn a_rate_limit_snapshot_from_the_worker_reaches_the_pool() {
+    use swamp::model::core::{LimitStatus, LimitWindow, RateLimitSnapshot};
+
+    let f = fixture(TWO_ACCOUNTS).await;
+    let mut out = success();
+    out.rate_limit = Some(RateLimitSnapshot {
+        status: LimitStatus::Allowed,
+        windows: vec![LimitWindow {
+            scope: LimitScope::FiveHour,
+            utilization: 0.99,
+            resets_at: None,
+        }],
+        resets_at: None,
+    });
+    let runner = Scripted::new(&f.root, vec![out]);
+    let cx = f.ctx(runner.clone(), Duration::from_secs(30));
+    let done = run_node(&cx, spec(), &task("telemetry")).await;
+    let used = done.attempts.last().expect("an attempt").account.clone();
+
+    let (_, _, state) = f
+        .pool
+        .snapshot()
+        .into_iter()
+        .find(|(_, id, _)| Some(id) == used.as_ref())
+        .expect("the leased account");
+    assert_eq!(
+        state.quota.as_ref().map(|q| q.worst_utilization()),
+        Some(0.99),
+        "the snapshot the worker reported was dropped"
+    );
+    assert_eq!(state.health, Health::Degraded);
 }

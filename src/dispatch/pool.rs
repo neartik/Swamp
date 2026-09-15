@@ -21,6 +21,8 @@ const DEFAULT_MAX_PARALLEL: usize = 4;
 const DEFAULT_ACCOUNT_CONCURRENCY: usize = 2;
 const DEFAULT_QUOTA_WARN: f64 = 0.90;
 const DEFAULT_QUOTA_STOP: f64 = 0.98;
+/// Upper bound on how long a blocked acquirer sleeps when nothing tells it when to look again.
+const IDLE_RECHECK: Duration = Duration::from_secs(5);
 
 pub struct AccountPool {
     pub cfg: Arc<Config>,
@@ -31,6 +33,8 @@ pub struct AccountPool {
     state: Mutex<StateMap>,
     /// limits.max_parallel, minus the brain's permit when it is reserved.
     global: Arc<Semaphore>,
+    /// The brain's own slot. Taking a worker permit for it would charge the reservation twice.
+    brain: Arc<Semaphore>,
     returned: Notify,
     reserved: Mutex<Option<AccountId>>,
     wakeups: AtomicU64,
@@ -52,7 +56,7 @@ impl Drop for Lease {
             let entry = state.entry(self.account.clone()).or_default();
             entry.inflight = entry.inflight.saturating_sub(1);
         }
-        self.pool.returned.notify_one();
+        self.pool.returned.notify_waiters();
     }
 }
 
@@ -146,6 +150,7 @@ impl AccountPool {
             accounts,
             state: Mutex::new(state),
             global: Arc::new(Semaphore::new(permits)),
+            brain: Arc::new(Semaphore::new(1)),
             returned: Notify::new(),
             reserved: Mutex::new(None),
             wakeups: AtomicU64::new(0),
@@ -161,6 +166,11 @@ impl AccountPool {
     ) -> Result<Lease, NoCapacity> {
         loop {
             self.wakeups.fetch_add(1, Ordering::Relaxed);
+            // Registered BEFORE the capacity check: a lease returned in between must not be
+            // lost to a waiter that had not subscribed yet.
+            let notified = self.returned.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
             let wake_at = match self.capacity(provider, exclude) {
                 Capacity::Ready => {
                     let permit = match tokio::time::timeout_at(
@@ -180,7 +190,10 @@ impl AccountPool {
                     match self.take(provider, exclude, permit) {
                         Some(lease) => return Ok(lease),
                         // Someone else won the race; the permit is already back.
-                        None => None,
+                        None => {
+                            self.returned.notify_waiters();
+                            None
+                        }
                     }
                 }
                 Capacity::Busy { next_reset } => next_reset,
@@ -193,12 +206,65 @@ impl AccountPool {
             if Instant::now() >= deadline {
                 return Err(NoCapacity::Saturated);
             }
-            let until = wake_at.map_or(deadline, |t| instant_of(t).min(deadline));
+            // A concurrency block has no reset time; sleeping to the node deadline would park
+            // this task for the whole 25 minutes if a wakeup were ever missed.
+            let until = wake_at
+                .map_or(Instant::now() + IDLE_RECHECK, instant_of)
+                .min(deadline);
             tokio::select! {
-                _ = self.returned.notified() => {}
+                _ = &mut notified => {}
                 _ = tokio::time::sleep_until(until) => {}
             }
         }
+    }
+
+    /// The brain never competes for a worker permit: `reserve_brain_slot` already paid for it.
+    /// `pin` is `brain.account`, and it is honoured or the call fails; it is never ignored.
+    pub async fn acquire_brain(
+        self: &Arc<Self>,
+        provider: Provider,
+        pin: Option<&AccountId>,
+        deadline: Instant,
+    ) -> Result<Lease, NoCapacity> {
+        let chosen = match pin {
+            Some(id) => {
+                if !self.accounts.contains_key(id) {
+                    return Err(NoCapacity::Exhausted {
+                        reason: format!("brain.account `{}` is not a configured account", id.0),
+                    });
+                }
+                if !self.solo(provider) && self.cfg.brain.reserve_brain_slot != Some(false) {
+                    *self.reserved.lock() = Some(id.clone());
+                }
+                Some(id.clone())
+            }
+            None if self.cfg.brain.reserve_brain_slot != Some(false) => {
+                self.reserve_for_brain(provider)
+            }
+            None => None,
+        };
+        let permit = match tokio::time::timeout_at(
+            deadline,
+            Arc::clone(&self.brain).acquire_owned(),
+        )
+        .await
+        {
+            Ok(Ok(p)) => p,
+            Ok(Err(_)) => {
+                return Err(NoCapacity::Exhausted {
+                    reason: "dispatch pool is shutting down".into(),
+                });
+            }
+            Err(_) => return Err(NoCapacity::Saturated),
+        };
+        let exclude = HashSet::new();
+        self.take_from(provider, &exclude, chosen.as_ref(), permit)
+            .ok_or_else(|| NoCapacity::Exhausted {
+                reason: match &chosen {
+                    Some(id) => format!("the brain's account `{}` is cooling or disabled", id.0),
+                    None => self.no_account_error(provider, &exclude).to_string(),
+                },
+            })
     }
 
     pub fn report(&self, id: &AccountId, failure: Option<&Failure>, cost: Option<Cost>) {
@@ -309,7 +375,12 @@ impl AccountPool {
     }
 
     /// Reserve one healthy account of `p` for the brain, excluded from worker selection.
+    /// A single-account provider reserves nothing: holding back the only account would leave
+    /// the workers with none at all.
     pub fn reserve_for_brain(&self, p: Provider) -> Option<AccountId> {
+        if self.solo(p) {
+            return None;
+        }
         if let Some(id) = self.reserved.lock().clone() {
             return Some(id);
         }
@@ -328,6 +399,10 @@ impl AccountPool {
             .map(|(_, id)| id)?;
         *self.reserved.lock() = Some(best.clone());
         Some(best)
+    }
+
+    fn solo(&self, p: Provider) -> bool {
+        self.accounts.values().filter(|a| a.provider == p).count() < 2
     }
 
     /// Loop iterations spent inside `acquire`. A spinning pool shows up here.
@@ -403,8 +478,21 @@ impl AccountPool {
         exclude: &HashSet<AccountId>,
         permit: OwnedSemaphorePermit,
     ) -> Option<Lease> {
+        self.take_from(provider, exclude, None, permit)
+    }
+
+    fn take_from(
+        self: &Arc<Self>,
+        provider: Provider,
+        exclude: &HashSet<AccountId>,
+        pin: Option<&AccountId>,
+        permit: OwnedSemaphorePermit,
+    ) -> Option<Lease> {
         let now = OffsetDateTime::now_utc();
-        let candidates = self.candidates(provider, exclude);
+        let candidates: Vec<&Account> = match pin {
+            Some(id) => self.accounts.values().filter(|a| &a.id == id).collect(),
+            None => self.candidates(provider, exclude),
+        };
         let stop = self.quota_stop_at();
         let mut state = self.state.lock();
         let best = candidates
@@ -467,8 +555,9 @@ impl AccountPool {
 
     fn after_change(&self, id: &AccountId, health: Health) {
         let (cooldown_until, quota) = {
-            let state = self.state.lock();
-            let entry = state.get(id).cloned().unwrap_or_default();
+            let mut state = self.state.lock();
+            let entry = state.entry(id.clone()).or_default();
+            entry.updated_at = Some(OffsetDateTime::now_utc());
             (entry.cooldown_until, entry.quota.clone())
         };
         crate::dispatch::emit(
@@ -482,16 +571,31 @@ impl AccountPool {
             },
         );
         self.persist();
-        self.returned.notify_one();
+        self.returned.notify_waiters();
     }
 
     fn persist(&self) {
         let snapshot = self.state.lock().clone();
-        if let Err(e) = persist::save_state(&self.state_path, &snapshot) {
-            tracing::warn!(
+        match persist::merge_state(&self.state_path, &snapshot) {
+            Ok(merged) => self.adopt(merged),
+            Err(e) => tracing::warn!(
                 "could not persist account state to {}: {e}",
                 self.state_path
-            );
+            ),
+        }
+    }
+
+    /// Another process's newer entry wins, so a cooldown or a `swamp accounts disable` learned
+    /// elsewhere reaches a dispatcher that is already running.
+    fn adopt(&self, merged: StateMap) {
+        let mut state = self.state.lock();
+        for (id, theirs) in merged {
+            let entry = state.entry(id).or_default();
+            if theirs.updated_at > entry.updated_at {
+                let inflight = entry.inflight;
+                *entry = theirs;
+                entry.inflight = inflight;
+            }
         }
     }
 }

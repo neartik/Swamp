@@ -296,9 +296,11 @@ async fn reap_removes_stale_sockets_and_pidfiles() {
     let dir = f.paths.dot_swamp.join("runs").join(run.to_string());
     std::fs::create_dir_all(&dir).expect("run dir");
     std::fs::write(dir.join("journal.jsonl"), "").expect("journal");
-    std::fs::write(dir.join("ctl.sock"), "").expect("socket");
+    let socket = f.paths.run_paths(run).socket();
+    std::fs::create_dir_all(socket.parent().expect("sock dir")).expect("sock dir");
+    std::fs::write(&socket, "").expect("socket");
 
     let removed = swamp::doctor::reap(&f.paths).await.expect("reap");
     assert!(removed >= 1, "the stale socket is removed");
-    assert!(!dir.join("ctl.sock").exists());
+    assert!(!socket.exists());
 }

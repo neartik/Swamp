@@ -135,6 +135,59 @@ pub fn problems(cfg: &Config) -> Vec<Problem> {
         }
     }
 
+    // An explicitly empty value is worse than an absent one: the adapter cannot tell them
+    // apart at the argv, and the vendor CLI rejects `--permission-mode ''`.
+    if cfg
+        .brain
+        .permission_mode
+        .as_deref()
+        .is_some_and(str::is_empty)
+    {
+        push("brain.permission_mode".into(), "must not be empty".into());
+    }
+    for (p, pc) in &cfg.providers {
+        for (key, value) in [
+            ("permission_mode", &pc.worker.permission_mode),
+            ("sandbox", &pc.worker.sandbox),
+        ] {
+            if value.as_deref().is_some_and(str::is_empty) {
+                push(
+                    format!("providers.{p}.worker.{key}"),
+                    "must not be empty; remove the key to leave it to the CLI".into(),
+                );
+            }
+        }
+        if let Some(a) = &pc.adapter
+            && a != builtin_adapter(*p)
+        {
+            push(
+                format!("providers.{p}.adapter"),
+                format!(
+                    "`{a}` is not built in; {p} is served by `{}`",
+                    builtin_adapter(*p)
+                ),
+            );
+        }
+        for (t, model) in &pc.models {
+            if model.starts_with('<') && model.ends_with('>') {
+                push(
+                    format!("providers.{p}.models.{t}"),
+                    format!("`{model}` is the template placeholder; fill in a real model id"),
+                );
+            }
+        }
+    }
+    for (i, a) in cfg.accounts.iter().enumerate() {
+        for (t, model) in &a.models {
+            if model.starts_with('<') && model.ends_with('>') {
+                push(
+                    format!("accounts[{i}].models.{t}"),
+                    format!("`{model}` is the template placeholder; fill in a real model id"),
+                );
+            }
+        }
+    }
+
     let acked = cfg.limits.unsafe_ack == Some(true);
     for (p, pc) in &cfg.providers {
         for (field, args) in [
@@ -199,6 +252,13 @@ pub fn problems(cfg: &Config) -> Vec<Problem> {
     }
 
     out
+}
+
+fn builtin_adapter(p: crate::model::core::Provider) -> &'static str {
+    match p {
+        crate::model::core::Provider::Anthropic => "claude-cli",
+        crate::model::core::Provider::Openai => "codex-cli",
+    }
 }
 
 fn names(tc: &crate::config::schema::TierCfg) -> Vec<String> {

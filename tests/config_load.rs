@@ -457,3 +457,101 @@ fn effective_toml_round_trips_and_hashes_stably() {
     let cheap = sb.load(Some(&example), Some("cheap")).unwrap();
     assert_ne!(cheap.sha256(), cfg.sha256());
 }
+
+/// `swamp config init` used to write `<model>` and every tier check passed it through to the
+/// vendor CLI, which fails with an error naming neither swamp nor the config key.
+#[test]
+fn a_template_placeholder_model_is_rejected_by_name() {
+    let s = Sandbox::new();
+    s.repo_config(
+        r#"
+[providers.anthropic]
+models = { high = "<model>", mid = "sonnet", low = "haiku" }
+[[accounts]]
+id = "main"
+provider = "anthropic"
+exec = "claude-main"
+"#,
+    );
+    let e = s.load(None, None).expect_err("the placeholder is refused");
+    let text = err_text(&e);
+    assert!(text.contains("providers.anthropic.models.high"), "{text}");
+}
+
+/// An explicitly empty value reaches the argv as `--permission-mode ''`, which the CLI rejects
+/// before it emits anything: the config is the only place it can be caught.
+#[test]
+fn an_empty_permission_mode_or_sandbox_is_rejected_by_name() {
+    let s = Sandbox::new();
+    s.repo_config(
+        r#"
+[brain]
+permission_mode = ""
+[providers.anthropic]
+models = { mid = "sonnet" }
+[providers.anthropic.worker]
+permission_mode = ""
+[providers.openai]
+models = { mid = "gpt-5.6-sol" }
+[providers.openai.worker]
+sandbox = ""
+[[accounts]]
+id = "main"
+provider = "anthropic"
+exec = "claude-main"
+"#,
+    );
+    let text = err_text(&s.load(None, None).expect_err("empty values are refused"));
+    assert!(text.contains("brain.permission_mode"), "{text}");
+    assert!(
+        text.contains("providers.anthropic.worker.permission_mode"),
+        "{text}"
+    );
+    assert!(text.contains("providers.openai.worker.sandbox"), "{text}");
+}
+
+/// Read-only isolation is enforced through `readonly_args`; every launch path builds its
+/// arguments here so none of them can quietly skip it.
+#[test]
+fn readonly_args_are_appended_only_for_read_only_isolation() {
+    let worker = swamp::config::WorkerCfg {
+        permission_mode: Some("acceptEdits".into()),
+        sandbox: None,
+        args: vec!["--verbose".into()],
+        readonly_args: vec!["--permission-mode".into(), "plan".into()],
+    };
+    assert_eq!(
+        worker.args_for(IsolationMode::Worktree),
+        vec!["--verbose".to_owned()]
+    );
+    assert_eq!(
+        worker.args_for(IsolationMode::ReadOnly),
+        vec![
+            "--verbose".to_owned(),
+            "--permission-mode".to_owned(),
+            "plan".to_owned()
+        ]
+    );
+}
+
+/// `providers.<p>.adapter` used to deserialize and then be ignored entirely.
+#[test]
+fn an_unknown_provider_adapter_is_rejected() {
+    let s = Sandbox::new();
+    s.repo_config(
+        r#"
+[providers.anthropic]
+adapter = "gemini-cli"
+models = { mid = "sonnet" }
+[[accounts]]
+id = "main"
+provider = "anthropic"
+exec = "claude-main"
+"#,
+    );
+    let text = err_text(
+        &s.load(None, None)
+            .expect_err("an unknown adapter is refused"),
+    );
+    assert!(text.contains("providers.anthropic.adapter"), "{text}");
+}

@@ -65,11 +65,36 @@ pub fn state_word(s: &NodeState) -> &'static str {
     }
 }
 
-/// Unicode-width aware.
+/// Worker output reaches the terminal verbatim. ESC and its friends would let a worker
+/// repaint the screen and forge Swamp's own lines, so they never survive to stdout.
+fn is_control(c: char) -> bool {
+    (c as u32) < 0x20 || c == '\u{7f}' || ('\u{80}'..='\u{9f}').contains(&c)
+}
+
+pub fn sanitize(s: &str) -> String {
+    s.chars()
+        .map(|c| match c {
+            '\t' | '\n' | '\r' => ' ',
+            c if (c as u32) < 0x20 || c == '\u{7f}' || ('\u{80}'..='\u{9f}').contains(&c) => {
+                '\u{fffd}'
+            }
+            c => c,
+        })
+        .collect()
+}
+
+/// Unicode-width aware, and never lets a control character through to the terminal.
 pub fn truncate(s: &str, n: usize) -> String {
     if n == 0 {
         return String::new();
     }
+    let owned;
+    let s = if s.chars().any(is_control) {
+        owned = sanitize(s);
+        owned.as_str()
+    } else {
+        s
+    };
     if s.width() <= n {
         return s.to_owned();
     }
@@ -166,6 +191,18 @@ mod tests {
             })),
             "~$0.00"
         );
+    }
+
+    /// Worker text is attacker-influenced and goes straight to a terminal: an ESC sequence
+    /// could clear the screen and print a fake "run succeeded" banner over the real rows.
+    #[test]
+    fn control_characters_never_reach_the_terminal() {
+        let evil = "\u{1b}[2J\u{1b}[Hswamp: run succeeded";
+        let shown = truncate(evil, 60);
+        assert!(!shown.contains('\u{1b}'), "{shown:?}");
+        assert!(shown.contains("swamp: run succeeded"));
+        assert_eq!(truncate("a\nb\tc", 10), "a b c");
+        assert_eq!(truncate("plain", 10), "plain");
     }
 
     #[test]

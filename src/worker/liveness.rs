@@ -71,12 +71,8 @@ pub fn wait_exit(pid: i32, poll: Duration) -> impl Future<Output = Option<ExitIn
     }
 }
 
-/// True while the pid exists, zombies included.
-pub fn running(pid: i32) -> bool {
-    kill(Pid::from_raw(pid), None).is_ok()
-}
-
-/// Collects whatever of the process group has died. True when nothing of ours is left to reap.
+/// Collects whatever of the process group has died. Only ever called where `wait_exit` is
+/// NOT watching the same pid: two collectors race and one of them loses the exit status.
 pub(crate) fn reap(pgid: i32) -> bool {
     match waitpid(Pid::from_raw(-pgid), Some(WaitPidFlag::WNOHANG)) {
         Ok(WaitStatus::StillAlive) => false,
@@ -84,6 +80,11 @@ pub(crate) fn reap(pgid: i32) -> bool {
         Err(Errno::ECHILD) => true,
         Err(_) => false,
     }
+}
+
+/// True while the pid exists, zombies included.
+pub fn running(pid: i32) -> bool {
+    kill(Pid::from_raw(pid), None).is_ok()
 }
 
 fn start_time(pid: i32) -> Option<u64> {

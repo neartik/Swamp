@@ -156,6 +156,17 @@ pub struct WorkerCfg {
     pub readonly_args: Vec<String>,
 }
 
+impl WorkerCfg {
+    /// The one place read-only policy turns into argv, so no launch path can forget it.
+    pub fn args_for(&self, isolation: crate::model::result::IsolationMode) -> Vec<String> {
+        let mut out = self.args.clone();
+        if isolation == crate::model::result::IsolationMode::ReadOnly {
+            out.extend(self.readonly_args.clone());
+        }
+        out
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AccountCfg {

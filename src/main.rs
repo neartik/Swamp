@@ -70,8 +70,10 @@ async fn dispatch(cli: &Cli, root: &Utf8Path) -> Result<i32> {
         return swamp::mcp::run_bridge(&args.socket).await.map(|()| 0);
     }
 
-    let cfg = Config::load(root, cli.config.as_deref(), cli.profile.as_deref())?;
+    // Paths first: config discovery must use the same canonical git root, or `<repo>/.swamp/
+    // config.toml` is invisible from every subdirectory.
     let paths = Paths::discover(root)?;
+    let cfg = Config::load(&paths.repo, cli.config.as_deref(), cli.profile.as_deref())?;
     let ctx = Ctx {
         cfg: Arc::new(cfg),
         paths: Arc::new(paths),

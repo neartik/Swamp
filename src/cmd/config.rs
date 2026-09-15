@@ -14,9 +14,10 @@ policy = "least-loaded"
 default_provider = "anthropic"
 default_tier = "mid"
 
-# Model ids live only here. Fill these in for your plan.
+# Model ids live only here. Uncomment and fill these in for your plan: until you do,
+# `swamp doctor` reports the tiers as unmapped rather than letting a placeholder through.
 [providers.anthropic]
-models = { high = "<model>", mid = "<model>", low = "<model>" }
+# models = { high = "opus", mid = "sonnet", low = "haiku" }
 
 # One entry per subscription. `exec` is a wrapper on PATH that sets the CLI's config dir;
 # swamp never touches credentials.

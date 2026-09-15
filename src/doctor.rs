@@ -13,6 +13,9 @@ const UNPARSED_MAX: f64 = 0.02;
 const PATTERN_MAX: f64 = 0.25;
 const RECENT_RUNS: usize = 20;
 const PROBE_TIMEOUT: Duration = Duration::from_secs(20);
+const PROBE_TURN_TIMEOUT: Duration = Duration::from_secs(90);
+/// One token out, and nothing that could edit anything.
+const PROBE_PROMPT: &str = "Reply with the single word: pong";
 /// Directories a fresh worktree will not inherit unless `workspace.link` names them.
 const HEAVY_DIRS: [&str; 5] = ["target", "node_modules", ".venv", "vendor", "build"];
 const HEAVY_BYTES: u64 = 1 << 30;
@@ -246,43 +249,143 @@ async fn accounts(cfg: &Config, paths: &Paths, probe: bool, out: &mut Vec<Check>
     if probe {
         for account in &cfg.accounts {
             let name = format!("accounts/{}/probe", account.id.0);
-            out.push(probe_account(&account.exec, &account.env, name).await);
+            out.push(probe_account(cfg, account, &paths.repo, name).await);
         }
     }
-    let _ = paths;
 }
 
-pub async fn probe_account(exec: &str, env: &BTreeMap<String, String>, name: String) -> Check {
+/// `--version` needs no credentials, so it proves nothing about the subscription. This sends
+/// one real one-token turn down the adapter's own argv and classifies what comes back.
+pub async fn probe_account(
+    cfg: &Config,
+    account: &crate::config::AccountCfg,
+    cwd: &Utf8Path,
+    name: String,
+) -> Check {
+    let exec = &account.exec;
+    if let Some(problem) = version_check(exec, &account.env).await {
+        return Check::new(name, Level::Error, problem);
+    }
+    let model = match cfg.model_for(account.provider, Tier::Low, Some(&account.id)) {
+        Ok(m) => m,
+        Err(e) => return Check::new(name, Level::Error, e.to_string()),
+    };
+    match probe_turn(cfg, account, cwd, &model).await {
+        Ok(None) => Check::new(name, Level::Ok, format!("{exec} answered on {model}")),
+        Ok(Some(f)) => Check::new(name, Level::Error, format!("{exec} on {model}: {f:?}")),
+        Err(e) => Check::new(name, Level::Error, format!("{exec} on {model}: {e:#}")),
+    }
+}
+
+async fn version_check(exec: &str, env: &BTreeMap<String, String>) -> Option<String> {
     let mut cmd = tokio::process::Command::new(exec);
     cmd.arg("--version");
     for (k, v) in env {
         cmd.env(k, shellexpand::tilde(v).into_owned());
     }
     match tokio::time::timeout(PROBE_TIMEOUT, cmd.output()).await {
-        Ok(Ok(o)) if o.status.success() => Check::new(
-            name,
-            Level::Ok,
-            String::from_utf8_lossy(&o.stdout).trim().to_owned(),
-        ),
-        Ok(Ok(o)) => Check::new(
-            name,
-            Level::Error,
-            format!(
-                "`{exec} --version` exited {}: {}",
-                o.status.code().unwrap_or(-1),
-                String::from_utf8_lossy(&o.stderr).trim()
-            ),
-        ),
-        Ok(Err(e)) => Check::new(
-            name,
-            Level::Error,
-            format!("`{exec} --version` failed: {e}"),
-        ),
-        Err(_) => Check::new(
-            name,
-            Level::Error,
-            format!("`{exec} --version` timed out after {PROBE_TIMEOUT:?}"),
-        ),
+        Ok(Ok(o)) if o.status.success() => None,
+        Ok(Ok(o)) => Some(format!(
+            "`{exec} --version` exited {}: {}",
+            o.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&o.stderr).trim()
+        )),
+        Ok(Err(e)) => Some(format!("`{exec} --version` failed: {e}")),
+        Err(_) => Some(format!(
+            "`{exec} --version` timed out after {PROBE_TIMEOUT:?}"
+        )),
+    }
+}
+
+async fn probe_turn(
+    cfg: &Config,
+    account: &crate::config::AccountCfg,
+    cwd: &Utf8Path,
+    model: &str,
+) -> anyhow::Result<Option<Failure>> {
+    use crate::worker::adapter::{ExitContext, ParseState, adapter_for};
+    use tokio::io::AsyncWriteExt;
+
+    let adapter = adapter_for(account.provider);
+    let spec = probe_spec(cfg, account, cwd, model);
+    let argv = adapter.build_argv(&spec)?;
+    let mut cmd = tokio::process::Command::new(&argv[0]);
+    cmd.args(&argv[1..])
+        .current_dir(cwd.as_std_path())
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    for (k, v) in &spec.env {
+        cmd.env(k, v);
+    }
+    let mut child = cmd.spawn()?;
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(PROBE_PROMPT.as_bytes()).await?;
+    }
+    let out = tokio::time::timeout(PROBE_TURN_TIMEOUT, child.wait_with_output())
+        .await
+        .map_err(|_| anyhow::anyhow!("no answer after {PROBE_TURN_TIMEOUT:?}"))??;
+
+    let mut st = ParseState::default();
+    for line in String::from_utf8_lossy(&out.stdout).lines() {
+        adapter.parse_line(line, &mut st);
+    }
+    st.stderr_tail = String::from_utf8_lossy(&out.stderr)
+        .lines()
+        .map(str::to_owned)
+        .collect();
+    let patterns = cfg.failure_patterns(account.provider)?;
+    Ok(adapter.classify(&ExitContext {
+        exit: Some(crate::model::node::ExitInfo {
+            code: out.status.code(),
+            signal: None,
+            duration_ms: 0,
+        }),
+        state: &st,
+        patterns: &patterns,
+        deadline_hit: false,
+    }))
+}
+
+fn probe_spec(
+    cfg: &Config,
+    account: &crate::config::AccountCfg,
+    cwd: &Utf8Path,
+    model: &str,
+) -> crate::worker::adapter::LaunchSpec {
+    let worker = cfg
+        .providers
+        .get(&account.provider)
+        .map(|p| p.worker.clone())
+        .unwrap_or_default();
+    crate::worker::adapter::LaunchSpec {
+        node: crate::ids::NodeIds {
+            id: crate::ids::NodeId::new(),
+            session_uuid: uuid::Uuid::new_v4(),
+        },
+        provider: account.provider,
+        exec: account.exec.clone(),
+        env: crate::config::resolve::expand_env(&account.env),
+        model: model.to_owned(),
+        tier: Tier::Low,
+        cwd: cwd.to_path_buf(),
+        isolation: crate::model::result::IsolationMode::ReadOnly,
+        session: crate::worker::adapter::SessionPlan::New { preassigned: None },
+        kind: crate::model::core::NodeKind::Worker,
+        permission_mode: worker.permission_mode.clone().unwrap_or_default(),
+        sandbox: worker.sandbox.clone().unwrap_or_default(),
+        budget_usd: None,
+        append_system_prompt: None,
+        allow_tools: Vec::new(),
+        deny_tools: Vec::new(),
+        mcp: None,
+        last_message_path: Utf8PathBuf::from_path_buf(std::env::temp_dir())
+            .unwrap_or_else(|_| Utf8PathBuf::from("/tmp"))
+            .join(format!("swamp-probe-{}.txt", account.id.0)),
+        extra_args: worker.args_for(crate::model::result::IsolationMode::ReadOnly),
+        extra: Default::default(),
+        partial_messages: false,
+        attempt: 1,
     }
 }
 
@@ -324,7 +427,7 @@ fn unsafe_args(cfg: &Config, out: &mut Vec<Check>) {
                 Level::Error,
                 format!(
                     "providers.{p}.worker.args carries {} without limits.unsafe_ack = true; \
-                     the flag is dropped at launch",
+                     the configuration is refused until it is set",
                     refused.join(" ")
                 ),
             ));

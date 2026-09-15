@@ -27,6 +27,10 @@ pub struct AccountState {
     pub last_used: Option<OffsetDateTime>,
     pub lifetime_nodes: u64,
     pub lifetime_cost_usd: f64,
+    /// When this process last changed the entry. The merge into the shared file is
+    /// last-writer-wins per account, so a cooldown learned elsewhere is never clobbered.
+    #[serde(default, with = "time::serde::rfc3339::option")]
+    pub updated_at: Option<OffsetDateTime>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]

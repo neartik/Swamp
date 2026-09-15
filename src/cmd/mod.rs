@@ -119,6 +119,36 @@ pub fn task_text(parts: &[String]) -> anyhow::Result<String> {
     Ok(text)
 }
 
+/// `SWAMP_DEPTH` is exported into every worker env. A worker that shells out to `swamp`
+/// must not start a whole tree of its own, so the refusal lives here, not only in the export.
+pub fn guard_depth(cfg: &Config) -> anyhow::Result<u32> {
+    const DEFAULT_MAX_DEPTH: u32 = 2;
+    let depth: u32 = std::env::var("SWAMP_DEPTH")
+        .ok()
+        .and_then(|d| d.parse().ok())
+        .unwrap_or(0);
+    let max = cfg.limits.max_depth.unwrap_or(DEFAULT_MAX_DEPTH);
+    anyhow::ensure!(
+        depth < max,
+        "refusing to nest: SWAMP_DEPTH={depth} is already at limits.max_depth = {max}"
+    );
+    Ok(depth)
+}
+
+/// Resolves on SIGINT or SIGTERM. Workers run in their own process groups, so a terminal
+/// Ctrl-C never reaches them: the shutdown path has to cancel them itself.
+pub async fn shutdown_signal() {
+    use tokio::signal::unix::{SignalKind, signal};
+    let Ok(mut term) = signal(SignalKind::terminate()) else {
+        let _ = tokio::signal::ctrl_c().await;
+        return;
+    };
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {}
+        _ = term.recv() => {}
+    }
+}
+
 /// The first line, clipped: a node title is a label, not the prompt.
 pub fn title_of(task: &str) -> String {
     let first = task.lines().find(|l| !l.trim().is_empty()).unwrap_or(task);
@@ -254,6 +284,7 @@ fn write_header(
         "config_sha256": cfg.sha256(),
         "argv": argv,
         "task": task,
+        "socket": paths.socket(),
     });
     std::fs::write(
         paths.dir.join("run.json"),
@@ -291,5 +322,45 @@ pub fn write_result(paths: &RunPaths, result: &crate::model::result::NodeResult)
     }
     if let Ok(body) = serde_json::to_vec_pretty(result) {
         let _ = std::fs::write(&path, body);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `SWAMP_DEPTH` was exported into every worker env and then never compared against
+    /// anything: a worker that ran `swamp` started an unbounded second tree.
+    #[test]
+    fn swamp_depth_is_refused_at_the_limit() {
+        let mut cfg = Config {
+            version: 1,
+            limits: Default::default(),
+            brain: Default::default(),
+            dispatch: Default::default(),
+            cooldown: Default::default(),
+            workspace: Default::default(),
+            journal: Default::default(),
+            providers: Default::default(),
+            accounts: Vec::new(),
+            tiers: Default::default(),
+            failure: Default::default(),
+            pricing: Default::default(),
+            ui: Default::default(),
+            profiles: Default::default(),
+            sources: Vec::new(),
+            warnings: Vec::new(),
+        };
+        cfg.limits.max_depth = Some(2);
+        let restore = std::env::var("SWAMP_DEPTH").ok();
+        unsafe { std::env::set_var("SWAMP_DEPTH", "1") };
+        assert_eq!(guard_depth(&cfg).expect("under the limit"), 1);
+        unsafe { std::env::set_var("SWAMP_DEPTH", "2") };
+        let e = guard_depth(&cfg).expect_err("at the limit");
+        assert!(e.to_string().contains("max_depth"), "{e}");
+        match restore {
+            Some(v) => unsafe { std::env::set_var("SWAMP_DEPTH", v) },
+            None => unsafe { std::env::remove_var("SWAMP_DEPTH") },
+        }
     }
 }

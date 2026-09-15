@@ -108,7 +108,7 @@ Layers, lowest priority first: built-in defaults, `~/.config/swamp/config.toml`,
 
 ```sh
 swamp doctor                                       # PATH, git, tiers, account collisions
-swamp run "fix the flaky test in tests/api.rs" --no-brain --tier mid
+swamp run --no-brain --tier mid "fix the flaky test in tests/api.rs"   # commit first: a dirty tree is refused
 swamp trace last                                   # the run tree, with the diff summary
 swamp diff <node> --stat
 swamp adopt <node>                                 # applies the patch to your checkout
@@ -174,8 +174,9 @@ machine and write outside its worktree. Swamp bounds concurrency, quota, budget 
 does not contain a process. Run workers on code you would run yourself, and use
 `--isolation readonly` or a container if you need more than that.
 
-`--dangerously-*` flags in `providers.*.worker.args` are dropped at launch unless
-`limits.unsafe_ack = true` is set in config.
+A `--dangerously-*` flag in `providers.*.worker.args` makes the whole configuration invalid
+unless `limits.unsafe_ack = true` is set: every command, `swamp doctor` included, exits 2 until
+one or the other changes.
 
 ## Development
 

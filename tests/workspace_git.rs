@@ -92,7 +92,11 @@ async fn manager(repo: &Utf8Path, home: &Utf8Path, cfg: Config) -> (Arc<Workspac
     let run = RunId::new();
     let dir = home.join("runs").join(run.to_string());
     std::fs::create_dir_all(&dir).expect("run dir");
-    let paths_run = RunPaths { run, dir };
+    let paths_run = RunPaths {
+        run,
+        sock_dir: dir.clone(),
+        dir,
+    };
     let writer = Writer::open(&paths_run.journal(), FsyncPolicy::Never)
         .await
         .expect("journal writer");

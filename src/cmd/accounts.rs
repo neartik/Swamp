@@ -117,7 +117,8 @@ async fn check(ctx: &Ctx, only: Option<&str>) -> anyhow::Result<i32> {
         if only.is_some_and(|id| id != a.id.0) {
             continue;
         }
-        let check = crate::doctor::probe_account(&a.exec, &a.env, a.id.0.clone()).await;
+        let check =
+            crate::doctor::probe_account(&ctx.cfg, a, &ctx.paths.repo, a.id.0.clone()).await;
         if check.level == crate::doctor::Level::Error {
             failed += 1;
         }

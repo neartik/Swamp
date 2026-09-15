@@ -75,24 +75,36 @@ fn open_append(path: &Utf8Path) -> std::io::Result<std::fs::File> {
         .open(path)
 }
 
-/// SIGTERM to -pgid, wait `grace`, then SIGKILL. Reaps the worker's own grandchildren.
-pub async fn terminate(pgid: i32, grace: Duration) -> anyhow::Result<()> {
+/// Who collects the exit status of a process group member that is our own child. Two
+/// concurrent `waitpid` calls on the same child steal each other's status, so exactly one
+/// owner is named at every call site.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Reaper {
+    /// `liveness::wait_exit` is watching this pid; `terminate` must not touch it.
+    Elsewhere,
+    /// Nobody else is waiting: `terminate` collects zombies itself.
+    Here,
+}
+
+/// SIGTERM to -pgid, wait `grace`, then SIGKILL.
+pub async fn terminate(pgid: i32, grace: Duration, reaper: Reaper) -> anyhow::Result<()> {
     let group = Pid::from_raw(pgid);
     let _ = killpg(group, Signal::SIGTERM);
-    if settle(pgid, grace).await {
+    if settle(pgid, grace, reaper).await {
         return Ok(());
     }
     let _ = killpg(group, Signal::SIGKILL);
-    settle(pgid, grace).await;
+    settle(pgid, grace, reaper).await;
     Ok(())
 }
 
-/// Collects our own dead children while waiting for the whole group, grandchildren included,
-/// to disappear. False when the group outlived `grace`.
-async fn settle(pgid: i32, grace: Duration) -> bool {
+/// Waits for the whole group, grandchildren included, to disappear.
+async fn settle(pgid: i32, grace: Duration, reaper: Reaper) -> bool {
     let deadline = Instant::now() + grace;
     loop {
-        reap(pgid);
+        if reaper == Reaper::Here {
+            reap(pgid);
+        }
         if !group_alive(pgid) {
             return true;
         }

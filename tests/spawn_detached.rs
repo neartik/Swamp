@@ -66,6 +66,7 @@ async fn sink(io: &NodeIo) -> RawSink {
     let dir = io.stdout.parent().expect("node dir").to_owned();
     let paths = RunPaths {
         run: RunId::new(),
+        sock_dir: dir.clone(),
         dir,
     };
     RawSink::open(
@@ -110,6 +111,8 @@ fn spec(n: &Node) -> LaunchSpec {
         mcp: None,
         last_message_path: n.dir.join("last-message.txt"),
         extra_args: Vec::new(),
+        extra: Default::default(),
+        partial_messages: false,
         attempt: 1,
     }
 }
@@ -151,6 +154,7 @@ async fn follow_to_exit(
         &mut sink,
         tx,
         alive,
+        8 * 1024 * 1024,
     )
     .await
     .expect("follow");
@@ -218,7 +222,12 @@ async fn the_child_keeps_writing_after_the_follower_is_dropped() {
         wait_for(|| file_len(&stdout) > at_abort, Duration::from_secs(5)),
         "the child stopped writing when its follower went away"
     );
-    let _ = terminate(d.pgid, Duration::from_millis(500)).await;
+    let _ = terminate(
+        d.pgid,
+        Duration::from_millis(500),
+        swamp::worker::spawn::Reaper::Here,
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -281,7 +290,13 @@ async fn terminate_takes_the_whole_process_group_including_grandchildren() {
         .unwrap();
     assert!(running(gpid));
 
-    terminate(d.pgid, Duration::from_secs(2)).await.unwrap();
+    terminate(
+        d.pgid,
+        Duration::from_secs(2),
+        swamp::worker::spawn::Reaper::Here,
+    )
+    .await
+    .unwrap();
     assert!(!running(d.pid), "the worker survived terminate");
     assert!(!running(gpid), "the grandchild survived terminate");
 }
@@ -324,6 +339,7 @@ async fn a_worker_that_never_exits_is_timed_out_and_its_group_is_gone() {
         resume: None,
         timeout: Duration::from_secs(3),
         grace: Duration::from_millis(500),
+        max_line: 8 * 1024 * 1024,
         cancel: CancellationToken::new(),
     })
     .await
@@ -342,4 +358,51 @@ async fn a_worker_that_never_exits_is_timed_out_and_its_group_is_gone() {
         .parse()
         .unwrap();
     assert!(!running(pid), "the process group outlived the timeout");
+}
+
+/// `execute` used to abort the supervisor as soon as the DIRECT child was reaped. A worker
+/// that exits on SIGTERM while its `cargo build` grandchild ignores it left that grandchild
+/// running forever, pinning the worktree the SIGKILL exists to free.
+#[tokio::test]
+async fn a_grandchild_that_ignores_sigterm_still_gets_sigkilled() {
+    let n = node(&format!(
+        "#!/bin/sh\nsh -c 'trap \"\" TERM; echo $$ > grandchild.pid; while true; do sleep 1; \
+         done' &\nprintf '%s\\n' '{}'\nexec sleep 300\n",
+        text_line("working")
+    ));
+    let s = spec(&n);
+    let p = patterns();
+    let mut sink = sink(&n.io).await;
+
+    let gpid_file = n.dir.join("grandchild.pid");
+    let outcome = execute(ExecReq {
+        adapter: adapter_for(Provider::Anthropic),
+        spec: &s,
+        io: &n.io,
+        patterns: &p,
+        sink: &mut sink,
+        journal: None,
+        resume: None,
+        timeout: Duration::from_secs(1),
+        grace: Duration::from_millis(600),
+        max_line: 8 * 1024 * 1024,
+        cancel: CancellationToken::new(),
+    })
+    .await
+    .expect("execute");
+
+    assert_eq!(outcome.failure, Some(Failure::Timeout { after_s: 1 }));
+    assert!(
+        wait_for(|| file_len(&gpid_file) > 0, Duration::from_secs(5)),
+        "the grandchild never started"
+    );
+    let gpid: i32 = std::fs::read_to_string(&gpid_file)
+        .expect("the grandchild wrote its pid")
+        .trim()
+        .parse()
+        .expect("a pid");
+    assert!(
+        wait_for(|| !running(gpid), Duration::from_secs(10)),
+        "the grandchild outlived the escalation"
+    );
 }

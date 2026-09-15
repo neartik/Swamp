@@ -101,7 +101,7 @@ pub struct ChatArgs {
 #[derive(Debug, Args)]
 pub struct RunArgs {
     /// The task. `-` reads stdin; `@file` reads a file
-    #[arg(value_name = "TASK", trailing_var_arg = true)]
+    #[arg(value_name = "TASK", num_args = 1..)]
     pub task: Vec<String>,
     /// Dispatch TASK to a single worker, with no brain in the loop
     #[arg(long)]
@@ -348,4 +348,50 @@ pub struct CompletionsArgs {
 pub struct McpBridgeArgs {
     #[arg(long, value_name = "PATH")]
     pub socket: Utf8PathBuf,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    /// `trailing_var_arg` swallowed every flag written after the task, so the README's own
+    /// first-run line silently ran the brain at the default tier.
+    #[test]
+    fn flags_after_the_task_are_still_flags() {
+        let cli = Cli::try_parse_from([
+            "swamp",
+            "run",
+            "do a thing",
+            "--no-brain",
+            "--tier",
+            "mid",
+            "--wait",
+        ])
+        .expect("parses");
+        let Some(Command::Run(a)) = cli.command else {
+            panic!("expected run");
+        };
+        assert_eq!(a.task, vec!["do a thing".to_owned()]);
+        assert!(a.no_brain);
+        assert!(a.wait);
+        assert_eq!(a.tier, Some(Tier::Mid));
+    }
+
+    /// A task made of several words still joins, and `--` still forces literal text.
+    #[test]
+    fn a_multi_word_task_and_an_escaped_one_both_survive() {
+        let cli = Cli::try_parse_from(["swamp", "run", "fix", "the", "parser"]).expect("parses");
+        let Some(Command::Run(a)) = cli.command else {
+            panic!("expected run");
+        };
+        assert_eq!(a.task, vec!["fix", "the", "parser"]);
+
+        let cli = Cli::try_parse_from(["swamp", "run", "--", "--no-brain"]).expect("parses");
+        let Some(Command::Run(a)) = cli.command else {
+            panic!("expected run");
+        };
+        assert_eq!(a.task, vec!["--no-brain".to_owned()]);
+        assert!(!a.no_brain);
+    }
 }

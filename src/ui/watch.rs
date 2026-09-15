@@ -18,9 +18,12 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
 use std::sync::Arc;
+use std::time::Duration;
 use time::OffsetDateTime;
 
 const TAIL_LINES: usize = 200;
+const TREE_WIDTH: u16 = 46;
+const REFRESH_HZ: u16 = 20;
 
 /// What a keypress asks the outer loop to do. The pane state itself stays pure.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -44,6 +47,9 @@ pub struct App {
     pub quit: bool,
     pub raw_lines: Vec<String>,
     pub tail_lines: usize,
+    pub tree_width: u16,
+    /// Set by the TUI; without it a dead node would render as running forever.
+    paths: Option<RunPaths>,
 }
 
 impl App {
@@ -60,6 +66,8 @@ impl App {
             quit: false,
             raw_lines: Vec::new(),
             tail_lines: TAIL_LINES,
+            tree_width: TREE_WIDTH,
+            paths: None,
         }
     }
 
@@ -72,6 +80,10 @@ impl App {
     pub fn apply(&mut self, lines: &[JournalLine]) {
         for l in lines {
             self.view.apply(l);
+        }
+        if let Some(paths) = self.paths.clone() {
+            self.view
+                .mark_orphans(&|id| crate::worker::liveness::is_ours(&paths.pidfile(id)));
         }
         self.rows = self.view.tree();
         self.selected = self.selected.min(self.rows.len().saturating_sub(1));
@@ -101,6 +113,15 @@ impl App {
             .collect()
     }
 
+    /// The raw pane is titled from the selection, so moving the selection must move its body.
+    fn reload_raw(&mut self) -> Action {
+        self.raw_lines.clear();
+        match (self.raw, self.selected_node()) {
+            (true, Some(n)) => Action::LoadRaw(n.id),
+            _ => Action::None,
+        }
+    }
+
     pub fn on_key(&mut self, key: KeyEvent) -> Action {
         match key.code {
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -113,12 +134,12 @@ impl App {
             }
             KeyCode::Up => {
                 self.selected = self.selected.saturating_sub(1);
-                Action::None
+                self.reload_raw()
             }
             KeyCode::Down => {
                 let last = self.rows.len().saturating_sub(1);
                 self.selected = (self.selected + 1).min(last);
-                Action::None
+                self.reload_raw()
             }
             KeyCode::Char('r') => {
                 self.raw = !self.raw;
@@ -150,7 +171,7 @@ impl App {
             .split(f.area());
         let panes = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
+            .constraints([Constraint::Length(self.tree_width), Constraint::Min(10)])
             .split(outer[0]);
         self.draw_tree(f, panes[0]);
         self.draw_node(f, panes[1]);
@@ -384,6 +405,11 @@ pub async fn run_tui(paths: RunPaths, cfg: Arc<Config>) -> anyhow::Result<()> {
 
     let mut app = App::new(paths.run);
     app.tail_lines = cfg.ui.tail_lines.unwrap_or(TAIL_LINES).max(1);
+    app.tree_width = cfg.ui.tree_width.unwrap_or(TREE_WIDTH).max(12);
+    app.paths = Some(paths.clone());
+    let redraw = Duration::from_micros(
+        1_000_000 / u64::from(cfg.ui.refresh_hz.unwrap_or(REFRESH_HZ).max(1)),
+    );
     let mut tailer = Tailer::open(&paths.journal())?;
 
     enable_raw_mode()?;
@@ -395,6 +421,8 @@ pub async fn run_tui(paths: RunPaths, cfg: Arc<Config>) -> anyhow::Result<()> {
 
     loop {
         terminal.draw(|f| app.draw(f))?;
+        // ui.refresh_hz is a floor on the time between redraws, not a polling clock.
+        tokio::time::sleep(redraw).await;
         let action = tokio::select! {
             key = keys.next() => match key {
                 Some(Ok(Event::Key(k))) if k.kind == crossterm::event::KeyEventKind::Press => app.on_key(k),
@@ -458,7 +486,12 @@ async fn pager(patch: &camino::Utf8Path) -> anyhow::Result<()> {
 /// `k` cancels one node, never the run: the TUI is an observer.
 async fn cancel_node(app: &App, node: NodeId) {
     if let Some(NodeState::Running { pgid, .. }) = app.view.nodes.get(&node).map(|n| &n.state) {
-        let _ = crate::worker::spawn::terminate(*pgid, std::time::Duration::from_secs(5)).await;
+        let _ = crate::worker::spawn::terminate(
+            *pgid,
+            std::time::Duration::from_secs(5),
+            crate::worker::spawn::Reaper::Here,
+        )
+        .await;
     }
 }
 
@@ -594,6 +627,54 @@ mod tests {
                 },
             ),
         ]
+    }
+
+    /// The raw pane is titled from the selection. Moving the selection without reloading
+    /// labelled one node and showed another's bytes.
+    #[test]
+    fn moving_the_selection_reloads_the_raw_pane() {
+        let mut app = App::from_lines(run_id(), &journal());
+        assert_eq!(app.on_key(key(KeyCode::Down)), Action::None, "raw is off");
+
+        app.selected = 0;
+        assert_eq!(app.on_key(key(KeyCode::Char('r'))), Action::LoadRaw(id(1)));
+        app.raw_lines = vec!["node one".to_owned()];
+        assert_eq!(app.on_key(key(KeyCode::Down)), Action::LoadRaw(id(2)));
+        assert!(app.raw_lines.is_empty(), "stale bytes under a new title");
+    }
+
+    /// `swamp trace` marks a node whose process is gone as orphaned; the live view must not
+    /// keep rendering it as running.
+    #[test]
+    fn a_dead_node_is_orphaned_in_the_live_view_too() {
+        let mut lines = journal();
+        lines.push(line(
+            5,
+            Some(id(2)),
+            JournalEvent::ProcessStarted {
+                pid: 424_242,
+                pgid: 424_242,
+                argv: vec!["claude".into()],
+                env_overrides: Default::default(),
+                cwd: Utf8PathBuf::from("/repo"),
+            },
+        ));
+        let mut app = App::new(run_id());
+        // No pidfile exists for this node, so liveness reports it as gone.
+        app.paths = Some(crate::journal::paths::RunPaths {
+            run: run_id(),
+            dir: Utf8PathBuf::from("/nonexistent/run"),
+            sock_dir: Utf8PathBuf::from("/nonexistent/sock"),
+        });
+        app.apply(&lines);
+        assert!(matches!(
+            app.view.nodes[&id(2)].state,
+            NodeState::Orphaned { .. }
+        ));
+    }
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
     }
 
     #[test]

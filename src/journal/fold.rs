@@ -94,6 +94,11 @@ impl RunView {
                 config_sha256,
                 task,
             } => {
+                // `swamp resume` appends a second RunStarted to the same journal; the run's
+                // origin is the first one, task, base and start time included.
+                if self.header.is_some() {
+                    return;
+                }
                 self.header = Some(RunHeader {
                     run: l.run,
                     swamp_version: swamp_version.clone(),
@@ -280,7 +285,7 @@ impl RunView {
     }
 
     /// Totals are derived, never accumulated, so any prefix folds to the same numbers.
-    fn recompute(&mut self) {
+    pub fn recompute(&mut self) {
         let mut totals = Usage::default();
         let mut cost = 0.0;
         let mut complete = true;
@@ -416,6 +421,7 @@ impl Projection for RunView {
 pub struct LlmDigest {
     pub max_bytes: usize,
     view: RunView,
+    paths: Option<crate::journal::paths::RunPaths>,
 }
 
 impl LlmDigest {
@@ -423,7 +429,14 @@ impl LlmDigest {
         LlmDigest {
             max_bytes,
             view: RunView::default(),
+            paths: None,
         }
+    }
+
+    /// Without the run directory a node whose process is gone still reads as `running`.
+    pub fn with_paths(mut self, paths: crate::journal::paths::RunPaths) -> Self {
+        self.paths = Some(paths);
+        self
     }
 }
 
@@ -434,7 +447,11 @@ impl Projection for LlmDigest {
         self.view.apply(l);
     }
 
-    fn finish(self) -> Self::Out {
+    fn finish(mut self) -> Self::Out {
+        if let Some(paths) = self.paths.clone() {
+            self.view
+                .mark_orphans(&|id| crate::worker::liveness::is_ours(&paths.pidfile(id)));
+        }
         let t = self.view.totals();
         let run = self
             .view
@@ -525,6 +542,7 @@ fn failure_kind(f: &Failure) -> &'static str {
         Failure::Crashed { .. } => "crashed",
         Failure::Truncated { .. } => "truncated",
         Failure::NoCapacity { .. } => "no_capacity",
+        Failure::Cancelled { .. } => "cancelled",
     }
 }
 

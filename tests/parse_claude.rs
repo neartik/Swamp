@@ -53,6 +53,8 @@ fn spec() -> LaunchSpec {
         mcp: None,
         last_message_path: Utf8PathBuf::from("/tmp/wt/last-message.txt"),
         extra_args: Vec::new(),
+        extra: Default::default(),
+        partial_messages: false,
         attempt: 1,
     }
 }
@@ -167,6 +169,7 @@ fn brain_argv_adds_streaming_stdin_and_an_inline_mcp_config() {
         ],
     });
     s.allow_tools = vec!["Read".to_owned(), "Grep".to_owned()];
+    s.partial_messages = true;
     let argv = argv_of(&s);
     for flag in [
         "--input-format",
@@ -177,6 +180,14 @@ fn brain_argv_adds_streaming_stdin_and_an_inline_mcp_config() {
     ] {
         assert!(argv.iter().any(|a| a == flag), "brain argv lacks {flag}");
     }
+    // brain.include_partial_messages is a real switch, not decoration.
+    s.partial_messages = false;
+    assert!(
+        !argv_of(&s)
+            .iter()
+            .any(|a| a == "--include-partial-messages"),
+        "the flag survived include_partial_messages = false"
+    );
     let cfg = argv
         .iter()
         .skip_while(|a| *a != "--mcp-config")
@@ -634,4 +645,78 @@ fn stderr_is_searched_when_the_stream_says_nothing() {
             ..
         })
     ));
+}
+
+/// An unset config key becomes an empty string; `--permission-mode ''` is an argv error that
+/// kills claude before it emits one line, so the flag pair is dropped instead.
+#[test]
+fn an_empty_permission_mode_drops_the_flag_rather_than_passing_an_empty_argument() {
+    let mut s = spec();
+    s.permission_mode = String::new();
+    let argv = argv_of(&s);
+    assert!(!argv.iter().any(|a| a == "--permission-mode"), "{argv:?}");
+    assert!(!argv.iter().any(String::is_empty), "{argv:?}");
+    // The flag is still emitted when the key is set.
+    s.permission_mode = "plan".into();
+    let argv = argv_of(&s);
+    let at = argv.iter().position(|a| a == "--permission-mode").unwrap();
+    assert_eq!(argv[at + 1], "plan");
+}
+
+/// providers.*.tier_extra is journaled as applied; it has to actually reach the argv.
+#[test]
+fn tier_extra_reaches_the_argv_as_flags() {
+    let mut s = spec();
+    s.extra = BTreeMap::from([("effort".to_owned(), "high".to_owned())]);
+    let argv = argv_of(&s);
+    let at = argv
+        .iter()
+        .position(|a| a == "--effort")
+        .unwrap_or_else(|| panic!("{argv:?}"));
+    assert_eq!(argv[at + 1], "high");
+}
+
+/// A `stream_event` chunk is a partial message, not an unparsable line: counting thousands of
+/// them as noise inflates the journal tenfold and tells the operator nothing.
+#[test]
+fn partial_message_chunks_are_neither_noise_nor_events() {
+    let a = claude();
+    let mut st = ParseState::default();
+    let po = a.parse_line(
+        r#"{"type":"stream_event","event":{"type":"content_block_delta"}}"#,
+        &mut st,
+    );
+    assert!(po.events.is_empty());
+    assert!(!po.noise);
+    assert_eq!(st.unparsed, 0);
+}
+
+/// An argv error exits before the first stream line. Retrying replays it three times over,
+/// so it is terminal and carries the stderr the operator needs.
+#[test]
+fn a_process_that_dies_before_its_first_line_is_a_terminal_launch_failure() {
+    let st = ParseState {
+        stderr_tail: ["error: option '--permission-mode <mode>' argument '' is invalid".to_owned()]
+            .into_iter()
+            .collect(),
+        ..Default::default()
+    };
+    let f = classify_with(
+        &st,
+        Some(ExitInfo {
+            code: Some(1),
+            signal: None,
+            duration_ms: 3,
+        }),
+        false,
+    )
+    .expect("a failure");
+    match &f {
+        Failure::WorkerError { subtype, detail } => {
+            assert_eq!(subtype, "launch_failed");
+            assert!(detail.contains("--permission-mode"), "{detail}");
+        }
+        other => panic!("{other:?}"),
+    }
+    assert!(f.is_terminal(), "an argv error must never be retried");
 }

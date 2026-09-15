@@ -36,6 +36,10 @@ pub struct LaunchSpec {
     pub mcp: Option<McpAttach>,
     pub last_message_path: Utf8PathBuf,
     pub extra_args: Vec<String>,
+    /// providers.<p>.tier_extra.<tier>: rendered per adapter, never passed through verbatim.
+    pub extra: BTreeMap<String, String>,
+    /// brain.include_partial_messages; meaningless for a worker.
+    pub partial_messages: bool,
     pub attempt: u32,
 }
 

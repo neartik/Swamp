@@ -34,8 +34,9 @@ impl McpServer {
         view: Arc<JournalHandle>,
     ) -> anyhow::Result<(Self, Utf8PathBuf)> {
         let socket = paths.socket();
-        tokio::fs::create_dir_all(&paths.dir).await?;
-        set_mode(&paths.dir, 0o700).await?;
+        let dir = socket.parent().unwrap_or(&paths.dir).to_path_buf();
+        tokio::fs::create_dir_all(&dir).await?;
+        set_mode(&dir, 0o700).await?;
         // A leftover socket from a crashed run would make bind fail with EADDRINUSE.
         if tokio::fs::symlink_metadata(&socket).await.is_ok() {
             tokio::fs::remove_file(&socket).await?;

@@ -224,3 +224,72 @@ fn the_dependency_tree_contains_no_http_client() {
         );
     }
 }
+
+/// Config discovery used to append `.swamp/config.toml` to the raw cwd while path discovery
+/// walked up to the git root: from any subdirectory the project config was silently ignored.
+#[test]
+fn the_repo_config_is_read_from_a_subdirectory() {
+    let h = Harness::new();
+    h.install();
+    std::fs::create_dir_all(h.repo.join(".swamp")).expect("dot swamp");
+    std::fs::write(
+        h.repo.join(".swamp").join("config.toml"),
+        "[dispatch]\ndefault_tier = \"low\"\n",
+    )
+    .expect("repo config");
+    let sub = h.repo.join("crates").join("api");
+    std::fs::create_dir_all(&sub).expect("subdir");
+
+    for dir in [&h.repo, &sub] {
+        let out = h
+            .swamp(&["config", "show"])
+            .current_dir(dir)
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let text = String::from_utf8(out).expect("utf8");
+        assert!(
+            text.contains("default_tier = \"low\""),
+            "the repo config was not read from {dir}: {text}"
+        );
+    }
+}
+
+/// A CLI that rejects its own argv exits before writing a single stream line. The run has to
+/// fail fast with the stderr in hand, not retry an argv error three times.
+#[test]
+fn a_worker_that_dies_before_its_first_line_fails_fast_with_its_stderr() {
+    let h = Harness::new();
+    let mut cmd = h.swamp(&["run", "--no-brain", "--tier", "mid", TASK]);
+    // install() has just linked the wrapper to the shared fake binary; unlink before writing
+    // or the write follows the symlink and replaces the fake for every other test.
+    let wrapper = h.bin.join(&h.accounts[0].exec);
+    std::fs::remove_file(&wrapper).expect("unlink the wrapper");
+    std::fs::write(
+        &wrapper,
+        "#!/bin/sh\ncat > /dev/null\n\
+         echo \"error: option '--permission-mode <mode>' argument '' is invalid\" >&2\nexit 1\n",
+    )
+    .expect("wrapper");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    }
+
+    let started = std::time::Instant::now();
+    let out = cmd.assert().code(4).get_output().clone();
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(30),
+        "the run hung instead of failing fast"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("--permission-mode"), "{stderr}");
+
+    let view = h.last_view();
+    let node = view.nodes.values().next().expect("one node");
+    assert!(matches!(node.state, NodeState::Failed { .. }));
+    assert_eq!(view.nodes.len(), 1, "an argv error is never retried");
+}

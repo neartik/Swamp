@@ -331,10 +331,9 @@ async fn the_resume_per_turn_brain_resumes_the_thread_it_was_given() {
         "{first:?}"
     );
     assert_eq!(first[1], "text pong");
-    assert!(
-        first[2].starts_with("turn_done in=15300 out=5"),
-        "{first:?}"
-    );
+    // 15300 prompt tokens of which 12160 were cache reads: `in` is the non-cached part, the
+    // way the claude adapter reports it, so cost is not billed twice for the same tokens.
+    assert!(first[2].starts_with("turn_done in=3140 out=5"), "{first:?}");
 
     brain.send("second").await.expect("turn two");
     let second = turn(&mut brain).await;

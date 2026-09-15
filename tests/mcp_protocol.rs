@@ -124,6 +124,7 @@ async fn harness(delay: Duration) -> Harness {
     let paths = RunPaths {
         run,
         dir: root.join("run"),
+        sock_dir: root.join("sock"),
     };
     let (journal, writer) = Journal::open(paths.clone(), FsyncPolicy::Never, &[])
         .await

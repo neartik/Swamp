@@ -19,11 +19,13 @@ use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 const DETACH_WAIT: Duration = Duration::from_secs(60);
+const GRACE: Duration = Duration::from_secs(5);
 
 /// One-shot dispatch. The v1 smoke path when --no-brain is set.
 pub async fn run(ctx: &Ctx, args: &RunArgs) -> anyhow::Result<i32> {
     let task = task_text(&args.task)?;
     let cfg = Arc::new(overrides(ctx, args)?);
+    let depth = crate::cmd::guard_depth(&cfg)?;
     for w in &cfg.warnings {
         tracing::warn!("{w}");
     }
@@ -34,7 +36,7 @@ pub async fn run(ctx: &Ctx, args: &RunArgs) -> anyhow::Result<i32> {
     if args.no_brain {
         single_node(ctx, session, args, task).await
     } else {
-        with_brain(ctx, session, args, task).await
+        with_brain(ctx, session, args, task, depth).await
     }
 }
 
@@ -150,13 +152,14 @@ async fn with_brain(
     session: RunSession,
     args: &RunArgs,
     task: String,
+    depth: u32,
 ) -> anyhow::Result<i32> {
     use crate::mcp::McpServer;
-    use std::collections::HashSet;
 
     let cfg = session.cfg.clone();
     let provider = cfg.brain.provider.unwrap_or(Provider::Anthropic);
     let dispatcher = session.dispatcher();
+    dispatcher.set_base_depth(depth);
     let (server, socket) = McpServer::bind(
         &session.paths,
         dispatcher.clone(),
@@ -168,7 +171,7 @@ async fn with_brain(
     let deadline = Instant::now() + cfg.node_timeout(cfg.brain.tier.unwrap_or(Tier::High));
     let lease = session
         .pool
-        .acquire(provider, &HashSet::new(), deadline)
+        .acquire_brain(provider, cfg.brain.account.as_ref(), deadline)
         .await
         .map_err(|e| anyhow::anyhow!("no account for the brain: {e:?}"))?;
     let mut brain = crate::brain::build(
@@ -181,7 +184,18 @@ async fn with_brain(
     )?;
     brain.start().await?;
     brain.send(&task).await?;
-    let code = crate::ui::chat::drain_turn(&mut brain, ctx).await;
+    let mut code = {
+        let turn = crate::ui::chat::drain_turn(&mut brain, ctx);
+        tokio::pin!(turn);
+        tokio::select! {
+            code = &mut turn => code,
+            () = crate::cmd::shutdown_signal() => {
+                eprintln!("interrupted: cancelling {} nodes", dispatcher.cancel_all());
+                tokio::time::sleep(cfg.limits.grace_period.unwrap_or(GRACE)).await;
+                6
+            }
+        }
+    };
     brain.shutdown().await?;
     serving.abort();
     drop(dispatcher);
@@ -216,13 +230,10 @@ async fn with_brain(
         },
     ));
     let _ = args;
-    Ok(if code != 0 {
-        code
-    } else if failed {
-        4
-    } else {
-        0
-    })
+    if code == 0 && failed {
+        code = 4;
+    }
+    Ok(code)
 }
 
 fn report(ctx: &Ctx, paths: &RunPaths, result: &NodeResult) -> anyhow::Result<()> {
@@ -232,7 +243,22 @@ fn report(ctx: &Ctx, paths: &RunPaths, result: &NodeResult) -> anyhow::Result<()
     }
     let view = ctx.view(paths, false)?;
     ctx.out(&render(&view, &TraceOpts::default()));
+    // A setup failure (dirty tree, unmapped tier) leaves an empty tree: without this the only
+    // copy of the reason is the journal file.
+    if let Some(reason) = failure_detail(result.failure.as_ref()) {
+        eprintln!("swamp: {reason}");
+    }
     Ok(())
+}
+
+fn failure_detail(failure: Option<&Failure>) -> Option<&str> {
+    match failure? {
+        Failure::WorkerError { detail, .. }
+        | Failure::NoCapacity { detail }
+        | Failure::AuthExpired { detail, .. }
+        | Failure::Overloaded { detail } => Some(detail.as_str()),
+        _ => None,
+    }
 }
 
 fn exit_code(failure: Option<&Failure>, interrupted: bool) -> i32 {
@@ -242,6 +268,7 @@ fn exit_code(failure: Option<&Failure>, interrupted: bool) -> i32 {
     match failure {
         None => 0,
         Some(Failure::NoCapacity { .. }) => 3,
+        Some(Failure::Cancelled { .. }) => 6,
         Some(Failure::BudgetExceeded { .. }) => 7,
         Some(_) => 4,
     }
@@ -321,10 +348,6 @@ fn launch_spec(
         .isolation
         .or(cfg.workspace.isolation)
         .unwrap_or(IsolationMode::Worktree);
-    let mut extra_args = worker.args.clone();
-    if isolation == IsolationMode::ReadOnly {
-        extra_args.extend(worker.readonly_args.clone());
-    }
     LaunchSpec {
         node: NodeIds {
             id: NodeId::new(),
@@ -347,7 +370,9 @@ fn launch_spec(
         deny_tools: Vec::new(),
         mcp: None,
         last_message_path: paths.dir.join("last-message.txt"),
-        extra_args,
+        extra_args: worker.args_for(isolation),
+        extra: cfg.tier_extra(provider, tier),
+        partial_messages: false,
         attempt: 1,
     }
 }

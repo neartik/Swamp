@@ -120,6 +120,8 @@ pub fn build(
         }),
         last_message_path: paths.last_message(node.id),
         extra_args: Vec::new(),
+        extra: cfg.tier_extra(provider, tier),
+        partial_messages: cfg.brain.include_partial_messages.unwrap_or(false),
         attempt: 1,
     };
 

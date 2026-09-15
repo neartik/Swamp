@@ -97,7 +97,7 @@ tier_extra = { high = { effort = "high" }, mid = { effort = "medium" }, low = { 
 
 [providers.openai]
 adapter = "codex-cli"
-models  = { high = "gpt-5.3-pro", mid = "gpt-5.3-sol", low = "gpt-5.3-astra" }
+models  = { high = "gpt-6-astra", mid = "gpt-5.6-sol", low = "gpt-5.6-terra" }
 tier_extra = { high = { model_reasoning_effort = "high" },
                mid  = { model_reasoning_effort = "medium" },
                low  = { model_reasoning_effort = "low" } }
@@ -176,7 +176,7 @@ overloaded = ['server_overloaded', '(?i)\b503\b']
 # Only used to ESTIMATE cost where the CLI reports none (codex). USD per 1M tokens.
 # Anything computed here is stamped basis="estimated" and is never presented as a measurement.
 # Omit the table and cost stays blank.
-[pricing."gpt-5.3-sol"]
+[pricing."gpt-5.6-sol"]
 input        = 0.25
 cached_input = 0.025
 output       = 2.00

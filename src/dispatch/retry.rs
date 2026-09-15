@@ -118,6 +118,9 @@ pub async fn run_node(cx: &NodeCtx, mut spec: LaunchSpec, task: &TaskRequest) ->
     let mut held: Option<Lease> = None;
 
     for attempt in 1..=cx.max_attempts {
+        if cx.cancel.is_cancelled() {
+            return cancelled(logical, attempts);
+        }
         let lease = match held.take() {
             Some(lease) => lease,
             None => match cx.pool.acquire(provider, &excluded, cx.deadline).await {
@@ -171,13 +174,7 @@ pub async fn run_node(cx: &NodeCtx, mut spec: LaunchSpec, task: &TaskRequest) ->
         spec.model = match cx.cfg.model_for(provider, spec.tier, Some(&lease.account)) {
             Ok(m) => m,
             Err(e) => {
-                return fail(
-                    logical,
-                    attempts,
-                    Failure::NoCapacity {
-                        detail: e.to_string(),
-                    },
-                );
+                return fail(logical, attempts, setup_failed(&e));
             }
         };
 
@@ -186,13 +183,7 @@ pub async fn run_node(cx: &NodeCtx, mut spec: LaunchSpec, task: &TaskRequest) ->
         let wt = match cx.runner.workspace(logical, attempt).await {
             Ok(w) => w,
             Err(e) => {
-                return fail(
-                    logical,
-                    attempts,
-                    Failure::NoCapacity {
-                        detail: e.to_string(),
-                    },
-                );
+                return fail(logical, attempts, setup_failed(&e));
             }
         };
         emit(
@@ -208,16 +199,11 @@ pub async fn run_node(cx: &NodeCtx, mut spec: LaunchSpec, task: &TaskRequest) ->
         let dir = node_dir(cx, spec.node.id);
         spec.last_message_path = dir.join("last-message.txt");
 
-        let (prompt_path, prompt_sha256) = match write_prompt(&dir, &task.prompt) {
+        let max_prompt = cx.cfg.limits.max_prompt_bytes.unwrap_or(usize::MAX);
+        let (prompt_path, prompt_sha256) = match write_prompt(&dir, &task.prompt, max_prompt) {
             Ok(v) => v,
             Err(e) => {
-                return fail(
-                    logical,
-                    attempts,
-                    Failure::NoCapacity {
-                        detail: e.to_string(),
-                    },
-                );
+                return fail(logical, attempts, setup_failed(&e));
             }
         };
 
@@ -294,6 +280,16 @@ pub async fn run_node(cx: &NodeCtx, mut spec: LaunchSpec, task: &TaskRequest) ->
         }
         cx.pool
             .report(&lease.account, out.failure.as_ref(), out.cost);
+        // Live telemetry the account pool needs to stop routing BEFORE the provider says no.
+        if let Some(snap) = out.rate_limit.clone() {
+            cx.pool.observe_quota(&lease.account, snap);
+        }
+        // A cancelled node was killed by us: the classifier only sees SIGTERM and would retry.
+        if cx.cancel.is_cancelled() {
+            out.failure = Some(Failure::Cancelled {
+                by: crate::model::core::CancelSource::User,
+            });
+        }
 
         record.usage = out.usage;
         record.cost = out.cost;
@@ -308,6 +304,7 @@ pub async fn run_node(cx: &NodeCtx, mut spec: LaunchSpec, task: &TaskRequest) ->
         record.ended_at = Some(time::OffsetDateTime::now_utc());
         record.state = match &out.failure {
             None => NodeState::Succeeded,
+            Some(Failure::Cancelled { by }) => NodeState::Cancelled { by: *by },
             Some(f) => NodeState::Failed { failure: f.clone() },
         };
         if out.failure.is_none() {
@@ -399,6 +396,25 @@ fn settle(logical: NodeId, attempts: Vec<NodeRecord>, out: RunOutcome) -> NodeOu
     outcome
 }
 
+fn cancelled(logical: NodeId, attempts: Vec<NodeRecord>) -> NodeOutcome {
+    fail(
+        logical,
+        attempts,
+        Failure::Cancelled {
+            by: crate::model::core::CancelSource::User,
+        },
+    )
+}
+
+/// A worktree, a prompt file or a tier mapping that would not come up. Exit 3 is reserved for
+/// a pool with nothing left in it, so this is never `NoCapacity`.
+fn setup_failed(e: impl std::fmt::Display) -> Failure {
+    Failure::WorkerError {
+        subtype: "setup".into(),
+        detail: format!("{e:#}"),
+    }
+}
+
 fn fail(logical: NodeId, attempts: Vec<NodeRecord>, failure: Failure) -> NodeOutcome {
     let mut outcome = NodeOutcome::failed(failure);
     outcome.logical = logical;
@@ -459,8 +475,17 @@ fn session_handle(plan: &SessionPlan, account: &AccountId) -> Option<SessionHand
     }
 }
 
-fn write_prompt(dir: &Utf8PathBuf, prompt: &str) -> anyhow::Result<(Utf8PathBuf, String)> {
+fn write_prompt(
+    dir: &Utf8PathBuf,
+    prompt: &str,
+    max_bytes: usize,
+) -> anyhow::Result<(Utf8PathBuf, String)> {
     use sha2::{Digest, Sha256};
+    anyhow::ensure!(
+        prompt.len() <= max_bytes,
+        "prompt is {} bytes, over limits.max_prompt_bytes = {max_bytes}",
+        prompt.len()
+    );
     std::fs::create_dir_all(dir)?;
     let path = dir.join("prompt.md");
     std::fs::write(&path, prompt)?;
