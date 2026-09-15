@@ -52,48 +52,63 @@ untouched. Three helpers in `trace.rs` become `pub(crate)`: `failure_summary`, `
 
 ## 1. Architecture
 
-### 1.1 Inline viewport, never the alternate screen
+### 1.1 An inline viewport, never the alternate screen
 
 Finished blocks scroll into real scrollback so the user can select and copy them with the mouse.
-Only the live tail is redrawn.
+Only the live tail is redrawn. `src/ui/chat/live.rs` owns it:
 
 ```rust
 enable_raw_mode()?;                                  // no EnterAlternateScreen
 execute!(stdout(), PushKeyboardEnhancementFlags(
     KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
   | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS))?;
+let cursor_row = cursor::position().map(|(_, y)| y).unwrap_or(rows - 1);
 let mut term = Terminal::with_options(
     CrosstermBackend::new(stdout()),
-    TerminalOptions { viewport: Viewport::Inline(MIN_LIVE) },
+    TerminalOptions { viewport: Viewport::Fixed(Rect::new(0, rows - height, width, height)) },
 )?;
 let _guard = TerminalGuard::with(restore_inline);    // raw off, pop flags, show cursor
 ```
 
-`MIN_LIVE = 4`: rule, input, rule, status. `install_panic_hook` and `TerminalGuard` move from
-`watch.rs` into `ui/mod.rs` unchanged and are parameterised by the restore fn they already take.
-`restore_inline` does **not** call `LeaveAlternateScreen`. `swamp watch` keeps the full-screen
-view; chat is inline.
+`Viewport::Fixed`, not `Viewport::Inline`. `Terminal::resize` on an inline viewport calls
+`compute_inline_size`, which asks the backend for the cursor position; the DSR reply lands on the
+stdin the key `EventStream` is already draining, and the read times out. The live area is
+therefore the last `height` rows of the screen by construction, and `live.rs` scrolls the host
+itself.
 
-**Non-tty.** If `!std::io::stdout().is_terminal()`, `repl` runs today's plain printer
-(`drain_turn`, moved verbatim into `mod.rs`). CI, pipes and scripted runs are unaffected.
+The one cursor read that is needed - how far down the host's own output stopped, so the area
+scrolls only as far as it takes to free the bottom `height` rows - is done in `live::enter`,
+**before** `EventStream::new()`, so nothing is competing for the reply. It falls back to the last
+row if the terminal does not answer. Nothing reads the cursor again for the rest of the session.
+
+`MIN_LIVE = 4`: rule, input, rule, status. `install_panic_hook` and `TerminalGuard` live in
+`watch.rs` and are parameterised by the restore fn they take. `restore_inline` does **not** call
+`LeaveAlternateScreen`. `swamp watch` keeps the full-screen view; chat is inline.
+
+**Non-tty.** If `!std::io::stdout().is_terminal()`, `repl` runs the plain printer (`drain_turn`,
+in `mod.rs`). CI, pipes and scripted runs are unaffected.
 
 ### 1.2 Committing blocks to scrollback
 
+`Inline::commit` writes each line on the top row of the live area and then makes the host scroll
+that row off it. A newline printed on the **last** row is the only thing that scrolls the host,
+and it is the only way a committed row reaches real scrollback:
+
 ```rust
-fn commit(term: &mut Terminal<B>, lines: Vec<Line<'static>>) -> io::Result<()> {
-    for chunk in lines.chunks(CHUNK) {              // CHUNK = 200
-        let h = chunk.len() as u16;
-        term.insert_before(h, |buf| {
-            Paragraph::new(chunk.to_vec()).render(buf.area, buf);  // no Wrap: pre-wrapped
-        })?;
-    }
-    Ok(())
+for line in lines {
+    write_row(&mut term, line, top, width)?;             // straight to the backend
+    execute!(w, MoveTo(0, rows - 1), Print("\n"))?;       // the whole screen moves up one
 }
+term.resize(area)?;                                      // repaint the live area next frame
 ```
 
-Pre-wrapping is mandatory: `insert_before` takes the height up front, so any wrapping ratatui did
-itself would clip. All wrapping happens in `markdown.rs` (`wrap_spans`, span-aware, widths from
+Pre-wrapping is mandatory: a row is one screen line, so any wrapping ratatui did itself would
+clip. All wrapping happens in `markdown.rs` (`wrap_spans`, span-aware, widths from
 `unicode_width`). Scrollback is frozen text; wrap once, at commit time, at the current width.
+
+Every byte - the ratatui diff, the cursor moves, the newlines - goes through the backend's own
+writer, so the ordering is the writer's and a test can point that writer at a terminal emulator
+(§1.3).
 
 What leaves the live area, and when:
 
@@ -106,30 +121,47 @@ What leaves the live area, and when:
 | Tool call + result | on `ToolDone`, unless the tool is `swamp_dispatch` |
 | Dispatch board | when the call is done **and** every owned node is terminal |
 | Slash output | immediately |
-| Error / notice | immediately |
+| Error / notice | immediately, through `commit` like everything else |
 
 The live area height is therefore bounded by the worker board, never by the conversation.
 
 ### 1.3 Resizing the live area
 
+Growing and shrinking are not symmetric, and neither one may clear a row above the viewport.
+
+**Growing** by `k` rows prints `k` newlines on the last row. The host scrolls, `k` committed rows
+move up into its scrollback, and the `k` rows the live area is about to claim are the ones freed
+at the bottom. Nothing above the viewport is written to or cleared.
+
+**Shrinking is deferred.** `set_height` only records the smaller `want`; the viewport keeps its
+rows. The surplus `height - want` rows stay inside it, padded blank above the live content, until
+`commit` writes finished lines into them - it fills the surplus first, top down, and only starts
+scrolling once the viewport is down to `want`. A block leaving the live area frees exactly as
+many rows as it has lines, so in the normal case the block lands on the rows it already occupied:
+no scroll, no flicker, and never a blank row pushed into scrollback between two committed blocks.
+
+`chat::interactive` therefore sizes the area from the **post-commit** state, immediately before
+each `Effect::Commit`, as well as once per frame before `draw`.
+
 ```rust
-fn set_live_height(term: &mut Terminal<B>, want: u16, rows: u16) -> io::Result<()> {
-    let area = term.get_frame().area();
-    if area.height == want { return Ok(()); }
-    if want > area.height {
-        // printing newlines scrolls the host terminal and makes room below
-        execute!(stdout(), Print("\n".repeat((want - area.height) as usize)))?;
-    }
-    term.clear()?;                                   // wipe the old rows before they move
-    term.resize(Rect::new(0, rows.saturating_sub(want), term.size()?.width, want))?;
-    Ok(())
+term.set_height(render::live_height(&app, rows))?;   // per frame, before draw
+...
+Effect::Commit(lines) => {
+    term.set_height(render::live_height(&app, rows))?;  // `reduce` already dropped the block
+    term.commit(lines)?;
 }
 ```
 
-Called once per frame before `draw`; a no-op in the steady state.
 `want = live_lines.len()` clamped to `[MIN_LIVE, max(MIN_LIVE, rows * 3 / 5)]`. When the clamp
 bites, the worker board is the part that collapses (§4.5). On `Event::Resize` every live block is
-re-wrapped and the same helper runs.
+re-wrapped and `set_size` re-anchors the viewport to the bottom of the new screen.
+
+**Tests.** `Inline` is generic over its writer, so `live/tests.rs` hands it a `vt100` emulator
+with scrollback and asserts on what the user would see: committed rows survive every grow in
+order, a notice committed under a tall board is still there one frame later, no run of more than
+one blank row appears between committed blocks, and the live area is always the last rows of the
+screen. The `render::live` and `Block::render` snapshots (§3) cover the drawing; these cover the
+scrolling.
 
 ### 1.4 The loop
 
@@ -139,11 +171,10 @@ Event sources: crossterm keys, the `BrainEvent` stream, journal-fold polls, and 
 let period = Duration::from_millis(1000 / u64::from(cfg.ui.refresh_hz.unwrap_or(12)).max(1));
 let mut ticker = tokio::time::interval(period);
 loop {
-    set_live_height(&mut term, app.live_height(w), rows)?;
-    term.draw(|f| {
-        f.render_widget(Paragraph::new(render::live(&app, f.area().width)), f.area());
-        if let Some(p) = app.cursor_xy(f.area()) { f.set_cursor_position(p); }
-    })?;
+    term.set_size(width, rows)?;
+    term.set_height(render::live_height(&app, rows))?;
+    let frame = render::compose(&app);
+    term.draw(frame.lines, frame.cursor)?;
     let msg = tokio::select! {
         biased;
         Some(ev) = keys.next()           => Msg::Key(ev?),
@@ -152,14 +183,17 @@ loop {
         _        = ticker.tick()         => Msg::Tick,
         ()       = cmd::shutdown_signal()=> Msg::Signal,
     };
-    for effect in app.reduce(msg) {
+    let mut effects: VecDeque<Effect> = app.reduce(msg).into();
+    while let Some(effect) = effects.pop_front() {
         match effect {
-            Effect::Commit(lines) => commit(&mut term, lines)?,
+            Effect::Commit(lines) => { term.set_height(render::live_height(&app, rows))?;
+                                       term.commit(lines)?; }
             Effect::Send(text)    => brain.send(&text).await?,
             Effect::Interrupt     => brain.interrupt().await?,
-            Effect::CancelAll     => { let n = disp.cancel_all(); app.note_cancelled(n); }
+            Effect::CancelAll     => { let n = disp.cancel_all();
+                                       effects.extend(app.note_cancelled(n)); }
             Effect::Cancel(id)    => disp.cancel(id).await?,
-            Effect::Clear         => execute!(stdout(), Clear(ClearType::All), MoveTo(0, 0))?,
+            Effect::Clear         => term.clear_screen()?,
             Effect::Quit(code)    => return Ok(code),
         }
     }
@@ -172,9 +206,13 @@ flight, no live board, no armed timer), so an idle chat does not wake 12 times a
 terminal cursor is used rather than a drawn block, so cursor styles and screen readers behave;
 `SetCursorStyle::SteadyBlock` is pushed at startup.
 
+Effects are a queue, not a list: `CancelAll` pushes the `⊘ cancelled n nodes` notice back onto
+it, so that notice is committed through `Inline::commit` like any other block and can never be
+written straight onto a live row.
+
 `App` is pure: `reduce(Msg) -> Vec<Effect>`, no I/O, fully unit-testable. Rendering is
-`render::live(&App, width) -> Vec<Line<'static>>` and `Block::render(width, &Theme)`, both
-snapshot-testable with `TestBackend`.
+`render::compose(&App) -> Live`, and `Block::render(&Ctx)`, both snapshot-testable with
+`TestBackend`.
 
 ### 1.5 Worker progress: one fold, two views
 

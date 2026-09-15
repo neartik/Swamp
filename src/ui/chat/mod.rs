@@ -127,14 +127,15 @@ async fn interactive(
     );
     let mut ticker = tokio::time::interval(period);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    let mut keys = EventStream::new();
-
     let (mut width, mut rows) = size();
     app.width = width;
     app.rows = rows;
-    let mut term = live::Inline::enter(width, rows, MIN_LIVE)?;
+    // The terminal is entered before the key stream exists: `enter` reads the cursor position
+    // once, and that reply arrives on the stdin an `EventStream` would already be draining.
+    let mut term = live::enter(width, rows, MIN_LIVE)?;
     let _guard = crate::ui::watch::TerminalGuard::with(live::restore_inline);
     term.commit(app.take_welcome())?;
+    let mut keys = EventStream::new();
 
     let code = loop {
         app.now = OffsetDateTime::now_utc();
@@ -180,7 +181,13 @@ async fn interactive(
         let mut quit = None;
         while let Some(effect) = effects.pop_front() {
             match effect {
-                Effect::Commit(lines) => term.commit(lines)?,
+                Effect::Commit(lines) => {
+                    // `reduce` has already dropped the block, so this is the height the live
+                    // area needs *after* the commit: the rows it frees are the rows these
+                    // lines are written into.
+                    term.set_height(render::live_height(&app, rows))?;
+                    term.commit(lines)?;
+                }
                 Effect::Send(text) => brain.send(&text).await?,
                 Effect::Interrupt => brain.interrupt().await?,
                 Effect::CancelAll => {
