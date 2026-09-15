@@ -239,10 +239,7 @@ fn a_bad_env_override_names_the_variable() {
     let err = sb
         .load_with(&[("SWAMP_LIMITS__MAX_DEPTH", "loads")], None, None)
         .unwrap_err();
-    assert!(
-        err_text(&err).contains("SWAMP_LIMITS__MAX_DEPTH"),
-        "{err}"
-    );
+    assert!(err_text(&err).contains("SWAMP_LIMITS__MAX_DEPTH"), "{err}");
 }
 
 #[test]
@@ -670,8 +667,5 @@ limit_id = "codex"
 "#,
     );
     let cfg = sb.load(Some(&path), None).expect("valid keys load clean");
-    assert_eq!(
-        cfg.accounts[0].limit_id.as_deref(),
-        Some("codex")
-    );
+    assert_eq!(cfg.accounts[0].limit_id.as_deref(), Some("codex"));
 }

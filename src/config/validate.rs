@@ -118,7 +118,11 @@ pub fn problems(cfg: &Config) -> Vec<Problem> {
             "must be at least 10s".to_string(),
         );
     }
-    if cfg.dispatch.near_exhaustion_penalty.is_some_and(|p| p < 0.0) {
+    if cfg
+        .dispatch
+        .near_exhaustion_penalty
+        .is_some_and(|p| p < 0.0)
+    {
         push(
             "dispatch.near_exhaustion_penalty".into(),
             "must be non-negative".to_string(),

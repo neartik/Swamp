@@ -992,8 +992,8 @@ impl App {
         let stale: Vec<(AccountId, AccountState)> = Vec::new();
         let rows = crate::ui::usage::rows_from(&self.account_cfg, &self.pool, &stale);
         if json {
-            let text = serde_json::to_string_pretty(&crate::ui::usage::json(&rows))
-                .unwrap_or_default();
+            let text =
+                serde_json::to_string_pretty(&crate::ui::usage::json(&rows)).unwrap_or_default();
             let mut body: Vec<String> = vec!["```json".to_owned()];
             body.extend(text.lines().map(str::to_owned));
             body.push("```".to_owned());

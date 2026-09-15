@@ -81,29 +81,54 @@ fn with_seven_day(mut r: AccountRow, utilization: f64, measured: bool) -> Accoun
 /// WINDOW survive every width.
 #[test]
 fn the_table_drops_columns_in_the_documented_order() {
-    let r = with_seven_day(row("claude-main", Provider::Anthropic, Health::Healthy), 0.64, true);
+    let r = with_seven_day(
+        row("claude-main", Provider::Anthropic, Health::Healthy),
+        0.64,
+        true,
+    );
     for width in [100u16, 86, 78, 62] {
-        let body = screen(&usage::render(std::slice::from_ref(&r), width, &Theme::plain()), width);
+        let body = screen(
+            &usage::render(std::slice::from_ref(&r), width, &Theme::plain()),
+            width,
+        );
         assert!(body.contains("claude-main"), "{width}: {body}");
         assert!(body.contains("64%"), "{width}: {body}");
         assert!(body.contains("WINDOW"), "{width}: {body}");
     }
-    let wide = screen(&usage::render(std::slice::from_ref(&r), 100, &Theme::plain()), 100);
+    let wide = screen(
+        &usage::render(std::slice::from_ref(&r), 100, &Theme::plain()),
+        100,
+    );
     assert!(wide.contains("LIFETIME") && wide.contains("COST") && wide.contains("HEALTH"));
 
-    let below_lifetime = screen(&usage::render(std::slice::from_ref(&r), 90, &Theme::plain()), 90);
+    let below_lifetime = screen(
+        &usage::render(std::slice::from_ref(&r), 90, &Theme::plain()),
+        90,
+    );
     assert!(!below_lifetime.contains("LIFETIME"), "{below_lifetime}");
     assert!(below_lifetime.contains("COST"), "{below_lifetime}");
 
-    let below_cost = screen(&usage::render(std::slice::from_ref(&r), 80, &Theme::plain()), 80);
+    let below_cost = screen(
+        &usage::render(std::slice::from_ref(&r), 80, &Theme::plain()),
+        80,
+    );
     assert!(!below_cost.contains("COST"), "{below_cost}");
-    assert!(below_cost.contains("7D") || below_cost.contains("64%"), "{below_cost}");
+    assert!(
+        below_cost.contains("7D") || below_cost.contains("64%"),
+        "{below_cost}"
+    );
 
-    let collapsed = screen(&usage::render(std::slice::from_ref(&r), 70, &Theme::plain()), 70);
+    let collapsed = screen(
+        &usage::render(std::slice::from_ref(&r), 70, &Theme::plain()),
+        70,
+    );
     assert!(!collapsed.contains("7D"), "{collapsed}");
     assert!(collapsed.contains("HEALTH"), "{collapsed}");
 
-    let narrow = screen(&usage::render(std::slice::from_ref(&r), 62, &Theme::plain()), 62);
+    let narrow = screen(
+        &usage::render(std::slice::from_ref(&r), 62, &Theme::plain()),
+        62,
+    );
     assert!(!narrow.contains("HEALTH"), "{narrow}");
     assert!(narrow.contains("claude-main"), "{narrow}");
 }
@@ -116,7 +141,11 @@ fn missing_quota_is_a_dash_and_an_estimate_carries_a_tilde() {
     assert!(!body.contains("0%"), "{body}");
     assert!(body.contains(" - "), "{body}");
 
-    let est = with_seven_day(row("codex-alt", Provider::Openai, Health::Healthy), 0.02, false);
+    let est = with_seven_day(
+        row("codex-alt", Provider::Openai, Health::Healthy),
+        0.02,
+        false,
+    );
     let body = screen(&usage::render(&[est], 100, &Theme::plain()), 100);
     assert!(body.contains("~2%"), "{body}");
     assert!(body.contains("~in"), "{body}");
@@ -159,7 +188,8 @@ fn json_matches_the_documented_shape_and_round_trips() {
         + tokens["cache_write_tokens"].as_u64().unwrap()
         + tokens["output_tokens"].as_u64().unwrap();
     assert_eq!(billable, 0);
-    let back: serde_json::Value = serde_json::from_str(&serde_json::to_string(&v).unwrap()).unwrap();
+    let back: serde_json::Value =
+        serde_json::from_str(&serde_json::to_string(&v).unwrap()).unwrap();
     assert_eq!(v, back);
 }
 

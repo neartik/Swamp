@@ -4,8 +4,7 @@
 use crate::config::schema::AccountCfg;
 use crate::dispatch::account::{AccountState, Health, QuotaSource};
 use crate::model::core::{
-    AccountId, CostBasis, LimitReached, LimitScope, LimitWindow, Provider, RateLimitSnapshot,
-    Usage,
+    AccountId, CostBasis, LimitReached, LimitScope, LimitWindow, Provider, RateLimitSnapshot, Usage,
 };
 use crate::ui::chat::theme::{Role, Theme};
 use crate::ui::{fmt, watch};
@@ -191,7 +190,12 @@ fn header_line(l: &Layout, theme: &Theme) -> Line<'static> {
     Line::from(theme.span(format!("  {}", cells.join(" ")), Role::Meta))
 }
 
-fn account_lines(r: &AccountRow, l: &Layout, theme: &Theme, now: OffsetDateTime) -> Vec<Line<'static>> {
+fn account_lines(
+    r: &AccountRow,
+    l: &Layout,
+    theme: &Theme,
+    now: OffsetDateTime,
+) -> Vec<Line<'static>> {
     let role = health_role(r.health);
     let mut cells = Vec::new();
     if l.show_health {
@@ -215,7 +219,10 @@ fn account_lines(r: &AccountRow, l: &Layout, theme: &Theme, now: OffsetDateTime)
     }
     cells.push(right(&fmt::tokens(r.window_tokens.billable()), WINDOW_W));
     if l.show_lifetime {
-        cells.push(right(&fmt::tokens(r.lifetime_tokens.billable()), LIFETIME_W));
+        cells.push(right(
+            &fmt::tokens(r.lifetime_tokens.billable()),
+            LIFETIME_W,
+        ));
     }
     if l.show_cost {
         cells.push(right(&cost_cell(r.cost_usd), COST_W));
@@ -226,10 +233,14 @@ fn account_lines(r: &AccountRow, l: &Layout, theme: &Theme, now: OffsetDateTime)
         .unwrap_or_else(|| "-".to_owned());
     cells.push(right(&format!("{}/{cap}", r.inflight), FLIGHT_W));
 
-    let mut out = vec![Line::from(theme.span(format!("  {}", cells.join(" ")), role))];
+    let mut out = vec![Line::from(
+        theme.span(format!("  {}", cells.join(" ")), role),
+    )];
     let indent = " ".repeat(2 + ACCOUNT_W + 1);
     if let Some(cont) = status_continuation(r, now) {
-        out.push(Line::from(theme.span(format!("{indent}{cont}"), Role::Meta)));
+        out.push(Line::from(
+            theme.span(format!("{indent}{cont}"), Role::Meta),
+        ));
     }
     for w in extra_windows(&r.quota) {
         let line = format!(
@@ -238,7 +249,9 @@ fn account_lines(r: &AccountRow, l: &Layout, theme: &Theme, now: OffsetDateTime)
             pct_cell(Some(w)),
             reset_cell(Some(w), now)
         );
-        out.push(Line::from(theme.span(format!("{indent}{line}"), Role::Meta)));
+        out.push(Line::from(
+            theme.span(format!("{indent}{line}"), Role::Meta),
+        ));
     }
     out
 }
@@ -446,11 +459,13 @@ fn totals_lines(rows: &[AccountRow], theme: &Theme) -> Vec<Line<'static>> {
         Role::Meta,
     ))];
     if missing > 0 {
-        let plural = if missing == 1 { "account has" } else { "accounts have" };
+        let plural = if missing == 1 {
+            "account has"
+        } else {
+            "accounts have"
+        };
         out.push(Line::from(theme.span(
-            format!(
-                "          {missing} {plural} no quota source; its utilization is estimated"
-            ),
+            format!("          {missing} {plural} no quota source; its utilization is estimated"),
             Role::Meta,
         )));
     }
@@ -538,7 +553,8 @@ fn account_json(r: &AccountRow, now: OffsetDateTime) -> Value {
 }
 
 fn rfc3339(t: OffsetDateTime) -> Option<String> {
-    t.format(&time::format_description::well_known::Rfc3339).ok()
+    t.format(&time::format_description::well_known::Rfc3339)
+        .ok()
 }
 
 #[cfg(test)]

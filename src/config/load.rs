@@ -184,7 +184,9 @@ pub fn env_layer() -> Result<Layer, SwampError> {
         set_path(&mut one, &path, parse_scalar(&raw));
         toml::Value::Table(one.clone())
             .try_into::<Schema>()
-            .map_err(|e| SwampError::ConfigInvalid(format!("{key}: {e}{}", removed_key_hint(&e))))?;
+            .map_err(|e| {
+                SwampError::ConfigInvalid(format!("{key}: {e}{}", removed_key_hint(&e)))
+            })?;
         set_path(&mut table, &path, parse_scalar(&raw));
     }
 
