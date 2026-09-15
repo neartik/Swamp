@@ -52,8 +52,13 @@ impl Host {
 
     /// One turn of the chat loop: size the live area, then draw it.
     fn frame(&mut self, live: &[&str]) {
+        self.frame_at(live, (0, 0));
+    }
+
+    /// The same, with the caret somewhere other than the area's first row.
+    fn frame_at(&mut self, live: &[&str], caret: (u16, u16)) {
         self.term.set_height(live.len() as u16).expect("set_height");
-        self.term.draw(lines(live), (0, 0)).expect("draw");
+        self.term.draw(lines(live), caret).expect("draw");
     }
 
     /// A block leaving the live area: the height is set from the post-commit state first, the
@@ -66,13 +71,62 @@ impl Host {
         self.term.draw(lines(live_after), (0, 0)).expect("draw");
     }
 
-    /// The window changing shape: the emulator reflows first, then the chat loop is told.
+    /// The window changing shape: the host reshapes its rows first, then the chat loop repairs
+    /// the live area from the cursor it left on it.
     fn resize(&mut self, cols: u16, rows: u16, live: &[&str]) {
-        self.vt.0.borrow_mut().set_size(rows, cols);
+        self.reshape(cols, rows);
+        let vt = self.vt.clone();
+        self.term
+            .reflow(cols, rows, || {
+                Some(vt.0.borrow().screen().cursor_position().0)
+            })
+            .expect("reflow");
+        self.frame(live);
+    }
+
+    /// A real host bottom-anchors its rows: growing pulls them back out of scrollback and
+    /// everything on screen moves *down*, shrinking pushes the top ones into scrollback and
+    /// everything moves up, and a row the new width cannot hold is split in two. The cursor
+    /// rides along with the row it is on. vt100 does none of that - it resizes the grid in
+    /// place - so the screen is rebuilt here from the whole history.
+    fn reshape(&mut self, cols: u16, rows: u16) {
+        let history = self.history();
+        let (cursor_row, cursor_col) = {
+            let parser = self.vt.0.borrow();
+            parser.screen().cursor_position()
+        };
+        let at = self.depth() + cursor_row as usize;
+        let used = history
+            .iter()
+            .rposition(|r| !r.is_empty())
+            .map_or(0, |i| i + 1)
+            .max(at + 1);
+        let mut out: Vec<String> = Vec::new();
+        let mut cursor_at = 0;
+        for (i, row) in history[..used].iter().enumerate() {
+            if i == at {
+                cursor_at = out.len() + cursor_col as usize / cols as usize;
+            }
+            let chars: Vec<char> = row.chars().collect();
+            if chars.is_empty() {
+                out.push(String::new());
+            } else {
+                out.extend(chars.chunks(cols as usize).map(|c| c.iter().collect()));
+            }
+        }
+        let mut parser = vt100::Parser::new(rows, cols, 500);
+        for (i, row) in out.iter().enumerate() {
+            if i > 0 {
+                parser.process(b"\r\n");
+            }
+            parser.process(row.as_bytes());
+        }
+        let y = cursor_at - out.len().saturating_sub(rows as usize).min(cursor_at);
+        let col = cursor_col as usize % cols as usize;
+        parser.process(format!("\x1b[{};{}H", y + 1, col + 1).as_bytes());
+        *self.vt.0.borrow_mut() = parser;
         self.cols = cols;
         self.rows = rows;
-        self.term.set_size(cols, rows).expect("set_size");
-        self.frame(live);
     }
 
     fn screen(&self) -> Vec<String> {
@@ -81,13 +135,20 @@ impl Host {
         rows(&parser, self.cols)
     }
 
+    fn depth(&self) -> usize {
+        let mut parser = self.vt.0.borrow_mut();
+        parser.set_scrollback(usize::MAX);
+        let depth = parser.screen().scrollback();
+        parser.set_scrollback(0);
+        depth
+    }
+
     /// Scrollback first, then the visible screen: everything the terminal still holds.
     fn history(&self) -> Vec<String> {
+        let depth = self.depth();
         let mut parser = self.vt.0.borrow_mut();
-        // vt100 cannot show more than one screenful of scrollback at a time.
-        parser.set_scrollback(self.rows as usize);
-        let depth = parser.screen().scrollback();
         let mut out = Vec::new();
+        // vt100 shows one screenful at a time, so the scrollback is read one row per offset.
         for n in (1..=depth).rev() {
             parser.set_scrollback(n);
             out.push(rows(&parser, self.cols).swap_remove(0));
@@ -326,11 +387,10 @@ fn shrinking_the_terminal_keeps_the_committed_rows_it_still_has() {
     host.resize(COLS, 18, &idle());
 
     let history = host.history();
-    // `row 17` and `row 18` are the two rows the emulator itself drops when it loses six rows:
-    // everything the terminal still holds has to survive the redraw.
+    // The six rows the screen loses go into scrollback, not into the bin.
     let mut wanted: Vec<String> = welcome().iter().map(|r| (*r).to_owned()).collect();
     wanted.retain(|r| !r.is_empty());
-    wanted.extend(filler(17));
+    wanted.extend(filler(19));
     assert_in_order(&history, &refs(&wanted));
     let screen = host.screen();
     assert_no_duplicate_live(&screen, &idle());
@@ -380,4 +440,54 @@ fn a_resize_under_a_tall_board_keeps_the_board_live() {
     let screen = host.screen();
     assert_no_duplicate_live(&screen, &idle());
     assert_no_hole(&screen, "----");
+}
+
+#[test]
+fn a_grow_that_pulls_rows_back_from_scrollback_keeps_them() {
+    let mut host = Host::new(&["$ swamp chat"]);
+    host.commit(&welcome(), &idle());
+    // A full screen: the live area is on the last rows and everything else is in scrollback.
+    host.commit(&refs(&filler(30)), &idle());
+    host.resize(COLS, 32, &idle());
+
+    let screen = host.screen();
+    assert_no_duplicate_live(&screen, &idle());
+    assert_no_hole(&screen, "----");
+    // The eight rows the host hands back are committed ones, and the area does not sit on them.
+    assert_in_order(&host.history(), &refs(&filler(30)));
+    assert_eq!(screen[31], "status");
+    assert_eq!(screen[27], "row 29");
+}
+
+#[test]
+fn a_terminal_that_will_not_report_its_cursor_still_redraws() {
+    let mut host = Host::new(&["$ swamp chat"]);
+    host.commit(&welcome(), &idle());
+    host.commit(&refs(&filler(19)), &idle());
+    host.reshape(COLS, 30);
+    host.term.reflow(COLS, 30, || None).expect("reflow");
+    host.frame(&idle());
+
+    let screen = host.screen();
+    assert_no_duplicate_live(&screen, &idle());
+    assert_eq!(screen[29], "status");
+    assert_in_order(&host.history(), &refs(&filler(19)));
+}
+
+#[test]
+fn a_width_shrink_that_splits_the_rules_leaves_no_stale_rows() {
+    let mut host = Host::new(&["$ swamp chat"]);
+    host.commit(&welcome(), &idle());
+    host.commit(&refs(&filler(19)), &idle());
+    // Full-width rules, and the caret on the input row under the first of them: at 24 columns
+    // the host splits each rule in two and the area grows rows the chat never drew.
+    let rule = "-".repeat(COLS as usize);
+    let live = vec![rule.as_str(), "> hi", rule.as_str(), "status"];
+    host.frame_at(&live, (1, 4));
+    host.resize(24, ROWS, &["------------------------", "> hi", "------------------------", "st"]);
+
+    let screen = host.screen();
+    let seen = screen.iter().filter(|r| r.starts_with("---")).count();
+    assert_eq!(seen, 2, "{seen} rule rows in:\n{}", screen.join("\n"));
+    assert_in_order(&host.history(), &refs(&filler(19)));
 }

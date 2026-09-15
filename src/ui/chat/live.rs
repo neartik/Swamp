@@ -1,6 +1,6 @@
 use crossterm::queue;
 use ratatui::backend::{Backend, CrosstermBackend};
-use ratatui::buffer::Buffer;
+use ratatui::buffer::{Buffer, Cell};
 use ratatui::layout::{Position, Rect};
 use ratatui::text::Line;
 use ratatui::widgets::{Paragraph, Widget};
@@ -15,7 +15,7 @@ use std::io::{self, Stdout, Write};
 /// inline viewport re-reads the cursor position on every resize, and that read is answered
 /// on stdin, which the key `EventStream` is already draining. The two cannot coexist.
 ///
-/// Three rules keep committed rows safe:
+/// Four rules keep committed rows safe:
 ///
 /// - the area only grows by taking rows the host screen has free below it, and past that by
 ///   printing newlines on the *last* row, so the host scrolls committed rows up into real
@@ -25,6 +25,9 @@ use std::io::{self, Stdout, Write};
 /// - those handed-back rows are remembered as [`Inline::free`], and [`Inline::commit`] writes
 ///   finished lines into them before it scrolls, so no blank row is ever pushed into scrollback
 ///   between two committed blocks.
+/// - a window resize moves the area on screen, so its place is never read back from the row it
+///   had before: every write parks the cursor on a known row of the area, and [`Inline::reflow`]
+///   finds the area again *relative* to that cursor.
 ///
 /// Every byte goes through the backend's writer, which is what lets the tests point one at a
 /// terminal emulator.
@@ -37,6 +40,13 @@ pub struct Inline<W: Write> {
     free: u16,
     width: u16,
     rows: u16,
+    /// Rows between the top of the area and the cursor the last write parked on it: what
+    /// [`Inline::reflow`] measures the area's place from.
+    cursor_off: u16,
+    cursor_col: u16,
+    /// The display width of every row of the last frame: a host splits the rows it can no longer
+    /// hold, so this is what says how many screen rows the area really has above its cursor.
+    widths: Vec<u16>,
 }
 
 impl<W: Write> Inline<W> {
@@ -63,39 +73,61 @@ impl<W: Write> Inline<W> {
             },
         )?;
         scroll(&mut term, rows, height.saturating_sub(below))?;
-        Ok(Inline {
+        let mut inline = Inline {
             term,
             height,
             free,
             width,
             rows,
-        })
+            cursor_off: 0,
+            cursor_col: 0,
+            widths: Vec::new(),
+        };
+        inline.park()?;
+        Ok(inline)
     }
 
     pub fn height(&self) -> u16 {
         self.height
     }
 
-    /// A resize invalidates the live area: the host has reflowed or truncated its rows under it.
-    /// The rows from the old top down are the area's own and are blanked; anything above them is
-    /// committed, so it is scrolled into scrollback rather than written over.
-    pub fn set_size(&mut self, width: u16, rows: u16) -> io::Result<()> {
-        if (width, rows) == (self.width, self.rows) {
-            return Ok(());
+    /// A window resize moves the live area: the host pulls rows back out of scrollback when it
+    /// grows and pushes them into it when it shrinks, so the row the area had before the resize
+    /// says nothing about where it is now. It is found again from the cursor the last write
+    /// parked on it, erased there with one `Clear(FromCursorDown)`, and rebuilt at the row
+    /// `probe` reads back. Nothing above that cursor is ever written to.
+    ///
+    /// `probe` is a cursor-position read, and is only ever answered when nothing else is draining
+    /// stdin. When it fails the area is rebuilt on the last rows of the screen instead.
+    pub fn reflow<F>(&mut self, width: u16, rows: u16, probe: F) -> io::Result<()>
+    where
+        F: FnOnce() -> Option<u16>,
+    {
+        use crossterm::cursor::{MoveToColumn, MoveUp};
+        use crossterm::terminal::{Clear, ClearType};
+        let up = self.rows_above(width);
+        let back = self.term.backend_mut();
+        queue!(back, MoveToColumn(0))?;
+        if up > 0 {
+            queue!(back, MoveUp(up))?;
         }
-        let old_top = self.top();
-        let height = self.height.min(rows);
-        let top = old_top.min(rows - height);
+        queue!(back, Clear(ClearType::FromCursorDown))?;
+        Backend::flush(back)?;
+        self.widths.clear();
+        let height = self.height.clamp(1, rows);
+        let bottom = rows - height;
+        let (top, short) = match probe() {
+            Some(y) => (y.min(bottom), y.saturating_sub(bottom)),
+            None => (bottom, 0),
+        };
         self.width = width;
         self.rows = rows;
         self.height = height;
         self.free = rows - height - top;
-        if old_top < rows {
-            blank_below(&mut self.term, old_top)?;
-        }
-        scroll(&mut self.term, rows, old_top.min(rows).saturating_sub(top))?;
+        scroll(&mut self.term, rows, short)?;
         // Resets both buffers: the next draw repaints every live row, stale width and all.
-        self.term.resize(self.rect())
+        self.term.resize(self.rect())?;
+        self.park()
     }
 
     /// Growing takes the rows the host screen has free under the area, then scrolls for the rest:
@@ -117,12 +149,18 @@ impl<W: Write> Inline<W> {
             self.height = want;
             let freed = self.top() + self.height;
             blank_below(&mut self.term, freed)?;
+            self.widths.truncate(want as usize);
         }
-        self.term.resize(self.rect())
+        self.term.resize(self.rect())?;
+        self.park()
     }
 
     pub fn draw(&mut self, lines: Vec<Line<'static>>, cursor: (u16, u16)) -> io::Result<()> {
         let (row, col) = cursor;
+        let widths: Vec<u16> = lines
+            .iter()
+            .map(|l| u16::try_from(l.width()).unwrap_or(u16::MAX).min(self.width))
+            .collect();
         self.term.draw(|f| {
             let area = f.area();
             f.render_widget(Paragraph::new(lines), area);
@@ -133,7 +171,39 @@ impl<W: Write> Inline<W> {
                 ));
             }
         })?;
-        Ok(())
+        // ratatui only paints what changed, so a row is as wide on screen as the widest thing
+        // ever drawn on it since the last clear: that is the width a host would split.
+        self.widths.resize(widths.len().max(self.widths.len()), 0);
+        for (seen, now) in self.widths.iter_mut().zip(widths) {
+            *seen = (*seen).max(now);
+        }
+        self.widths.truncate(self.height as usize);
+        self.cursor_off = row.min(self.height.saturating_sub(1));
+        self.cursor_col = if row < self.height {
+            col.min(self.width.saturating_sub(1))
+        } else {
+            0
+        };
+        let y = self.top() + self.cursor_off;
+        queue!(
+            self.term.backend_mut(),
+            crossterm::cursor::MoveTo(self.cursor_col, y)
+        )?;
+        Backend::flush(self.term.backend_mut())
+    }
+
+    /// Screen rows between the top of the area and the cursor parked on it, once a host narrower
+    /// than the frame was drawn at has split every row that no longer fits. A wider one splits
+    /// nothing: the rows were drawn no wider than the area they are in.
+    fn rows_above(&self, width: u16) -> u16 {
+        if width >= self.width || width == 0 {
+            return self.cursor_off;
+        }
+        let mut up = self.cursor_col / width;
+        for i in 0..self.cursor_off as usize {
+            up += self.widths.get(i).copied().unwrap_or(0).div_ceil(width).max(1);
+        }
+        up
     }
 
     /// Pushes finished blocks into scrollback. Each line is written on the live area's top row;
@@ -149,22 +219,40 @@ impl<W: Write> Inline<W> {
         for line in lines {
             let y = self.top();
             write_row(&mut self.term, line, y, width)?;
+            // The area slid down a row: every row of it is one nearer its top than it was.
+            if !self.widths.is_empty() {
+                self.widths.remove(0);
+            }
             if self.free > 0 {
                 self.free -= 1;
             } else {
                 scroll(&mut self.term, self.rows, 1)?;
             }
         }
-        self.term.resize(self.rect())
+        self.term.resize(self.rect())?;
+        self.park()
     }
 
     pub fn clear_screen(&mut self) -> io::Result<()> {
         use crossterm::cursor::MoveTo;
         use crossterm::terminal::{Clear, ClearType};
         self.free = self.rows - self.height;
+        self.widths.clear();
         queue!(self.term.backend_mut(), Clear(ClearType::All), MoveTo(0, 0))?;
         Backend::flush(self.term.backend_mut())?;
-        self.term.resize(self.rect())
+        self.term.resize(self.rect())?;
+        self.park()
+    }
+
+    /// Leaves the cursor on the area's first row, where a resize can find the area whatever the
+    /// host has done to the rows under it. Only [`Inline::draw`] parks it lower, on the caret.
+    fn park(&mut self) -> io::Result<()> {
+        use crossterm::cursor::MoveTo;
+        self.cursor_off = 0;
+        self.cursor_col = 0;
+        let y = self.top();
+        queue!(self.term.backend_mut(), MoveTo(0, y))?;
+        Backend::flush(self.term.backend_mut())
     }
 
     fn top(&self) -> u16 {
@@ -233,17 +321,31 @@ fn blank_below<W: Write>(term: &mut Terminal<CrosstermBackend<W>>, y: u16) -> io
     Backend::flush(term.backend_mut())
 }
 
+/// The row is erased and then written up to its last cell with something in it, never padded to
+/// the full width: a host splits any row too wide for a new window, and a padded one would split
+/// into a committed row plus a blank one.
 fn write_row<W: Write>(
     term: &mut Terminal<CrosstermBackend<W>>,
     line: Line<'static>,
     y: u16,
     width: u16,
 ) -> io::Result<()> {
+    use crossterm::cursor::MoveTo;
+    use crossterm::terminal::{Clear, ClearType};
     let rect = Rect::new(0, y, width, 1);
     let mut buffer = Buffer::empty(rect);
     Paragraph::new(line).render(rect, &mut buffer);
-    let cells = buffer
+    let used = buffer
         .content
+        .iter()
+        .rposition(|cell| cell != &Cell::EMPTY)
+        .map_or(0, |i| i + 1);
+    queue!(
+        term.backend_mut(),
+        MoveTo(0, y),
+        Clear(ClearType::UntilNewLine)
+    )?;
+    let cells = buffer.content[..used]
         .iter()
         .enumerate()
         .map(|(i, cell)| (i as u16, y, cell));

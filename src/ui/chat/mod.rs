@@ -34,6 +34,10 @@ use time::OffsetDateTime;
 
 const DEFAULT_REFRESH_HZ: u16 = 12;
 const DEFAULT_HISTORY: usize = 500;
+/// How long a resize burst has to stay quiet before the live area is repaired.
+const RESIZE_QUIET: Duration = Duration::from_millis(50);
+/// Long enough for crossterm's woken reader thread to drop the internal reader lock.
+const READER_RELEASE: Duration = Duration::from_millis(20);
 
 /// The chat UI. A tty gets the inline viewport; a pipe gets the plain transcript, so CI and
 /// scripted runs are unaffected.
@@ -136,38 +140,47 @@ async fn interactive(
     let _guard = crate::ui::watch::TerminalGuard::with(live::restore_inline);
     term.commit(app.take_welcome())?;
     let mut keys = EventStream::new();
+    // Events read past a resize while waiting for the burst to end, replayed once it is handled.
+    let mut queued: std::collections::VecDeque<Event> = std::collections::VecDeque::new();
+    let mut dsr = true;
 
     let code = loop {
         app.now = OffsetDateTime::now_utc();
         app.width = width;
         app.rows = rows;
         app.set_pool(disp.pool().snapshot());
-        term.set_size(width, rows)?;
         term.set_height(render::live_height(&app, rows))?;
         let frame = render::compose(&app);
         term.draw(frame.lines, frame.cursor)?;
 
-        let msg = tokio::select! {
-            biased;
-            key = keys.next() => match key {
-                Some(Ok(Event::Key(k))) => Some(Msg::Key(k)),
-                Some(Ok(Event::Resize(w, h))) => {
-                    width = w.max(20);
-                    rows = h.max(MIN_LIVE);
-                    Some(Msg::Resize(width, rows))
-                }
-                Some(Ok(_)) => None,
-                Some(Err(e)) => return Err(e.into()),
-                None => Some(Msg::Quit),
-            },
-            event = brain.events().recv() => match event {
-                Some(event) => Some(Msg::Brain(event)),
-                // The brain is gone: nothing more will ever arrive on this channel.
-                None => Some(Msg::Quit),
-            },
-            lines = tailer.poll() => Some(Msg::Journal(lines?)),
-            _ = ticker.tick(), if app.animating() => Some(Msg::Tick),
-            () = crate::cmd::shutdown_signal() => Some(Msg::Signal),
+        let msg = if let Some(event) = queued.pop_front() {
+            match event {
+                Event::Key(k) => Some(Msg::Key(k)),
+                _ => None,
+            }
+        } else {
+            tokio::select! {
+                biased;
+                key = keys.next() => match key {
+                    Some(Ok(Event::Key(k))) => Some(Msg::Key(k)),
+                    Some(Ok(Event::Resize(w, h))) => {
+                        width = w.max(20);
+                        rows = h.max(MIN_LIVE);
+                        Some(Msg::Resize(width, rows))
+                    }
+                    Some(Ok(_)) => None,
+                    Some(Err(e)) => return Err(e.into()),
+                    None => Some(Msg::Quit),
+                },
+                event = brain.events().recv() => match event {
+                    Some(event) => Some(Msg::Brain(event)),
+                    // The brain is gone: nothing more will ever arrive on this channel.
+                    None => Some(Msg::Quit),
+                },
+                lines = tailer.poll() => Some(Msg::Journal(lines?)),
+                _ = ticker.tick(), if app.animating() => Some(Msg::Tick),
+                () = crate::cmd::shutdown_signal() => Some(Msg::Signal),
+            }
         };
         let Some(msg) = msg else {
             continue;
@@ -175,6 +188,30 @@ async fn interactive(
         if matches!(msg, Msg::Quit) {
             break app.exit_code;
         }
+        let msg = match msg {
+            Msg::Resize(..) => {
+                // tmux fires a burst; only the last size is worth a repair.
+                loop {
+                    match tokio::time::timeout(RESIZE_QUIET, keys.next()).await {
+                        Ok(Some(Ok(Event::Resize(w, h)))) => {
+                            width = w.max(20);
+                            rows = h.max(MIN_LIVE);
+                        }
+                        Ok(Some(Ok(event))) => queued.push_back(event),
+                        Ok(Some(Err(e))) => return Err(e.into()),
+                        Ok(None) | Err(_) => break,
+                    }
+                }
+                // The stream's reader thread owns stdin, and the cursor report arrives there:
+                // it has to be gone, and to have let go, before anything asks for one.
+                drop(keys);
+                std::thread::sleep(READER_RELEASE);
+                term.reflow(width, rows, || cursor_row(&mut dsr))?;
+                keys = EventStream::new();
+                Msg::Resize(width, rows)
+            }
+            msg => msg,
+        };
         app.now = OffsetDateTime::now_utc();
         let mut effects: std::collections::VecDeque<Effect> = app.reduce(msg).into();
         app.mark_orphans(&|id| crate::worker::liveness::is_ours(&paths.pidfile(id)));
@@ -220,6 +257,21 @@ async fn interactive(
     println!();
     brain.shutdown().await?;
     Ok(code)
+}
+
+/// The row the cursor sits on. Only ever answered with no `EventStream` alive, and only asked
+/// again while the terminal is still answering: a terminal that does not costs two seconds a try.
+fn cursor_row(dsr: &mut bool) -> Option<u16> {
+    if !*dsr {
+        return None;
+    }
+    match crossterm::cursor::position() {
+        Ok((_, y)) => Some(y),
+        Err(_) => {
+            *dsr = false;
+            None
+        }
+    }
 }
 
 fn size() -> (u16, u16) {

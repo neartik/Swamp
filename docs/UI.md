@@ -167,19 +167,40 @@ Effect::Commit(lines) => {
 `want = live_lines.len()` clamped to `[MIN_LIVE, max(MIN_LIVE, rows * 3 / 5)]`. When the clamp
 bites, the worker board is the part that collapses (§4.5).
 
-**`Event::Resize` invalidates the area.** The host has already reflowed or truncated its rows
-under the old one, so `set_size` rebuilds it rather than moving a rectangle over whatever landed
-there: every row from the old top down is the area's own and is blanked, anything above it is
-committed and may only be scrolled, and the ratatui viewport is then resized - which resets both
-buffers, so the next frame repaints every live row at the new width and no stale rule or prompt
-survives. In rows:
+**`Event::Resize` moves the area, and no absolute row survives it.** A real host shifts what is
+on screen: growing pulls rows back out of scrollback and everything moves *down*, shrinking pushes
+the top rows into scrollback and everything moves up, and a narrower window splits every row too
+wide to hold. The row the area had before the resize therefore says nothing about where it is
+now - the two earlier attempts at this both did absolute-row arithmetic from before the resize and
+both destroyed committed rows. `Inline::reflow` works **relative to the cursor** instead.
 
-```rust
-let top = old_top.min(rows - height);            // the area keeps its place when it can
-blank_below(&mut term, old_top)?;                // only rows the area owns
-scroll(&mut term, rows, old_top.min(rows) - top)?;  // committed rows go up, never over
-term.resize(self.rect())?;                       // full repaint next draw
-```
+Every write leaves the hardware cursor on a known row of the live area: `park` puts it on the
+area's first row, and `draw` - the only one that has to put it somewhere the user can see - leaves
+it on the caret and remembers the caret's row and column, plus the display width of every row it
+drew. On `Event::Resize`, in order:
+
+1. **stop reading stdin.** The `EventStream` is dropped and its reader thread given ~20ms to let
+   go of crossterm's internal reader: the async reader answers the cursor report itself otherwise,
+   and `cursor::position()` times out.
+2. **erase the area where it actually is.** `MoveUp(rows_above)` then one
+   `Clear(FromCursorDown)`. `rows_above` is the caret's row offset, or, when the window got
+   narrower, what those rows became once the host split them: `sum(ceil(width_i / new_width))`
+   over the rows above the caret, plus `caret_col / new_width`. Nothing above that point is ever
+   written to.
+3. **read where that is.** `cursor::position()` now answers, and the row it reports is the area's
+   top. It is clamped so the area fits under it, scrolling on the last row only if it does not.
+4. **rebuild.** The ratatui viewport is resized to the new rect, which resets both buffers, so the
+   next frame repaints every live row at the new width: no stale rule or prompt can survive.
+5. **start reading stdin again.** A fresh `EventStream`.
+
+tmux fires a burst of resize events; only the last size is worth repairing, so the burst is
+drained until 50ms of quiet first, and anything else read in that window is replayed afterwards.
+If the cursor report ever fails, the flag is dropped for the rest of the session and the area is
+rebuilt on the last rows of the screen instead - never by clearing anything above the cursor.
+
+Committed rows are written trimmed, not padded to the full width (`write_row` erases the row and
+writes up to its last cell with something in it): a padded row is one the host splits in two when
+the window narrows, and the half with nothing on it is a blank row in the middle of scrollback.
 
 Every live block is re-wrapped from `Msg::Resize` in the same turn.
 
@@ -190,7 +211,11 @@ one blank row appears between committed blocks, a shrink with no commit behind i
 one blank row between the last committed block and the live area, and shrinking, growing or
 re-widening the window keeps the committed rows the emulator still holds and leaves exactly one
 live area on screen. The `render::live` and `Block::render` snapshots (§3) cover the drawing;
-these cover the scrolling.
+these cover the scrolling. `Host::resize` models a real host rather than the emulator: it rebuilds
+the screen bottom-anchored, so a grow pulls rows back out of scrollback and a shrink pushes them
+into it, and it splits the rows a narrower window cannot hold. A probe handed to `reflow` reads
+the emulator's cursor the way `cursor::position()` reads the terminal's, and one test hands it
+`None` to cover the terminal that never answers.
 
 ### 1.4 The loop
 
@@ -200,18 +225,25 @@ Event sources: crossterm keys, the `BrainEvent` stream, journal-fold polls, and 
 let period = Duration::from_millis(1000 / u64::from(cfg.ui.refresh_hz.unwrap_or(12)).max(1));
 let mut ticker = tokio::time::interval(period);
 loop {
-    term.set_size(width, rows)?;
     term.set_height(render::live_height(&app, rows))?;
     let frame = render::compose(&app);
     term.draw(frame.lines, frame.cursor)?;
-    let msg = tokio::select! {
-        biased;
-        Some(ev) = keys.next()           => Msg::Key(ev?),
-        Some(be) = brain.events().recv() => Msg::Brain(be),
-        lines    = tailer.poll()         => Msg::Journal(lines?),
-        _        = ticker.tick()         => Msg::Tick,
-        ()       = cmd::shutdown_signal()=> Msg::Signal,
+    let msg = match queued.pop_front() {       // read past a resize burst (§1.3)
+        Some(ev) => Msg::Key(ev),
+        None => tokio::select! {
+            biased;
+            Some(ev) = keys.next()           => Msg::Key(ev?),
+            Some(be) = brain.events().recv() => Msg::Brain(be),
+            lines    = tailer.poll()         => Msg::Journal(lines?),
+            _        = ticker.tick()         => Msg::Tick,
+            ()       = cmd::shutdown_signal()=> Msg::Signal,
+        },
     };
+    if let Msg::Resize(..) = msg {             // debounce, drop keys, reflow, read keys again
+        drop(keys);
+        term.reflow(width, rows, || cursor_row(&mut dsr))?;
+        keys = EventStream::new();
+    }
     let mut effects: VecDeque<Effect> = app.reduce(msg).into();
     while let Some(effect) = effects.pop_front() {
         match effect {
