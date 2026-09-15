@@ -36,8 +36,6 @@ const DEFAULT_REFRESH_HZ: u16 = 12;
 const DEFAULT_HISTORY: usize = 500;
 /// How long a resize burst has to stay quiet before the live area is repaired.
 const RESIZE_QUIET: Duration = Duration::from_millis(50);
-/// Long enough for crossterm's woken reader thread to drop the internal reader lock.
-const READER_RELEASE: Duration = Duration::from_millis(20);
 
 /// The chat UI. A tty gets the inline viewport; a pipe gets the plain transcript, so CI and
 /// scripted runs are unaffected.
@@ -134,15 +132,12 @@ async fn interactive(
     let (mut width, mut rows) = size();
     app.width = width;
     app.rows = rows;
-    // The terminal is entered before the key stream exists: `enter` reads the cursor position
-    // once, and that reply arrives on the stdin an `EventStream` would already be draining.
     let mut term = live::enter(width, rows, MIN_LIVE)?;
     let _guard = crate::ui::watch::TerminalGuard::with(live::restore_inline);
     term.commit(app.take_welcome())?;
     let mut keys = EventStream::new();
     // Events read past a resize while waiting for the burst to end, replayed once it is handled.
     let mut queued: std::collections::VecDeque<Event> = std::collections::VecDeque::new();
-    let mut dsr = true;
 
     let code = loop {
         app.now = OffsetDateTime::now_utc();
@@ -202,12 +197,7 @@ async fn interactive(
                         Ok(None) | Err(_) => break,
                     }
                 }
-                // The stream's reader thread owns stdin, and the cursor report arrives there:
-                // it has to be gone, and to have let go, before anything asks for one.
-                drop(keys);
-                std::thread::sleep(READER_RELEASE);
-                term.reflow(width, rows, || cursor_row(&mut dsr))?;
-                keys = EventStream::new();
+                term.reflow(width, rows)?;
                 Msg::Resize(width, rows)
             }
             msg => msg,
@@ -257,21 +247,6 @@ async fn interactive(
     println!();
     brain.shutdown().await?;
     Ok(code)
-}
-
-/// The row the cursor sits on. Only ever answered with no `EventStream` alive, and only asked
-/// again while the terminal is still answering: a terminal that does not costs two seconds a try.
-fn cursor_row(dsr: &mut bool) -> Option<u16> {
-    if !*dsr {
-        return None;
-    }
-    match crossterm::cursor::position() {
-        Ok((_, y)) => Some(y),
-        Err(_) => {
-            *dsr = false;
-            None
-        }
-    }
 }
 
 fn size() -> (u16, u16) {

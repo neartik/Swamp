@@ -55,7 +55,8 @@ untouched. Three helpers in `trace.rs` become `pub(crate)`: `failure_summary`, `
 ### 1.1 An inline viewport, never the alternate screen
 
 Finished blocks scroll into real scrollback so the user can select and copy them with the mouse.
-Only the live tail is redrawn. `src/ui/chat/live.rs` owns it:
+Only the live tail is redrawn. `src/ui/chat/live.rs` owns it, on top of the backend in
+`src/ui/chat/live/relative.rs`:
 
 ```rust
 // live::enter, called from chat::interactive
@@ -63,28 +64,46 @@ enable_raw_mode()?;                                  // no EnterAlternateScreen
 execute!(stdout(), PushKeyboardEnhancementFlags(
     KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
   | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS))?;
-let cursor_row = cursor::position().map(|(_, y)| y).unwrap_or(rows - 1);
+let mut back = RelativeBackend::new(stdout());
+back.open(height)?;            // column 0, Clear(FromCursorDown), then grow by newlines
 let mut term = Terminal::with_options(
-    CrosstermBackend::new(stdout()),
-    TerminalOptions { viewport: Viewport::Fixed(Rect::new(0, top, width, height)) },
+    back,
+    TerminalOptions { viewport: Viewport::Fixed(Rect::new(0, 0, width, height)) },
 )?;
 ```
+
+**No absolute screen row is named anywhere in the chat, and the cursor is never read back.**
+The viewport rect sits at `y = 0`, so every row ratatui hands the backend is already an offset
+inside the live area. `RelativeBackend` wraps `CrosstermBackend` and keeps two numbers: the row
+the hardware cursor is on *inside the area*, and its column. `set_cursor_position` becomes
+`MoveToColumn(x)` and then `MoveUp`/`MoveDown` by the difference from the tracked row - the column
+move first, because it also settles a pending wrap a bare vertical move would carry into the wrong
+row. `get_cursor_position` answers from the tracked pair. Nothing emits a DSR (`cursor::position`),
+at startup or after a resize.
+
+Two reasons, both measured:
+
+- a DSR reply arrives on the stdin the key `EventStream` is draining, so it is answered late or
+  not at all, and the read times out after two seconds;
+- a host answers a *height grow* while it is still pulling rows back out of its history, so the
+  row it reports is a row that is about to move. Probing there lost a whole committed turn in
+  roughly six of ten tmux resize bursts.
+
+The offset inside the area survives all of that: a resize moves the rows on screen, but it moves
+the cursor with the row the cursor is on. The absolute row is what a resize destroys.
+
+`Viewport::Fixed`, not `Viewport::Inline`: `Terminal::resize` on an inline viewport calls
+`compute_inline_size`, which asks the backend where the cursor is. `live.rs` places and sizes the
+area itself.
+
+**Where the area opens.** On the row the shell's cursor is already on, directly under the host's
+own output: `MoveToColumn(0)`, one `Clear(FromCursorDown)`, and then `height - 1` newlines printed
+on the area's last row. Nothing above that row is ever written to, so a `swamp chat` started
+halfway down a screen leaves no blank band above itself and no scrollback of the shell is lost.
 
 The guard is not `live.rs`'s: `chat::interactive` builds it right after `live::enter` returns
 (`let _guard = TerminalGuard::with(live::restore_inline)`, raw off, pop flags, show cursor), so
 `live.rs` only ever exposes the restore fn.
-
-`Viewport::Fixed`, not `Viewport::Inline`. `Terminal::resize` on an inline viewport calls
-`compute_inline_size`, which asks the backend for the cursor position; the DSR reply lands on the
-stdin the key `EventStream` is already draining, and the read times out. `live.rs` therefore
-places and scrolls the area itself: it opens at `cursor_row`, directly under the host's own
-output, and the rows left under it belong to the host until a grow or a commit takes them.
-
-The one cursor read that is needed - how far down the host's own output stopped, so the area
-opens there and scrolls only if the screen has fewer rows left under it than the area needs - is
-done in `live::enter`, **before** `EventStream::new()`, so nothing is competing for the reply. It
-falls back to the last row if the terminal does not answer. Nothing reads the cursor again for
-the rest of the session.
 
 `MIN_LIVE = 4`: rule, input, rule, status. `install_panic_hook` and `TerminalGuard` live in
 `watch.rs` and are parameterised by the restore fn they take. `restore_inline` does **not** call
@@ -95,28 +114,34 @@ in `mod.rs`). CI, pipes and scripted runs are unaffected.
 
 ### 1.2 Committing blocks to scrollback
 
-`Inline::commit` writes each line on the top row of the live area and then gets that row out of
-it: the area slides down onto a row a shrink handed back (§1.3), and when it has none left and is
-already on the last rows of the screen, a newline printed on the **last** row scrolls the host.
-That newline is the only thing that scrolls the host, and the only way a committed row reaches
-real scrollback:
+`Inline::commit` writes each line on **row 0** of the live area and then gets that row out of it:
+the area slides down one row, and only a newline printed on the area's **last** row can move the
+host. That newline is the only thing that scrolls the host, and the only way a committed row
+reaches real scrollback:
 
 ```rust
 for line in lines {
-    write_row(&mut term, line, self.top(), width)?;       // straight to the backend
-    if self.free > 0 { self.free -= 1; }                  // the area slides down one row
-    else { execute!(w, MoveTo(0, rows - 1), Print("\n"))?; }  // the whole screen moves up one
+    self.write_top(line, width)?;         // row 0 of the area: erase, then write trimmed
+    self.term.backend_mut().slide()?;     // one "\n" on the area's LAST row
 }
-term.resize(self.rect())?;                               // repaint the live area next frame
+self.term.resize(self.rect())?;           // repaint the live area next frame
 ```
+
+`slide` is the whole trick. When the area's last row is the last row of the screen, printing a
+newline there scrolls the host and the top committed row goes into real scrollback. When it is
+not - the screen still has free rows under the area, left by a shrink or by a resize - the cursor
+simply steps down into one and the area has moved down a row without the host scrolling at all.
+Both cases leave the cursor on the area's last row, which is all the backend has to know. Free
+rows below the area are therefore consumed by later commits, in order, with no scroll and no
+flicker, and no blank row is ever pushed into scrollback between two committed blocks.
 
 Pre-wrapping is mandatory: a row is one screen line, so any wrapping ratatui did itself would
 clip. All wrapping happens in `markdown.rs` (`wrap_spans`, span-aware, widths from
 `unicode_width`). Scrollback is frozen text; wrap once, at commit time, at the current width.
 
-Every byte - the ratatui diff, the cursor moves, the newlines - goes through the backend's own
-writer, so the ordering is the writer's and a test can point that writer at a terminal emulator
-(§1.3).
+Every byte - the ratatui diff, the relative cursor moves, the newlines - goes through the
+backend's own writer, so the ordering is the writer's and a test can point that writer at a
+terminal emulator (§1.3).
 
 What leaves the live area, and when:
 
@@ -136,24 +161,24 @@ The live area height is therefore bounded by the worker board, never by the conv
 ### 1.3 Resizing the live area
 
 Growing, shrinking and a window resize are three different things, and none of them may destroy a
-committed row.
+committed row. All three are expressed as moves relative to the tracked cursor (§1.1); none of
+them names a screen row.
 
-**Growing** by `k` rows takes the blank rows the host screen still has under the area, and prints
-a newline on the last row for each one it is short. The host scrolls, committed rows move up into
-its scrollback, and the rows the live area claims are the ones freed at the bottom. Nothing above
-the area is written to.
+**Growing** by `k` rows is `RelativeBackend::grow`: park on the area's last row, print `k`
+newlines there, and count the area `k` rows taller. If the screen still has free rows under the
+area the cursor just steps into them and nothing scrolls; if it does not, the host scrolls and
+committed rows move up into its real scrollback. Nothing above the area is written to, either way.
 
-**Shrinking is immediate.** `set_height` hands the surplus `height - want` rows straight back to
-the host, blanked, and remembers them as `free`. The live content therefore stays tight under the
-last committed block instead of floating over a hole: opening a slash overlay and closing it
-again leaves the input bar exactly where it was, not twenty rows below it. The freed rows are the
-first thing `commit` writes into - it walks the area back down over them, top row by top row, and
-only starts scrolling once it has none left - so a block leaving the live area lands on the rows
-it already occupied: no scroll, no flicker, and never a blank row pushed into scrollback between
-two committed blocks.
+**Shrinking is immediate.** `set_height` calls `RelativeBackend::shrink`, which parks on the first
+row it is giving back, erases with one `Clear(FromCursorDown)`, and parks again on the area's new
+last row. The rows simply stop being the area's. There is no `free` counter and no bookkeeping:
+`commit` walks the area back down over those rows one `slide` at a time (§1.2), so a block leaving
+the live area lands on rows the area itself had a moment ago. The live content therefore stays
+tight under the last committed block instead of floating over a hole: opening a slash overlay and
+closing it again leaves the input bar exactly where it was, not twenty rows below it.
 
-`chat::interactive` therefore sizes the area from the **post-commit** state, immediately before
-each `Effect::Commit`, as well as once per frame before `draw`.
+`chat::interactive` sizes the area from the **post-commit** state, immediately before each
+`Effect::Commit`, as well as once per frame before `draw`.
 
 ```rust
 term.set_height(render::live_height(&app, rows))?;   // per frame, before draw
@@ -167,70 +192,71 @@ Effect::Commit(lines) => {
 `want = live_lines.len()` clamped to `[MIN_LIVE, max(MIN_LIVE, rows * 3 / 5)]`. When the clamp
 bites, the worker board is the part that collapses (§4.5).
 
-**`Event::Resize` moves the area, and no absolute row survives it.** A real host shifts what is
-on screen: growing pulls rows back out of scrollback and everything moves *down*, shrinking pushes
-the top rows into scrollback and everything moves up, and a narrower window splits every row too
-wide to hold. The row the area had before the resize therefore says nothing about where it is
-now - the two earlier attempts at this both did absolute-row arithmetic from before the resize and
-both destroyed committed rows. `Inline::reflow` works **relative to the cursor** instead.
+**`Event::Resize` moves the area, and only the cursor still points at it.** A real host shifts
+what is on screen: growing pulls rows back out of scrollback and everything moves *down*,
+shrinking pushes the top rows into scrollback and everything moves up, and a narrower window
+splits every row too wide to hold. What the host does not do is move the cursor off the row it is
+on. Two earlier attempts did absolute-row arithmetic across a resize and both destroyed committed
+rows; a third read the row back with `cursor::position()` and lost committed turns to the race in
+§1.1. `Inline::reflow` does neither.
 
 Every write leaves the hardware cursor on a known row of the live area: `park` puts it on the
 area's first row, and `draw` - the only one that has to put it somewhere the user can see - leaves
 it on the caret and remembers the caret's row and column, plus the display width of every row it
 drew. Those widths are read back from the frame's own buffer - the last cell in the row with
-something in it, the measure `write_row` already takes of a committed row - and replace the ones
+something in it, the measure `write_top` already takes of a committed row - and replace the ones
 before them: they are the frame's, never a running maximum over earlier frames. `Terminal::resize`
 blanks the whole area, so what the last draw put there is exactly what the screen holds, and a
 maximum was wrong the moment the area grew: a slash popup drawn over the rows two full-width rules
 had just been on still measured a full width, and `rows_above` counted three screen rows for three
-rows that were one. On `Event::Resize`, in order:
+rows that were one.
 
-1. **stop reading stdin.** The `EventStream` is dropped and its reader thread given ~20ms to let
-   go of crossterm's internal reader: the async reader answers the cursor report itself otherwise,
-   and `cursor::position()` times out.
-2. **erase the area where it actually is.** `MoveUp(rows_above)` then one
-   `Clear(FromCursorDown)`. `rows_above` is the caret's row offset, or, when the window got
-   narrower, what those rows became once the host split them: `sum(ceil(width_i / new_width))`
-   over the rows above the caret, plus `caret_col / new_width`. Nothing above that point is ever
-   written to.
-3. **read where that is.** `cursor::position()` now answers, and the row it reports is the area's
-   top. It is clamped so the area fits under it, scrolling on the last row only if it does not.
-   A new width also splits the area's *own* rows, and the host scrolls to fit them: the blank rows
-   that leaves under the cleared area are the area's, not the host's, so a width change may not
-   move the input bar up the screen. The area keeps the distance from the bottom it had before the
-   resize, and the rows it leaves behind it are remembered as a gap that the next `commit` writes
-   into first, ahead of the area and without scrolling, so no blank row is pushed into scrollback.
+`Inline::reflow(width, rows)`, in order:
+
+1. **measure.** `rows_above(new_width)`: the caret's tracked row offset when the window got wider
+   or kept its width (nothing splits - the rows were drawn no wider than the area they were in),
+   and otherwise what those rows became once the host split them,
+   `sum(ceil(width_i / new_width))` over the rows above the caret, plus `caret_col / new_width`.
+2. **erase the area where it actually is.** `MoveToColumn(0)`, `MoveUp(rows_above)`, one
+   `Clear(FromCursorDown)`. Nothing above that point is ever written to.
+3. **reopen at that row.** The area is re-established at the cursor with the new size, growing by
+   newlines printed on its last row if the new height needs more rows than the screen has left
+   under it. It sits directly under the committed tail: no re-anchor, no gap, never a blank row
+   above the input bar, and free rows below it are taken by later commits without scrolling.
 4. **rebuild.** The ratatui viewport is resized to the new rect, which resets both buffers, so the
    next frame repaints every live row at the new width: no stale rule or prompt can survive.
-5. **start reading stdin again.** A fresh `EventStream`.
+
+The `EventStream` is left alone throughout - it is never dropped, recreated, or waited on, because
+nothing needs stdin quiet any more.
 
 tmux fires a burst of resize events; only the last size is worth repairing, so the burst is
 drained until 50ms of quiet first, and anything else read in that window is replayed afterwards.
-If the cursor report ever fails, the flag is dropped for the rest of the session and the area is
-rebuilt on the last rows of the screen instead - never by clearing anything above the cursor.
 
-Committed rows are written trimmed, not padded to the full width (`write_row` erases the row and
+Committed rows are written trimmed, not padded to the full width (`write_top` erases the row and
 writes up to its last cell with something in it): a padded row is one the host splits in two when
 the window narrows, and the half with nothing on it is a blank row in the middle of scrollback.
 
 Every live block is re-wrapped from `Msg::Resize` in the same turn.
 
 **Tests.** `Inline` is generic over its writer, so `live/tests.rs` hands it a `vt100` emulator
-with scrollback and asserts on what the user would see: committed rows survive every grow in
-order, a notice committed under a tall board is still there one frame later, no run of more than
-one blank row appears between committed blocks, a shrink with no commit behind it leaves at most
-one blank row between the last committed block and the live area, and shrinking, growing or
-re-widening the window keeps the committed rows the emulator still holds and leaves exactly one
-live area on screen. The `render::live` and `Block::render` snapshots (§3) cover the drawing;
-these cover the scrolling; three more cover the widths and the anchoring: a full-width idle layout
-followed by a taller popup one whose rows are half as wide, reflowed narrower, keeps every
-committed row, and a width change leaves the area exactly as far off the last row of the screen as
-it was, with the rows it left behind filled by the next commit. `Host::resize` models a real host
-rather than the emulator: it rebuilds
-the screen bottom-anchored, so a grow pulls rows back out of scrollback and a shrink pushes them
-into it, and it splits the rows a narrower window cannot hold. A probe handed to `reflow` reads
-the emulator's cursor the way `cursor::position()` reads the terminal's, and one test hands it
-`None` to cover the terminal that never answers.
+with scrollback and asserts on what the user would see. `Host::resize` models a real host rather
+than the emulator: it rebuilds the screen bottom-anchored, so a grow pulls rows back out of
+scrollback and a shrink pushes them into it, it splits the rows a narrower window cannot hold, and
+it moves the cursor with the row it is on - which is all `reflow` is given, since there is no
+probe to hand it any more. The suite covers: committed rows survive every grow in order; a notice
+committed under a tall board is still there one frame later; no run of more than one blank row
+appears between committed blocks; a shrink with no commit behind it leaves at most one blank row
+between the last committed block and the live area; shrinking, growing or re-widening the window
+keeps the committed rows the emulator still holds and leaves exactly one live area on screen; a
+full-width idle layout followed by a taller popup one whose rows are half as wide, reflowed
+narrower, keeps every committed row; and a width change leaves the area under the committed tail.
+Three cover the relative backend directly: two width changes and then a commit leave no hole, on
+screen or in scrollback; a burst of five alternating height changes with no commit between them
+loses nothing and leaves no second copy of the live area; and a startup with the cursor mid-screen
+puts the welcome block on the row right under the shell's last line, with no blank band.
+
+The `render::live` and `Block::render` snapshots (§3) cover the drawing; these cover the
+scrolling.
 
 ### 1.4 The loop
 
@@ -254,10 +280,8 @@ loop {
             ()       = cmd::shutdown_signal()=> Msg::Signal,
         },
     };
-    if let Msg::Resize(..) = msg {             // debounce, drop keys, reflow, read keys again
-        drop(keys);
-        term.reflow(width, rows, || cursor_row(&mut dsr))?;
-        keys = EventStream::new();
+    if let Msg::Resize(..) = msg {             // debounce the burst, then repair
+        term.reflow(width, rows)?;             // relative: the key stream stays alive
     }
     let mut effects: VecDeque<Effect> = app.reduce(msg).into();
     while let Some(effect) = effects.pop_front() {
@@ -786,7 +810,8 @@ unreadable; a truncated one is not. Results collapse to `ui.collapse_lines` (3) 
 | `mod.rs` | 220 | `repl`: tty probe and the non-tty `drain_turn` fallback, terminal setup and guard, the `select!` loop, `commit`, `set_live_height` |
 | `app.rs` | 340 | `App`, `Msg`, `Effect`, `Phase { Idle, Working { since }, Interrupting }`, `reduce`, `on_key`, `on_brain`, `on_journal`, `on_tick`, `live_height`, `cursor_xy`. Pure, no I/O |
 | `theme.rs` | 120 | `Theme`, `Role`, `detect`, glyph table, ascii fallback, `state_style(&NodeState)` |
-| `live.rs` | 90 | inline terminal helpers: enter, restore, commit chunking, clear |
+| `live.rs` | 270 | `Inline`: the live area over `RelativeBackend` - open, draw, commit, set_height, reflow, clear; enter and restore |
+| `live/relative.rs` | 285 | `RelativeBackend`: a `Backend` over `CrosstermBackend` that tracks the cursor's row inside the area and moves by `MoveUp`/`MoveDown`. No DSR |
 | `input.rs` | 220 | `Editor`: multi-line buffer, grapheme cursor, readline bindings, `History` load/save |
 | `markdown.rs` | 250 | `MdStream`, block grammar, inline pass, `wrap_spans` |
 | `blocks.rs` | 280 | `Block`, `Render` impls for welcome, user bar, assistant, tool, notice, slash output; collapse and `ctrl+o`; `tool_args::preview` |

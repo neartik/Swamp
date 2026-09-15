@@ -39,9 +39,8 @@ impl Host {
                 .borrow_mut()
                 .process(format!("{line}\r\n").as_bytes());
         }
-        let row = parser.borrow().screen().cursor_position().0;
         let vt = Vt(parser);
-        let term = Inline::new(vt.clone(), COLS, ROWS, 4, row).expect("inline");
+        let term = Inline::new(vt.clone(), COLS, ROWS, 4).expect("inline");
         Host {
             term,
             vt,
@@ -75,12 +74,7 @@ impl Host {
     /// the live area from the cursor it left on it.
     fn resize(&mut self, cols: u16, rows: u16, live: &[&str]) {
         self.reshape(cols, rows);
-        let vt = self.vt.clone();
-        self.term
-            .reflow(cols, rows, || {
-                Some(vt.0.borrow().screen().cursor_position().0)
-            })
-            .expect("reflow");
+        self.term.reflow(cols, rows).expect("reflow");
         self.frame(live);
     }
 
@@ -474,21 +468,6 @@ fn a_grow_that_pulls_rows_back_from_scrollback_keeps_them() {
 }
 
 #[test]
-fn a_terminal_that_will_not_report_its_cursor_still_redraws() {
-    let mut host = Host::new(&["$ swamp chat"]);
-    host.commit(&welcome(), &idle());
-    host.commit(&refs(&filler(19)), &idle());
-    host.reshape(COLS, 30);
-    host.term.reflow(COLS, 30, || None).expect("reflow");
-    host.frame(&idle());
-
-    let screen = host.screen();
-    assert_no_duplicate_live(&screen, &idle());
-    assert_eq!(screen[29], "status");
-    assert_in_order(&host.history(), &refs(&filler(19)));
-}
-
-#[test]
 fn a_width_shrink_that_splits_the_rules_leaves_no_stale_rows() {
     let mut host = Host::new(&["$ swamp chat"]);
     host.commit(&welcome(), &idle());
@@ -547,7 +526,7 @@ fn a_width_shrink_too_small_to_wrap_anything_keeps_committed_rows() {
 }
 
 #[test]
-fn a_width_change_puts_the_area_back_on_the_last_row() {
+fn a_width_change_leaves_the_area_under_the_committed_tail() {
     let mut host = Host::new(&["$ swamp chat"]);
     host.commit(&welcome(), &idle());
     host.commit(&refs(&filler(19)), &idle());
@@ -556,12 +535,13 @@ fn a_width_change_puts_the_area_back_on_the_last_row() {
     host.resize(24, ROWS, &refs(&narrow));
 
     let screen = host.screen();
-    assert_eq!(screen[ROWS as usize - 1], narrow[3]);
+    assert_no_hole(&screen, &narrow[0]);
     assert_no_duplicate_live(&screen, &refs(&narrow));
+    assert_in_order(&host.history(), &refs(&filler(19)));
 }
 
 #[test]
-fn a_commit_fills_the_rows_a_re_anchored_area_left_behind() {
+fn a_commit_after_a_width_change_pushes_no_blank_row_into_scrollback() {
     let mut host = Host::new(&["$ swamp chat"]);
     host.commit(&welcome(), &idle());
     host.commit(&refs(&filler(19)), &idle());
@@ -577,24 +557,55 @@ fn a_commit_fills_the_rows_a_re_anchored_area_left_behind() {
 }
 
 #[test]
-fn a_width_change_keeps_the_area_where_the_shrink_left_it() {
+fn two_width_changes_then_a_commit_leave_no_hole() {
     let mut host = Host::new(&["$ swamp chat"]);
     host.commit(&welcome(), &idle());
     host.commit(&refs(&filler(19)), &idle());
-    let mut spinner = vec!["* working".to_owned()];
-    spinner.extend(wide_idle(COLS));
-    host.frame_at(&refs(&spinner), (2, 2));
-    // The spinner row goes: the area hands a row back and stays one row off the bottom, and a
-    // narrower window may not move it any higher than that.
     host.frame_at(&refs(&wide_idle(COLS)), (1, 2));
-    let narrow = wide_idle(24);
-    host.resize(24, ROWS, &refs(&narrow));
+    // Two reflows with nothing committed between them: the second may not inherit a hole from
+    // the first, on screen or in scrollback.
+    let narrow = wide_idle(28);
+    host.resize(28, ROWS, &refs(&narrow));
+    assert_no_hole(&host.screen(), &narrow[0]);
+    let wide = wide_idle(COLS);
+    host.resize(COLS, ROWS, &refs(&wide));
+    assert_no_hole(&host.screen(), &wide[0]);
+    host.commit(&["* answer", "  first", "  second", ""], &refs(&wide));
+
+    let history = host.history();
+    assert_in_order(&history, &["row 18", "* answer", "  second"]);
+    assert_no_blank_runs(&history, "row 18", "  second");
+    assert_no_hole(&host.screen(), &wide[0]);
+}
+
+#[test]
+fn a_burst_of_height_changes_loses_nothing() {
+    let mut host = Host::new(&["$ swamp chat"]);
+    host.commit(&welcome(), &idle());
+    host.commit(&refs(&filler(10)), &idle());
+    host.frame(&board());
+    // Grow, shrink, grow, shrink, grow, with no commit to repair anything in between.
+    for rows in [30u16, 20, 34, 22, 28] {
+        host.resize(COLS, rows, &board());
+        assert_no_duplicate_live(&host.screen(), &board());
+    }
+    host.commit(&board()[..7], &idle());
+
+    let history = host.history();
+    assert_in_order(&history, &["* swamp", "row 9", "* workers", "  node 5"]);
+    assert_no_blank_runs(&history, "row 9", "  node 5");
+    assert_no_hole(&host.screen(), "----");
+}
+
+#[test]
+fn a_startup_with_the_cursor_mid_screen_leaves_no_blank_band() {
+    let prelude: Vec<String> = (0..10).map(|i| format!("$ line {i}")).collect();
+    let mut host = Host::new(&refs(&prelude));
+    host.commit(&welcome(), &idle());
 
     let screen = host.screen();
-    assert_eq!(screen[ROWS as usize - 2], narrow[3]);
-    assert!(
-        screen[ROWS as usize - 1].is_empty(),
-        "{}",
-        screen.join("\n")
-    );
+    assert_eq!(screen[9], "$ line 9");
+    assert_eq!(screen[10], "* swamp");
+    assert_no_hole(&screen, "----");
+    assert_no_blank_runs(&host.history(), "$ line 0", "  run 01ARZ3");
 }
