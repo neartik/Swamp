@@ -320,7 +320,10 @@ fn an_unknown_cost_is_named_in_the_footer_and_never_rendered_as_zero() {
         text.contains("(1 node reported no cost data)"),
         "footer must name the node with no cost data:\n{text}"
     );
-    assert!(!text.contains("$0.00"), "absent cost renders as `-`:\n{text}");
+    assert!(
+        !text.contains("$0.00"),
+        "absent cost renders as `-`:\n{text}"
+    );
     // The row for that node carries a dash in the cost column.
     let row = text
         .lines()
@@ -464,8 +467,10 @@ fn formatting_holds_at_the_boundaries() {
             .map(|s| format!("{s}s -> {}", fmt::duration(Duration::from_secs(s))))
             .join("\n")
             + "\n"
-            + &[0u64, 999, 1_000, 14_000, 84_100, 214_000, 1_200_000, 9_400_000]
-                .map(|n| format!("{n} -> {}", fmt::tokens(n)))
-                .join("\n")
+            + &[
+                0u64, 999, 1_000, 14_000, 84_100, 214_000, 1_200_000, 9_400_000
+            ]
+            .map(|n| format!("{n} -> {}", fmt::tokens(n)))
+            .join("\n")
     );
 }

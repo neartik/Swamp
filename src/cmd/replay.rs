@@ -78,7 +78,8 @@ fn from_result(ctx: &Ctx, paths: &RunPaths, r: &serde_json::Value) -> Option<Nod
     use std::str::FromStr;
     let id = crate::ids::NodeId::from_str(r.get("node")?.as_str()?).ok()?;
     let provider = serde_json::from_value(r.get("provider")?.clone()).ok()?;
-    let tier = serde_json::from_value(r.get("tier")?.clone()).unwrap_or(crate::model::core::Tier::Mid);
+    let tier =
+        serde_json::from_value(r.get("tier")?.clone()).unwrap_or(crate::model::core::Tier::Mid);
     let files = r
         .get("files")
         .and_then(|f| serde_json::from_value(f.clone()).ok())
@@ -196,11 +197,10 @@ async fn rewrite(ctx: &Ctx, paths: &RunPaths, records: Vec<NodeRecord>) -> anyho
         });
 
         record.usage = st.usage;
-        record.cost = st
-            .last_final
-            .as_ref()
-            .and_then(|f| f.cost)
-            .or_else(|| ctx.cfg.estimate_cost(record.model.as_deref().unwrap_or(""), &st.usage));
+        record.cost = st.last_final.as_ref().and_then(|f| f.cost).or_else(|| {
+            ctx.cfg
+                .estimate_cost(record.model.as_deref().unwrap_or(""), &st.usage)
+        });
         record.stream_offset = offset;
         record.unparsed_lines = st.unparsed;
         record.summary = st

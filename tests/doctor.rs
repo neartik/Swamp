@@ -124,7 +124,11 @@ async fn a_missing_exec_is_one_error_that_names_the_fix() {
     let errors = errors(&out);
     assert_eq!(errors.len(), 1, "{:?}", errors.len());
     assert_eq!(errors[0].name, "accounts/alt");
-    assert!(errors[0].detail.contains("not on PATH"), "{}", errors[0].detail);
+    assert!(
+        errors[0].detail.contains("not on PATH"),
+        "{}",
+        errors[0].detail
+    );
     assert!(errors[0].detail.contains("wrapper"), "{}", errors[0].detail);
 }
 
@@ -203,7 +207,10 @@ async fn an_unacknowledged_dangerous_flag_is_an_error() {
 
     cfg.limits.unsafe_ack = Some(true);
     let acked = checks(&cfg, &f.paths, false, false).await;
-    assert!(errors(&acked).is_empty(), "an acknowledged flag is accepted");
+    assert!(
+        errors(&acked).is_empty(),
+        "an acknowledged flag is accepted"
+    );
 }
 
 #[tokio::test]

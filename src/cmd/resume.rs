@@ -17,11 +17,7 @@ use camino::Utf8PathBuf;
 #[derive(Debug, Clone)]
 pub enum Recovery {
     /// pid and start time still match: re-attach the tailer at `offset`.
-    Adopt {
-        node: NodeId,
-        pid: i32,
-        offset: u64,
-    },
+    Adopt { node: NodeId, pid: i32, offset: u64 },
     /// Process gone, stream on disk: finalize from what was recorded.
     Finalize { node: NodeId, offset: u64 },
     /// Process gone, stream truncated, session handle known.
@@ -69,10 +65,16 @@ impl Recovery {
                 session.account.0
             ),
             Recovery::Rerun { node } => {
-                format!("rerun      {} {title}: no session handle, rerun the prompt", node.short())
+                format!(
+                    "rerun      {} {title}: no session handle, rerun the prompt",
+                    node.short()
+                )
             }
             Recovery::Salvage { node, path } => {
-                format!("salvage    {} {title}: uncommitted work in {path}", node.short())
+                format!(
+                    "salvage    {} {title}: uncommitted work in {path}",
+                    node.short()
+                )
             }
         }
     }
@@ -129,7 +131,10 @@ pub async fn run(ctx: &Ctx, args: &ResumeArgs) -> anyhow::Result<i32> {
                 }
             }
             other if args.rerun_failed => {
-                println!("{}: rerun is not wired to a brainless run yet", other.describe(&view));
+                println!(
+                    "{}: rerun is not wired to a brainless run yet",
+                    other.describe(&view)
+                );
                 failed += 1;
             }
             other => println!("skipped: {}", other.describe(&view)),
@@ -208,7 +213,10 @@ pub fn plan(view: &RunView, paths: &RunPaths) -> Vec<Recovery> {
 
 fn dirty(node: &NodeRecord) -> bool {
     let path = node.workspace.path();
-    path.is_dir() && std::fs::read_dir(path).map(|d| d.count() > 1).unwrap_or(false)
+    path.is_dir()
+        && std::fs::read_dir(path)
+            .map(|d| d.count() > 1)
+            .unwrap_or(false)
 }
 
 /// Re-attach to a worker: follow its raw stream from the journaled offset, so nothing is
@@ -259,20 +267,22 @@ async fn attach(
         _ => record.work.clone(),
     };
 
-    session.journal.emit_durable(
-        Some(node),
-        JournalEvent::NodeFinished {
-            state: state.clone(),
-            exit: out.exit,
-            usage: out.usage,
-            cost: out.cost,
-            work: work.clone(),
-            summary: out.summary.clone(),
-            files: out.files.clone(),
-            unparsed_lines: out.unparsed_lines,
-        },
-    )
-    .await?;
+    session
+        .journal
+        .emit_durable(
+            Some(node),
+            JournalEvent::NodeFinished {
+                state: state.clone(),
+                exit: out.exit,
+                usage: out.usage,
+                cost: out.cost,
+                work: work.clone(),
+                summary: out.summary.clone(),
+                files: out.files.clone(),
+                unparsed_lines: out.unparsed_lines,
+            },
+        )
+        .await?;
 
     write_result(
         &session.paths,
@@ -335,15 +345,11 @@ fn finalize_offline(
         patterns: &patterns,
         deadline_hit: false,
     });
-    let cost = st
-        .last_final
-        .as_ref()
-        .and_then(|f| f.cost)
-        .or_else(|| {
-            session
-                .cfg
-                .estimate_cost(record.model.as_deref().unwrap_or(""), &st.usage)
-        });
+    let cost = st.last_final.as_ref().and_then(|f| f.cost).or_else(|| {
+        session
+            .cfg
+            .estimate_cost(record.model.as_deref().unwrap_or(""), &st.usage)
+    });
     Ok(crate::worker::RunOutcome {
         failure,
         exit: record.exit,

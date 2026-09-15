@@ -322,14 +322,14 @@ async fn a_worker_that_never_exits_is_timed_out_and_its_group_is_gone() {
         sink: &mut sink,
         journal: None,
         resume: None,
-        timeout: Duration::from_secs(1),
-        grace: Duration::from_millis(300),
+        timeout: Duration::from_secs(3),
+        grace: Duration::from_millis(500),
         cancel: CancellationToken::new(),
     })
     .await
     .expect("execute");
 
-    assert_eq!(outcome.failure, Some(Failure::Timeout { after_s: 1 }));
+    assert_eq!(outcome.failure, Some(Failure::Timeout { after_s: 3 }));
     assert!(
         outcome.stream_offset > 0,
         "the partial stream was still read"

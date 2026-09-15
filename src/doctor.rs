@@ -152,7 +152,10 @@ async fn environment(paths: &Paths, out: &mut Vec<Check>) {
         Ok(p) => Check::new(
             "environment/swamp",
             Level::Ok,
-            format!("{} (the MCP bridge is spawned by absolute path)", p.display()),
+            format!(
+                "{} (the MCP bridge is spawned by absolute path)",
+                p.display()
+            ),
         ),
         Err(e) => Check::new(
             "environment/swamp",
@@ -249,11 +252,7 @@ async fn accounts(cfg: &Config, paths: &Paths, probe: bool, out: &mut Vec<Check>
     let _ = paths;
 }
 
-pub async fn probe_account(
-    exec: &str,
-    env: &BTreeMap<String, String>,
-    name: String,
-) -> Check {
+pub async fn probe_account(exec: &str, env: &BTreeMap<String, String>, name: String) -> Check {
     let mut cmd = tokio::process::Command::new(exec);
     cmd.arg("--version");
     for (k, v) in env {
@@ -274,7 +273,11 @@ pub async fn probe_account(
                 String::from_utf8_lossy(&o.stderr).trim()
             ),
         ),
-        Ok(Err(e)) => Check::new(name, Level::Error, format!("`{exec} --version` failed: {e}")),
+        Ok(Err(e)) => Check::new(
+            name,
+            Level::Error,
+            format!("`{exec} --version` failed: {e}"),
+        ),
         Err(_) => Check::new(
             name,
             Level::Error,
@@ -314,8 +317,7 @@ fn tiers(cfg: &Config, out: &mut Vec<Check>) {
 fn unsafe_args(cfg: &Config, out: &mut Vec<Check>) {
     let acked = cfg.limits.unsafe_ack == Some(true);
     for (p, provider) in &cfg.providers {
-        let (_, refused) =
-            crate::worker::adapter::gate_unsafe_args(&provider.worker.args, acked);
+        let (_, refused) = crate::worker::adapter::gate_unsafe_args(&provider.worker.args, acked);
         if !refused.is_empty() {
             out.push(Check::new(
                 format!("providers/{p}/args"),

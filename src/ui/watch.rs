@@ -83,7 +83,10 @@ impl App {
 
     pub fn selected_node(&self) -> Option<&NodeRecord> {
         let row = self.selected_row()?;
-        row.attempts.iter().rev().find_map(|a| self.view.nodes.get(a))
+        row.attempts
+            .iter()
+            .rev()
+            .find_map(|a| self.view.nodes.get(a))
     }
 
     /// Per-account utilization, health and cooldown, in a stable order.
@@ -598,7 +601,10 @@ mod tests {
         let app = App::from_lines(run_id(), &journal());
         assert_eq!(app.rows.len(), 2);
         assert_eq!(app.rows[0].title, "migrate user model");
-        assert_eq!(app.selected_node().map(|n| n.title.clone()).unwrap(), "migrate user model");
+        assert_eq!(
+            app.selected_node().map(|n| n.title.clone()).unwrap(),
+            "migrate user model"
+        );
 
         let gauges = app.gauges();
         assert_eq!(gauges.len(), 1);
@@ -618,7 +624,10 @@ mod tests {
         assert_eq!(app.selected, 1, "the last row is the floor");
         app.on_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
         assert_eq!(app.selected, 0);
-        assert_eq!(app.on_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE)), Action::Quit);
+        assert_eq!(
+            app.on_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE)),
+            Action::Quit
+        );
         assert!(app.quit);
     }
 

@@ -10,9 +10,16 @@ use std::sync::Arc;
 const PROMPT: &str = "swamp> ";
 
 /// rustyline REPL rendering BrainEvent plus inline worker progress.
-pub async fn repl(mut brain: Box<dyn Brain>, disp: Arc<Dispatcher>, ctx: &Ctx) -> anyhow::Result<i32> {
+pub async fn repl(
+    mut brain: Box<dyn Brain>,
+    disp: Arc<Dispatcher>,
+    ctx: &Ctx,
+) -> anyhow::Result<i32> {
     brain.start().await?;
-    println!("swamp {} - /help for commands, ctrl-d to leave", crate::VERSION);
+    println!(
+        "swamp {} - /help for commands, ctrl-d to leave",
+        crate::VERSION
+    );
 
     let mut editor = rustyline::DefaultEditor::new()?;
     let mut code = 0;

@@ -72,7 +72,11 @@ async fn single_node(
         }),
         journal: session.journal.clone(),
         provider_order: order,
-        cross_provider: session.cfg.dispatch.cross_provider_failover.unwrap_or(false),
+        cross_provider: session
+            .cfg
+            .dispatch
+            .cross_provider_failover
+            .unwrap_or(false),
         max_attempts: session.cfg.dispatch.max_attempts.unwrap_or(3).max(1),
         deadline: Instant::now() + session.cfg.node_timeout(tier),
         // No brain, no parent: this node is the run.
@@ -393,9 +397,7 @@ async fn wait_for_spawn(paths: &RunPaths) {
     let nodes = paths.dir.join("nodes");
     loop {
         if let Ok(entries) = std::fs::read_dir(&nodes) {
-            let started = entries
-                .flatten()
-                .any(|e| e.path().join("pid").is_file());
+            let started = entries.flatten().any(|e| e.path().join("pid").is_file());
             if started {
                 return;
             }
@@ -601,6 +603,16 @@ exec = "{exec}"
         let patch = std::fs::read_to_string(&work.patch).expect("patch.diff");
         assert!(patch.contains("fixed.txt"), "{patch}");
         assert!(work.branch.starts_with("swamp/"), "branch {}", work.branch);
+        // The diff is attributed to the attempt, not to the logical node the worktree is keyed by.
+        assert_eq!(work.patch, paths.patch(node.id));
+        assert_eq!(
+            node.files
+                .iter()
+                .map(|f| f.path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["fixed.txt"],
+            "the captured file list reaches the node"
+        );
 
         // The user's checkout is untouched: the work lives in a worktree outside the repo.
         let status = std::process::Command::new("git")

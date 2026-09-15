@@ -55,7 +55,11 @@ pub async fn run(ctx: &Ctx, args: &CancelArgs) -> anyhow::Result<i32> {
             }
             terminate(pgid, grace).await?;
             killed += 1;
-            println!("cancelled node {} (pgid {pgid}) in run {}", id.short(), paths.run);
+            println!(
+                "cancelled node {} (pgid {pgid}) in run {}",
+                id.short(),
+                paths.run
+            );
         }
     }
     println!("cancelled {killed} nodes");

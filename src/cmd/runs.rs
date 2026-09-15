@@ -86,5 +86,8 @@ fn summary(view: &RunView) -> String {
         .and_then(|h| h.task.clone())
         .unwrap_or_else(|| "-".to_owned());
     let mark = if view.finished { "" } else { " (interrupted)" };
-    format!("{}{mark}", fmt::truncate(task.lines().next().unwrap_or(""), 60))
+    format!(
+        "{}{mark}",
+        fmt::truncate(task.lines().next().unwrap_or(""), 60)
+    )
 }

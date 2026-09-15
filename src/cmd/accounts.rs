@@ -154,7 +154,8 @@ fn window(s: &AccountState, scope: LimitScope) -> Option<f64> {
 }
 
 fn util(v: Option<f64>) -> String {
-    v.map(|u| format!("{u:.2}")).unwrap_or_else(|| "-".to_owned())
+    v.map(|u| format!("{u:.2}"))
+        .unwrap_or_else(|| "-".to_owned())
 }
 
 fn cooldown(s: &AccountState, now: OffsetDateTime) -> String {

@@ -268,20 +268,30 @@ pub async fn run_node(cx: &NodeCtx, mut spec: LaunchSpec, task: &TaskRequest) ->
             stream_offset: 0,
             unparsed_lines: 0,
         };
-        // Journaled BEFORE spawning, so a crash still leaves a node with full provenance.
-        emit_for(
-            cx,
-            spec.node.id,
-            JournalEvent::NodeSpawned {
-                node: Box::new(record.clone()),
-            },
-        );
+        // Journaled durably BEFORE spawning, so a crash still leaves a node with full provenance.
+        if let Err(e) = cx
+            .journal
+            .emit_durable(
+                Some(spec.node.id),
+                JournalEvent::NodeSpawned {
+                    node: Box::new(record.clone()),
+                },
+            )
+            .await
+        {
+            tracing::warn!(node = %spec.node.id.short(), "cannot journal NodeSpawned: {e}");
+        }
 
         let timeout = cx.cfg.node_timeout(spec.tier);
-        let out = match cx.runner.run(&spec, timeout, cx.cancel.clone()).await {
+        let mut out = match cx.runner.run(&spec, timeout, cx.cancel.clone()).await {
             Ok(out) => out,
             Err(e) => crashed_outcome(e),
         };
+        // A session handle is only usable with the account that minted it, and the worker does
+        // not know which one that was.
+        if let Some(s) = out.session.as_mut() {
+            s.account = lease.account.clone();
+        }
         cx.pool
             .report(&lease.account, out.failure.as_ref(), out.cost);
 
@@ -301,9 +311,14 @@ pub async fn run_node(cx: &NodeCtx, mut spec: LaunchSpec, task: &TaskRequest) ->
             Some(f) => NodeState::Failed { failure: f.clone() },
         };
         if out.failure.is_none() {
+            // The worktree is keyed by the logical node; the diff belongs to this attempt.
+            let fwt = NodeWorktree {
+                node: record.id,
+                ..wt.clone()
+            };
             record.work = cx
                 .runner
-                .finalize(&wt, &task.title, spec.tier)
+                .finalize(&fwt, &task.title, spec.tier)
                 .await
                 .unwrap_or_default();
         }
