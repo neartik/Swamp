@@ -88,3 +88,12 @@ strip = "debuginfo"
 [[test]]
 name = "common"
 path = "tests/common/mod.rs"
+
+# WP8: the fake CLIs the end-to-end tests put on PATH under wrapper names.
+[[bin]]
+name = "fake_claude"
+path = "tests/support/fake_claude.rs"
+
+[[bin]]
+name = "fake_codex"
+path = "tests/support/fake_codex.rs"
