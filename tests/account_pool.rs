@@ -145,9 +145,9 @@ fn health_of(pool: &Arc<AccountPool>, who: &str) -> Health {
 }
 
 #[test]
-fn least_loaded_is_the_v1_default_policy() {
+fn quota_aware_is_the_default_policy() {
     let cfg = config(TWO_ACCOUNTS);
-    assert_eq!(cfg.dispatch.policy, Some(SelectionPolicy::LeastLoaded));
+    assert_eq!(cfg.dispatch.policy, Some(SelectionPolicy::QuotaAware));
 }
 
 #[tokio::test]
@@ -210,13 +210,10 @@ async fn sequential_runs_alternate_between_two_idle_accounts() {
     );
 }
 
-/// The counter that breaks the tie lives in accounts.json, so a second process keeps alternating.
+/// What breaks the tie lives in accounts.json, so a second process keeps alternating.
 #[tokio::test]
-async fn a_fresh_pool_keeps_alternating_from_the_persisted_node_counts() {
-    let h = harness(&format!(
-        "{TWO_ACCOUNTS}\n[dispatch]\npolicy = \"least-loaded\"\n"
-    ))
-    .await;
+async fn a_fresh_pool_keeps_alternating_from_the_persisted_state() {
+    let h = harness(TWO_ACCOUNTS).await;
     let first = acquire(&h.pool).await.expect("lease").account.clone();
     h.pool.report(&first, None, None);
     drop(h.pool);
@@ -438,18 +435,24 @@ async fn quota_past_the_warning_threshold_only_degrades() {
     assert!(acquire(&h.pool).await.is_ok());
 }
 
+/// Every account cooling is a wait, not a failure: the node's own deadline is what ends it.
 #[tokio::test]
-async fn every_account_cooling_reports_all_cooling_with_a_retry_time() {
+async fn every_account_cooling_blocks_instead_of_failing() {
     let h = harness(TWO_ACCOUNTS).await;
     for who in ["main", "alt"] {
         h.pool.report(&id(who), Some(&rate_limited(None)), None);
     }
+    let Some(NoCapacity::AllExhausted { retry_at, why }) =
+        h.pool.all_exhausted(Provider::Anthropic, &HashSet::new())
+    else {
+        panic!("every account is cooling");
+    };
+    assert!(retry_at > time::OffsetDateTime::now_utc());
+    assert!(why.contains("cooling until"), "{why}");
     match acquire(&h.pool).await {
-        Err(NoCapacity::AllCooling { retry_at }) => {
-            assert!(retry_at > time::OffsetDateTime::now_utc());
-        }
-        Err(other) => panic!("expected AllCooling, got {other:?}"),
-        Ok(lease) => panic!("expected AllCooling, got a lease on {}", lease.account.0),
+        Err(NoCapacity::Saturated) => {}
+        Err(other) => panic!("expected Saturated, got {other:?}"),
+        Ok(lease) => panic!("expected a wait, got a lease on {}", lease.account.0),
     }
 }
 

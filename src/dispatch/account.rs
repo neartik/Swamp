@@ -13,7 +13,9 @@ pub struct Account {
     /// e.g. CLAUDE_CONFIG_DIR; never a credential.
     pub env: BTreeMap<String, String>,
     pub weight: u32,
-    pub max_concurrency: usize,
+    /// Unset is unlimited: the only real ceiling is the one a subscription imposes, and the
+    /// user is the one who knows it.
+    pub max_concurrency: Option<usize>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

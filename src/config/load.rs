@@ -34,7 +34,7 @@ include_partial_messages = true
 system_prompt_file = ".swamp/brain.md"
 
 [dispatch]
-policy = "least-loaded"
+policy = "quota-aware"
 max_attempts = 3
 cross_provider_failover = false
 default_provider = "anthropic"
