@@ -175,7 +175,7 @@ that become crates later (`worker/`, `journal/`, `mcp/`) are already dependency-
 on `model/` and `config/` only, never on each other.
 
 ```
-/Users/quentin/projects/swamp/Swamp/
+Swamp/
   Cargo.toml
   rust-toolchain.toml
   swamp.example.toml
