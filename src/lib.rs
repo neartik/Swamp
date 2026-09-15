@@ -1,6 +1,4 @@
 //! Swamp: parallel agent orchestration over CLI subscriptions.
-//!
-//! WP0 scaffold: every type is real, every body is `todo!("WPn")` naming the owning package.
 
 pub mod brain;
 pub mod cli;

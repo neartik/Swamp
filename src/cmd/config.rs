@@ -9,7 +9,7 @@ const TEMPLATE: &str = r#"version = 1
 worker_timeout = "25m"
 
 [dispatch]
-policy = "least-loaded"
+policy = "quota-aware"
 default_provider = "anthropic"
 default_tier = "mid"
 
@@ -83,4 +83,26 @@ pub async fn run(ctx: &Ctx, args: &ConfigArgs) -> anyhow::Result<i32> {
 
 fn mark(exists: bool) -> &'static str {
     if exists { "" } else { "  (missing)" }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TEMPLATE;
+    use crate::config::load::{Layer, default_layer, merge};
+    use crate::dispatch::SelectionPolicy;
+
+    #[test]
+    fn the_init_template_yields_the_quota_aware_policy() {
+        let schema: crate::config::Schema =
+            toml::from_str(TEMPLATE).expect("the init template parses");
+        let mut cfg = crate::config::resolve::from_schema(merge(vec![
+            default_layer(),
+            Layer {
+                origin: "init template".into(),
+                schema,
+            },
+        ]));
+        crate::config::validate::validate(&mut cfg).expect("the init template is valid");
+        assert_eq!(cfg.dispatch.policy, Some(SelectionPolicy::QuotaAware));
+    }
 }
