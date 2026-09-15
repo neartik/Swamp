@@ -1,6 +1,6 @@
 use crate::config::Config;
 use crate::dispatch::account::AccountState;
-use crate::dispatch::pool::{AccountPool, Lease, NoCapacity, instant_of};
+use crate::dispatch::pool::{AccountPool, Lease, NoCapacity};
 use crate::ids::{NodeId, NodeIds};
 use crate::journal::{JournalEvent, JournalHandle};
 use crate::model::core::{
@@ -132,40 +132,42 @@ pub async fn run_node(cx: &NodeCtx, mut spec: LaunchSpec, task: &TaskRequest) ->
         }
         let lease = match held.take() {
             Some(lease) => lease,
-            None => match cx.pool.acquire(provider, &excluded, cx.deadline).await {
-                Ok(l) => l,
-                Err(NoCapacity::AllCooling { retry_at }) => {
-                    // Cross-provider failover happens only here, and only if opted in.
-                    if cx.cross_provider
-                        && let Some(next) = providers.next()
-                    {
-                        emit(
-                            cx,
-                            JournalEvent::ProviderSwitch {
-                                from: provider,
-                                to: next,
-                            },
-                        );
-                        provider = next;
-                        excluded.clear();
-                        continue;
-                    }
-                    let at = instant_of(retry_at);
-                    if at >= cx.deadline {
-                        return give_up(cx, logical, attempts, provider, &excluded);
-                    }
+            None => {
+                // Cross-provider failover happens only here, and only if opted in: the
+                // decision is made before the pool starts waiting for a window to roll.
+                if cx.cross_provider
+                    && cx.pool.all_exhausted(provider, &excluded).is_some()
+                    && let Some(next) = providers.next()
+                {
                     emit(
                         cx,
-                        JournalEvent::NodeBlocked {
-                            until: retry_at,
-                            why: "all accounts cooling".into(),
+                        JournalEvent::ProviderSwitch {
+                            from: provider,
+                            to: next,
                         },
                     );
-                    tokio::time::sleep_until(at).await;
+                    provider = next;
+                    excluded.clear();
                     continue;
                 }
-                Err(_) => return give_up(cx, logical, attempts, provider, &excluded),
-            },
+                // The pool journals one NodeBlocked and waits for the earliest reset; it
+                // comes back empty-handed only at the node deadline or on cancellation.
+                match cx
+                    .pool
+                    .acquire_node(
+                        provider,
+                        &excluded,
+                        cx.deadline,
+                        Some(logical),
+                        Some(&cx.cancel),
+                    )
+                    .await
+                {
+                    Ok(l) => l,
+                    Err(NoCapacity::Cancelled) => return cancelled(logical, attempts),
+                    Err(_) => return give_up(cx, logical, attempts, provider, &excluded),
+                }
+            }
         };
 
         // A session handle is only valid for the account that minted it.
@@ -501,7 +503,12 @@ async fn observe_codex_quota(cx: &NodeCtx, lease: &Lease, model: &str, thread: O
                     .account(&lease.account)
                     .and_then(|a| a.limit_id.clone());
                 if let Some(quota) = read.select(pinned.as_deref(), Some(model)) {
-                    cx.pool.observe_quota(&lease.account, quota);
+                    // Only this call site can tell the app-server from the rollout.
+                    cx.pool.observe_quota_from(
+                        &lease.account,
+                        quota,
+                        crate::dispatch::account::QuotaSource::AppServer,
+                    );
                     return;
                 }
             }
