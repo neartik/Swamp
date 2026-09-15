@@ -1,0 +1,21 @@
+---
+source: tests/render_trace.rs
+expression: "render(&view(), &TraceOpts::default())"
+---
+run 9g5f00  /projects/api  base 9f3c1ad  started 22:13:20  4m12s  ~$1.64  555k tok
+
+* brain                               anthropic/main    model-high    4m12s     223k   ~$0.71  ok
+  |
+  +- [mid ] migrate user model                  anthropic/alt     model-mid     1m48s     123k   ~$0.42  ok
+  |    attempt 1  anthropic/main    model-mid   rate_limited (seven_day, telemetry) resets 23:13  12s
+  |    attempt 2  anthropic/alt     model-mid   ok  1m48s
+  |    branch swamp/69g5f0/b73e10-2   +214 -37   1 file
+  |
+  +- [low ] update changelog                    anthropic/main    model-low       31s    15.9k        -  ok
+  |
+  +- [high] audit auth middleware               anthropic/main    model-high    2m04s     190k   ~$0.50  failed
+       WorkerError(error_during_execution): 2 tests still failing
+       no failover (task-level failure)
+
+usage  in 530k  out 19.7k  cache-read 1.1M  cache-write 5k
+cost   ~$1.64   (1 node reported no cost data)
