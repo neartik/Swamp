@@ -40,7 +40,6 @@ option lists are not used; see "Flag verification notes".
 | DAG dependencies between sub-tasks | `TaskRequest.deps: Vec<NodeId>` is parsed and rejected |
 | Automatic merge / conflict resolution | `swamp adopt` is a user action; `MergeStrategy` enum exists |
 | Worker follow-up turns (multi-turn workers) | `SessionHandle` + `--resume` plumbing is built and tested |
-| Quota-aware as the default policy | `SelectionPolicy::QuotaAware` is implemented but not default |
 | Windows support | All platform code confined to `worker/spawn.rs`, `worker/liveness.rs`, `mcp/server.rs` |
 | Raw stream compression | `gc` deletes rather than compresses |
 
@@ -260,12 +259,13 @@ Swamp/
       fmt.rs            durations, token counts, cost, status glyphs, truncation
       trace.rs          static tree renderer; --events, --raw, --json, --follow
       watch.rs          ratatui live TUI: tree pane / node pane / account footer
-      chat.rs           rustyline REPL rendering BrainEvent plus inline worker progress
+      chat/             inline ratatui viewport rendering BrainEvent plus worker progress
+      usage.rs          the `/usage` and `swamp usage` table and its JSON shape
 
     cmd/
       mod.rs            one module per subcommand, each a thin `async fn run(cfg, args)`
-      run.rs chat.rs trace.rs watch.rs runs.rs accounts.rs doctor.rs
-      diff.rs adopt.rs gc.rs replay.rs config.rs mcp_bridge.rs
+      run.rs chat.rs trace.rs watch.rs runs.rs accounts.rs doctor.rs usage.rs
+      resume.rs cancel.rs worktrees.rs diff.rs adopt.rs gc.rs replay.rs config.rs mcp_bridge.rs
 
   tests/
     parse_claude.rs     golden test against docs/ref/claude-stream-sample.jsonl
@@ -1285,7 +1285,8 @@ change can be patched in the field without shipping a new binary.
 
 Git is the ground truth for "files touched", not the event stream. After the process exits,
 `workspace::diff::collect(&worktree, base)` runs `git diff --numstat` and `--name-status`, commits
-to `swamp/<run_short>/<node_short>` when `commit_on_success`, and writes `patches/<node>.patch`.
+to `swamp/<run_short>/<node_short>-<attempt>` when `commit_on_success`, and writes
+`nodes/<attempt_short>/patch.diff`.
 This makes the result identical across providers and correct even when a worker edits files through
 a shell heredoc. Event-stream `FileChanged` entries are kept as a live-progress signal and are
 replaced at finalize by the git-sourced list, in the journal AND in the `NodeResult` the brain
@@ -1504,17 +1505,18 @@ pub async fn run_node(cx: &NodeCtx, mut spec: LaunchSpec, task: &TaskRequest) ->
     let logical = NodeId::new();
 
     for attempt in 1..=cx.max_attempts {
-        let lease = match cx.pool.acquire(provider, &excluded, cx.deadline).await {
-            Ok(l) => l,
-            Err(NoCapacity::AllCooling { retry_at }) => {
-                // Cross-provider failover happens only here, and only if opted in.
-                if cx.cross_provider { if let Some(next) = providers.next() {
-                    provider = next; excluded.clear(); continue;
-                }}
-                cx.journal.emit(JournalEvent::NodeBlocked { until: retry_at, why: "all accounts cooling".into() });
-                tokio::time::sleep_until(instant_of(retry_at)).await;
-                continue;
+        // Cross-provider failover happens only here, and only if opted in: the decision is
+        // made before the pool starts waiting for a window to roll.
+        if cx.cross_provider && cx.pool.all_exhausted(provider, &excluded).is_some() {
+            if let Some(next) = providers.next() {
+                provider = next; excluded.clear(); continue;
             }
+        }
+        // USAGE 4.7: acquire_node journals one NodeBlocked and does the waiting itself; it
+        // comes back empty-handed only at the node deadline or on cancellation.
+        let lease = match cx.pool.acquire_node(provider, &excluded, cx.deadline, Some(logical), Some(&cx.cancel)).await {
+            Ok(l) => l,
+            Err(NoCapacity::Cancelled) => return cancelled(logical, attempts),
             Err(e) => return NodeOutcome::failed(Failure::NoCapacity { detail: format!("{e:?}") }),
         };
 
@@ -1898,7 +1900,7 @@ swamp run <TASK...>                         One-shot, non-interactive
       --timeout <DUR>                       Default 25m
       --max-attempts <N>
       --wait | --detach
-      --json | -q                           -q prints only the run id
+      --json                                -q only lowers the log level
       -                                     Read TASK from stdin; @file also accepted
 
 swamp trace [RUN|last]                      RUN accepts a full id, a unique prefix, the printed
@@ -2105,7 +2107,7 @@ quota_stop_at = 0.98
 isolation     = "worktree"        # worktree | shared | readonly
 root          = "~/.swamp/worktrees"   # outside the repo on purpose
 base          = "HEAD"
-branch_prefix = "swamp"           # -> swamp/<run_short>/<node_short>
+branch_prefix = "swamp"           # -> swamp/<run_short>/<node_short>-<attempt>
 include_dirty = false             # true -> base from `git stash create`
 require_clean = true
 commit_on_success = true
@@ -2337,10 +2339,9 @@ unicode-width = "0.2"
 textwrap      = "0.16"
 owo-colors    = "4.1"
 
-# TUI and REPL
+# TUI
 ratatui   = { version = "0.29", features = ["crossterm"] }
 crossterm = { version = "0.28", features = ["event-stream"] }
-rustyline = { version = "15.0", default-features = false, features = ["with-file-history"] }
 
 [target.'cfg(unix)'.dependencies]
 nix     = { version = "0.29", features = ["process", "signal"] }   # setsid, killpg, kill(pid,0)
@@ -2354,6 +2355,7 @@ proptest          = "1.6"
 tokio-test        = "0.4"
 pretty_assertions = "1.4"
 tempfile          = "3.14"
+vt100             = "0.15"
 
 [features]
 default   = ["tui"]
@@ -2536,9 +2538,9 @@ and deterministic.
    `doctor --probe` must verify the round trip end to end before the codex brain is declared working.
    If the key differs, only `worker/codex.rs::build_argv` changes.
 
-2. **Codex quota telemetry.** `codex exec --json` shows none in the sample. If a future version
-   emits per-window utilization, `QuotaAware` becomes a defensible default for the whole pool. Until
-   then it stays selectable but not default.
+2. **Codex quota telemetry.** `codex exec --json` shows none in the sample, so it is read out of
+   band (rollout, then app-server). `QuotaAware` is the default policy; where no telemetry exists at
+   all it degrades to token share, which is why it is safe as the default.
 
 3. **Brain-side `--permission-prompts none` for chat.** A brain that silently loses a tool call is
    worse than one that asks. v1 sets `none` for determinism; revisit once the chat REPL can surface

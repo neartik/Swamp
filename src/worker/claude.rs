@@ -344,17 +344,13 @@ fn snapshot(info: &RateLimitInfo) -> RateLimitSnapshot {
     };
     RateLimitSnapshot {
         status,
-        windows: if info.windows.is_empty() {
-            info.kind
-                .iter()
-                .map(|k| window(k, 0.0, reset_time(info.resets_at)))
-                .collect()
-        } else {
-            info.windows
-                .iter()
-                .map(|(name, w)| window(name, w.utilization, reset_time(Some(w.resets_at))))
-                .collect()
-        },
+        // No `unifiedWindows` means no measurement. Synthesising a 0% window here would read
+        // as a wide-open allowance and erase the real utilization stored for that scope.
+        windows: info
+            .windows
+            .iter()
+            .map(|(name, w)| window(name, w.utilization, reset_time(Some(w.resets_at))))
+            .collect(),
         resets_at: reset_time(info.resets_at),
         limit_id: info.kind.clone(),
         ordinary_usage_allowed: None,

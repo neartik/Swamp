@@ -408,6 +408,25 @@ fn rate_limits(events: &[WorkerEvent]) -> Vec<RateLimitSnapshot> {
         .collect()
 }
 
+/// A `rate_limit_event` without `unifiedWindows` carries no measurement. Synthesising a 0%
+/// window from `rateLimitType` reads as a wide-open allowance and erases the real one.
+#[test]
+fn an_event_without_unified_windows_reports_no_window_at_all() {
+    let a = claude();
+    let mut st = ParseState::default();
+    let line = r#"{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","resetsAt":1789440000,"rateLimitType":"five_hour"}}"#;
+    let snap = rate_limits(&a.parse_line(line, &mut st).events)
+        .pop()
+        .expect("a rate limit event");
+    assert!(
+        snap.windows.is_empty(),
+        "a fabricated 0% window would overwrite the stored one: {:?}",
+        snap.windows
+    );
+    assert_eq!(snap.status, LimitStatus::Rejected);
+    assert_eq!(snap.limit_id.as_deref(), Some("five_hour"));
+}
+
 /// WP-B acceptance 1: the sample's second event adds `seven_day_overage_included`, which is
 /// not a plan limit; maxing it in used to drive Degraded off an overage window.
 #[test]
@@ -459,7 +478,9 @@ fn a_later_snapshot_does_not_erase_a_window_it_omits() {
         ],
         ..Default::default()
     };
-    let merged = five_only.merged_over(full);
+    // Before the sample's own reset instants, so nothing in it counts as already rolled.
+    let now = time::OffsetDateTime::from_unix_timestamp(1_789_000_000).expect("sample epoch");
+    let merged = five_only.merged_over(full, now);
     assert_eq!(merged.windows.len(), 3);
     assert_eq!(merged.worst_utilization(), 0.64);
 }

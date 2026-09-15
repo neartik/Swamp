@@ -323,6 +323,23 @@ fn measured_default() -> bool {
     true
 }
 
+impl LimitWindow {
+    /// A window with no reset time never expires; one whose reset has passed has rolled.
+    pub fn is_current(&self, now: OffsetDateTime) -> bool {
+        self.resets_at.is_none_or(|t| t > now)
+    }
+
+    /// Nominal span in minutes, for ordering windows by length.
+    pub fn minutes(&self) -> u32 {
+        self.window_minutes.unwrap_or(match self.scope {
+            LimitScope::Minute => 1,
+            LimitScope::FiveHour => 300,
+            LimitScope::SevenDay => 10080,
+            LimitScope::Unknown => 0,
+        })
+    }
+}
+
 impl Default for LimitWindow {
     fn default() -> Self {
         Self {
@@ -394,6 +411,24 @@ impl RateLimitSnapshot {
                 Some(acc.map_or(u, |a| a.max(u)))
             })
     }
+    /// Windows that still describe the present. A window whose `resets_at` has passed measures
+    /// an allowance that has already rolled, and for Anthropic nothing can refresh it until a
+    /// node runs on that account, so a stale number must never keep gating dispatch.
+    pub fn current(&self, now: OffsetDateTime) -> impl Iterator<Item = &LimitWindow> {
+        self.named().filter(move |w| w.is_current(now))
+    }
+    pub fn worst_utilization_at(&self, now: OffsetDateTime) -> f64 {
+        self.current(now).map(|w| w.utilization).fold(0.0, f64::max)
+    }
+    /// `measured_utilization`, ignoring windows that have already rolled.
+    pub fn measured_utilization_at(&self, now: OffsetDateTime) -> Option<f64> {
+        self.current(now)
+            .filter(|w| w.measured)
+            .map(|w| w.utilization)
+            .fold(None, |acc: Option<f64>, u| {
+                Some(acc.map_or(u, |a| a.max(u)))
+            })
+    }
     /// The window §4 scores against: the one closest to exhaustion.
     pub fn tightest(&self) -> Option<&LimitWindow> {
         self.named()
@@ -411,13 +446,18 @@ impl RateLimitSnapshot {
 
     /// Per-scope merge, not replacement: two `rate_limit_event`s of one run carry different
     /// window sets, and a key dropping out of the newer one must not erase what it measured.
-    pub fn merged_over(&self, prev: &RateLimitSnapshot) -> RateLimitSnapshot {
+    /// An estimate never replaces a measurement that has not rolled yet, and a window whose
+    /// reset has passed is dropped rather than carried forward forever.
+    pub fn merged_over(&self, prev: &RateLimitSnapshot, now: OffsetDateTime) -> RateLimitSnapshot {
         let mut out = self.clone();
-        for old in &prev.windows {
-            if !out.windows.iter().any(|w| w.scope == old.scope) {
-                out.windows.push(old.clone());
+        for old in prev.windows.iter().filter(|w| w.is_current(now)) {
+            match out.windows.iter_mut().find(|w| w.scope == old.scope) {
+                Some(w) if !w.measured && old.measured => *w = old.clone(),
+                Some(_) => {}
+                None => out.windows.push(old.clone()),
             }
         }
+        out.windows.retain(|w| w.is_current(now));
         out.windows.sort_by_key(|w| w.scope);
         out
     }

@@ -246,6 +246,9 @@ async fn attach(
     // same account and burns a node against a live 429.
     if let Some(account) = &record.account {
         session.pool.report(account, out.failure.as_ref(), out.cost);
+        // A recovered node spent real tokens: without this the account's window and lifetime
+        // counters under-report it and every share-based score is skewed in its favour.
+        session.pool.commit_usage(account, node, out.usage);
         if let Some(snap) = out.rate_limit.clone() {
             session.pool.observe_quota(account, snap);
         }

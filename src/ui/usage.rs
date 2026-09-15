@@ -124,16 +124,26 @@ fn layout_for(width: u16) -> Layout {
 
 /// The §3.1 table: one section per provider, `not in config` listed last, then `observed` and
 /// `totals`. No I/O; `rows` is already in memory.
-pub fn render(rows: &[AccountRow], width: u16, theme: &Theme) -> Vec<Line<'static>> {
+pub fn render(
+    rows: &[AccountRow],
+    width: u16,
+    theme: &Theme,
+    max_age: StdDuration,
+) -> Vec<Line<'static>> {
     let now = OffsetDateTime::now_utc();
     let layout = layout_for(width);
-    let mut groups: BTreeMap<Option<Provider>, Vec<&AccountRow>> = BTreeMap::new();
+    // `None` is the `not in config` group and sorts last, not first: BTreeMap would put it
+    // ahead of every provider, which is the opposite of what the spec asks for.
+    let mut groups: BTreeMap<(bool, Option<Provider>), Vec<&AccountRow>> = BTreeMap::new();
     for r in rows {
-        groups.entry(r.provider).or_default().push(r);
+        groups
+            .entry((r.provider.is_none(), r.provider))
+            .or_default()
+            .push(r);
     }
     let mut out = Vec::new();
     let mut first = true;
-    for (provider, group) in &groups {
+    for ((_, provider), group) in &groups {
         if group.is_empty() {
             continue;
         }
@@ -153,7 +163,7 @@ pub fn render(rows: &[AccountRow], width: u16, theme: &Theme) -> Vec<Line<'stati
     }
     if !rows.is_empty() {
         out.push(Line::from(String::new()));
-        out.extend(observed_lines(rows, width, theme, now));
+        out.extend(observed_lines(rows, width, theme, now, max_age));
         out.extend(totals_lines(rows, theme));
     }
     out
@@ -335,7 +345,7 @@ fn reset_cell(w: Option<&LimitWindow>, now: OffsetDateTime) -> String {
         return "-".to_owned();
     };
     let secs = (at - now).whole_seconds().max(0) as u64;
-    let s = format!("in {}", fmt::duration(StdDuration::from_secs(secs)));
+    let s = format!("in {}", fmt::until(StdDuration::from_secs(secs)));
     if w.measured { s } else { format!("~{s}") }
 }
 
@@ -383,8 +393,8 @@ fn observed_lines(
     width: u16,
     theme: &Theme,
     now: OffsetDateTime,
+    max_age: StdDuration,
 ) -> Vec<Line<'static>> {
-    let max_age = StdDuration::from_secs(60);
     let entries: Vec<(String, bool)> = rows
         .iter()
         .filter(|r| r.in_config)
@@ -397,7 +407,7 @@ fn observed_lines(
                     (
                         format!(
                             "{id} {} ago {}",
-                            fmt::duration(StdDuration::from_secs(secs)),
+                            fmt::until(StdDuration::from_secs(secs)),
                             src.as_str()
                         ),
                         stale,
@@ -459,15 +469,14 @@ fn totals_lines(rows: &[AccountRow], theme: &Theme) -> Vec<Line<'static>> {
         Role::Meta,
     ))];
     if missing > 0 {
-        let plural = if missing == 1 {
-            "account has"
+        let clause = if missing == 1 {
+            "account has no quota source; its utilization is estimated"
         } else {
-            "accounts have"
+            "accounts have no quota source; their utilization is estimated"
         };
-        out.push(Line::from(theme.span(
-            format!("          {missing} {plural} no quota source; its utilization is estimated"),
-            Role::Meta,
-        )));
+        out.push(Line::from(
+            theme.span(format!("          {missing} {clause}"), Role::Meta),
+        ));
     }
     out
 }
@@ -542,14 +551,23 @@ fn account_json(r: &AccountRow, now: OffsetDateTime) -> Value {
         "quota": quota,
         "quota_buckets": r.quota_buckets,
         "tokens": {
-            "window": r.window_tokens,
+            "window": tokens_json(&r.window_tokens),
             "window_started_at": r.window_started_at.and_then(rfc3339),
-            "lifetime": r.lifetime_tokens,
+            "lifetime": tokens_json(&r.lifetime_tokens),
         },
         "nodes": r.lifetime_nodes,
         "cost_usd": r.cost_usd,
         "cost_basis": cost_basis,
     })
+}
+
+/// `billable` is documented as part of the shape, and `Usage` only computes it.
+fn tokens_json(u: &Usage) -> Value {
+    let mut v = serde_json::to_value(u).unwrap_or(Value::Null);
+    if let Some(obj) = v.as_object_mut() {
+        obj.insert("billable".to_owned(), json!(u.billable()));
+    }
+    v
 }
 
 fn rfc3339(t: OffsetDateTime) -> Option<String> {
@@ -560,6 +578,7 @@ fn rfc3339(t: OffsetDateTime) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dispatch::policy::DEFAULT_QUOTA_MAX_AGE as MAX_AGE;
     use crate::model::core::{LimitStatus, Usage};
 
     fn row(id: &str, health: Health) -> AccountRow {
@@ -591,7 +610,7 @@ mod tests {
     #[test]
     fn a_row_with_no_quota_never_prints_a_bare_zero_percent() {
         let rows = vec![row("claude-main", Health::Healthy)];
-        let lines = text(&render(&rows, 100, &Theme::plain()));
+        let lines = text(&render(&rows, 100, &Theme::plain(), MAX_AGE));
         let body = lines.join("\n");
         assert!(body.contains("claude-main"));
         assert!(!body.contains("0%"), "{body}");
@@ -612,7 +631,7 @@ mod tests {
             }],
             ..RateLimitSnapshot::default()
         });
-        let lines = text(&render(&[r], 100, &Theme::plain()));
+        let lines = text(&render(&[r], 100, &Theme::plain(), MAX_AGE));
         let body = lines.join("\n");
         assert!(body.contains("~2%"), "{body}");
         assert!(body.contains("~in"), "{body}");
@@ -626,7 +645,7 @@ mod tests {
             reached: Some(LimitReached::RateLimit),
             ..RateLimitSnapshot::default()
         });
-        let lines = text(&render(&[r], 100, &Theme::plain()));
+        let lines = text(&render(&[r], 100, &Theme::plain(), MAX_AGE));
         let body = lines.join("\n");
         assert!(body.contains("until"), "{body}");
         assert!(body.contains("rate_limit"), "{body}");
@@ -635,7 +654,7 @@ mod tests {
     #[test]
     fn an_auth_broken_account_points_at_its_exec() {
         let r = row("claude-broke", Health::AuthBroken);
-        let lines = text(&render(&[r], 100, &Theme::plain()));
+        let lines = text(&render(&[r], 100, &Theme::plain(), MAX_AGE));
         let body = lines.join("\n");
         assert!(body.contains("auth broken"), "{body}");
         assert!(body.contains("re-auth claude-broke-cli"), "{body}");
@@ -644,7 +663,7 @@ mod tests {
     #[test]
     fn control_characters_in_an_account_id_never_reach_the_page() {
         let r = row("evil\u{1b}[2J", Health::Healthy);
-        let lines = render(&[r], 100, &Theme::plain());
+        let lines = render(&[r], 100, &Theme::plain(), MAX_AGE);
         for l in &lines {
             for s in &l.spans {
                 assert!(!s.content.contains('\u{1b}'), "{:?}", s.content);
@@ -693,13 +712,31 @@ mod tests {
             ..RateLimitSnapshot::default()
         });
         for width in [100u16, 86, 78, 62] {
-            let body = text(&render(std::slice::from_ref(&r), width, &Theme::plain())).join("\n");
+            let body = text(&render(
+                std::slice::from_ref(&r),
+                width,
+                &Theme::plain(),
+                MAX_AGE,
+            ))
+            .join("\n");
             assert!(body.contains("claude-main"), "{width}: {body}");
             assert!(body.contains("64%"), "{width}: {body}");
         }
-        let wide = text(&render(std::slice::from_ref(&r), 100, &Theme::plain())).join("\n");
+        let wide = text(&render(
+            std::slice::from_ref(&r),
+            100,
+            &Theme::plain(),
+            MAX_AGE,
+        ))
+        .join("\n");
         assert!(wide.contains("LIFETIME") && wide.contains("COST"));
-        let narrow = text(&render(std::slice::from_ref(&r), 62, &Theme::plain())).join("\n");
+        let narrow = text(&render(
+            std::slice::from_ref(&r),
+            62,
+            &Theme::plain(),
+            MAX_AGE,
+        ))
+        .join("\n");
         assert!(!narrow.contains("LIFETIME") && !narrow.contains("COST"));
         assert!(!narrow.contains("HEALTH"));
     }

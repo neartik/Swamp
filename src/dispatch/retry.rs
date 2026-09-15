@@ -24,9 +24,6 @@ use time::OffsetDateTime;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
-/// The default of `dispatch.quota_max_age`: past it an out-of-band probe is worth its cost.
-const DEFAULT_QUOTA_MAX_AGE: Duration = Duration::from_secs(60);
-
 const INITIAL_BACKOFF: Duration = Duration::from_secs(2);
 const MAX_BACKOFF: Duration = Duration::from_secs(120);
 
@@ -523,13 +520,18 @@ async fn observe_codex_quota(cx: &NodeCtx, lease: &Lease, model: &str, thread: O
     ) else {
         return;
     };
-    if let Some(quota) = codex_quota::estimated(
-        &state.window_tokens,
-        state.window_started_at,
-        window,
-        limit,
-        OffsetDateTime::now_utc(),
-    ) {
+    let now = OffsetDateTime::now_utc();
+    // A guess must never stand in for a measurement that has not rolled yet: the estimate is
+    // reached whenever the cached reading was fresh enough to skip the probe.
+    if state
+        .quota
+        .as_ref()
+        .and_then(|q| q.measured_utilization_at(now))
+        .is_some()
+    {
+        return;
+    }
+    if let Some(quota) = codex_quota::estimated(&state.window_tokens, window, limit, now) {
         cx.pool.observe_quota(&lease.account, quota);
     }
 }
@@ -544,11 +546,7 @@ fn account_state(cx: &NodeCtx, id: &AccountId) -> Option<AccountState> {
 
 /// A percentage older than `dispatch.quota_max_age` is what makes dispatch wrong.
 fn is_stale(cx: &NodeCtx, state: Option<&AccountState>) -> bool {
-    let max_age = cx
-        .cfg
-        .dispatch
-        .quota_max_age
-        .unwrap_or(DEFAULT_QUOTA_MAX_AGE);
+    let max_age = cx.cfg.quota_max_age();
     let now = OffsetDateTime::now_utc();
     state
         .and_then(|s| s.quota_observed_at)

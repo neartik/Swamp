@@ -177,6 +177,13 @@ impl Config {
             .unwrap_or(FALLBACK_NODE_TIMEOUT)
     }
 
+    /// How old a quota reading may be before `/usage` calls it stale and dispatch reprobes.
+    pub fn quota_max_age(&self) -> Duration {
+        self.dispatch
+            .quota_max_age
+            .unwrap_or(crate::dispatch::policy::DEFAULT_QUOTA_MAX_AGE)
+    }
+
     /// basis = Estimated. `None` when no `[pricing]` row exists, never `Some(0.0)`.
     pub fn estimate_cost(&self, model: &str, u: &Usage) -> Option<Cost> {
         let row = self.pricing.get(model)?;

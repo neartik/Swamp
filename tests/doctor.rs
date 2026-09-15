@@ -411,3 +411,51 @@ async fn the_brain_is_checked_the_same_way_as_a_worker() {
         "a brain that may run Bash must not warn"
     );
 }
+
+/// USAGE 1.7: the level follows the quota SOURCE, not merely the presence of a snapshot. An
+/// estimated snapshot is the case the check exists to flag.
+#[tokio::test]
+async fn the_quota_check_grades_the_source_and_prints_the_age() {
+    use swamp::dispatch::account::{AccountState, QuotaSource};
+    use swamp::model::core::{AccountId, LimitScope, LimitWindow, RateLimitSnapshot};
+
+    let f = Fixture::new();
+    let cfg = healthy(&f);
+    let now = time::OffsetDateTime::now_utc();
+    let snapshot = |utilization: f64, measured: bool| RateLimitSnapshot {
+        windows: vec![LimitWindow {
+            scope: LimitScope::SevenDay,
+            utilization,
+            resets_at: Some(now + time::Duration::hours(4)),
+            window_minutes: Some(10080),
+            measured,
+        }],
+        ..RateLimitSnapshot::default()
+    };
+    let mut state = swamp::dispatch::persist::StateMap::new();
+    let mut live = AccountState::default();
+    live.apply_quota(snapshot(0.13, true), QuotaSource::Telemetry, now);
+    state.insert(AccountId("main".into()), live);
+    let mut guessed = AccountState::default();
+    guessed.apply_quota(snapshot(0.02, false), QuotaSource::Estimated, now);
+    state.insert(AccountId("alt".into()), guessed);
+    std::fs::create_dir_all(&f.paths.home_swamp).expect("state dir");
+    swamp::dispatch::persist::save_state(&f.paths.accounts_state(), &state).expect("state file");
+
+    let out = checks(&cfg, &f.paths, false, false).await;
+    let check = |name: &str| {
+        out.iter()
+            .find(|c| c.name == format!("providers/{name}/quota"))
+            .unwrap_or_else(|| panic!("no quota check for {name}"))
+    };
+    assert_eq!(check("main").level, Level::Ok);
+    assert!(check("main").detail.contains("quota telemetry live"));
+    assert!(check("main").detail.contains("observed "));
+    assert_eq!(
+        check("alt").level,
+        Level::Warn,
+        "an estimated snapshot is not a quota source: {}",
+        check("alt").detail
+    );
+    assert!(check("alt").detail.contains("no quota source"));
+}

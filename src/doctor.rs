@@ -1,4 +1,5 @@
 use crate::config::Config;
+use crate::dispatch::account::QuotaSource;
 use crate::journal::paths::Paths;
 use crate::journal::record::{JournalEvent, JournalLine};
 use crate::model::core::{LimitScope, Provider, Tier};
@@ -260,32 +261,44 @@ async fn accounts(cfg: &Config, paths: &Paths, probe: bool, out: &mut Vec<Check>
 /// reduced to token share alone. Read from the last persisted snapshot, no network.
 fn quota(cfg: &Config, paths: &Paths, out: &mut Vec<Check>) {
     let state = crate::dispatch::persist::load_state(&paths.accounts_state()).unwrap_or_default();
+    let now = time::OffsetDateTime::now_utc();
     for account in &cfg.accounts {
         let name = format!("providers/{}/quota", account.id.0);
-        let snapshot = state.get(&account.id).and_then(|s| s.quota.as_ref());
-        let Some(snapshot) = snapshot else {
-            out.push(Check::new(
-                name,
+        let entry = state.get(&account.id);
+        let source = entry.and_then(|s| s.quota_source);
+        // An estimate is not a source: dispatch is balancing that account on token share.
+        let (level, head) = match source {
+            Some(QuotaSource::Telemetry) => (Level::Ok, "quota telemetry live"),
+            Some(QuotaSource::Rollout) => (Level::Note, "quota via rollout"),
+            Some(QuotaSource::AppServer) => (Level::Note, "quota via app-server"),
+            Some(QuotaSource::Estimated) | None => (
                 Level::Warn,
-                "no quota source; utilization is estimated from token counters alone",
+                "no quota source; tokens only, utilization is estimated",
+            ),
+        };
+        let mut detail = head.to_owned();
+        if let Some(snapshot) = entry.and_then(|s| s.quota.as_ref()) {
+            let window = |scope| {
+                snapshot.windows.iter().find(|w| w.scope == scope).map(|w| {
+                    let tilde = if w.measured { "" } else { "~" };
+                    format!("{tilde}{:.0}%", w.utilization * 100.0)
+                })
+            };
+            if let Some(u) = window(LimitScope::FiveHour) {
+                detail.push_str(&format!("  5h {u}"));
+            }
+            if let Some(u) = window(LimitScope::SevenDay) {
+                detail.push_str(&format!("  7d {u}"));
+            }
+        }
+        if let Some(at) = entry.and_then(|s| s.quota_observed_at) {
+            let secs = (now - at).whole_seconds().max(0) as u64;
+            detail.push_str(&format!(
+                "  observed {} ago",
+                crate::ui::fmt::until(Duration::from_secs(secs))
             ));
-            continue;
-        };
-        let window = |scope| {
-            snapshot
-                .windows
-                .iter()
-                .find(|w| w.scope == scope)
-                .map(|w| format!("{:.0}%", w.utilization * 100.0))
-        };
-        let mut detail = "quota telemetry available".to_owned();
-        if let Some(u) = window(LimitScope::FiveHour) {
-            detail.push_str(&format!("  5h {u}"));
         }
-        if let Some(u) = window(LimitScope::SevenDay) {
-            detail.push_str(&format!("  7d {u}"));
-        }
-        out.push(Check::new(name, Level::Ok, detail));
+        out.push(Check::new(name, level, detail));
     }
 }
 

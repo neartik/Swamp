@@ -129,6 +129,14 @@ pub fn problems(cfg: &Config) -> Vec<Problem> {
         );
     }
     for (p, pc) in &cfg.providers {
+        if let Some(src) = pc.quota_source.as_deref()
+            && !matches!(src, "auto" | "rollout" | "app-server" | "none")
+        {
+            push(
+                format!("providers.{p}.quota_source"),
+                format!("`{src}` is not one of auto, rollout, app-server, none"),
+            );
+        }
         if pc.estimated_window.is_some() != pc.estimated_window_tokens.is_some() {
             push(
                 format!("providers.{p}.estimated_window"),

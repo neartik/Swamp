@@ -16,6 +16,16 @@ pub fn duration(d: Duration) -> String {
     }
 }
 
+/// "6d21h", then "3h02m": a span the RESETS column has nine columns for.
+pub fn until(d: Duration) -> String {
+    let secs = d.as_secs();
+    if secs >= 86_400 {
+        let (days, hours) = (secs / 86_400, (secs % 86_400) / 3600);
+        return format!("{days}d{hours:02}h");
+    }
+    duration(d)
+}
+
 /// "1.2M"
 pub fn tokens(n: u64) -> String {
     let (value, unit) = match n {

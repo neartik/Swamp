@@ -713,3 +713,181 @@ async fn usage_is_cumulative_live_and_committed_once() {
     assert_eq!(after.window_tokens.billable(), 200);
     assert_eq!(after.lifetime_tokens.billable(), 200);
 }
+
+/// A measured window whose reset has passed is stale, not a gate: the account has to come back
+/// on its own, because only a node running on it could ever refresh the reading.
+#[tokio::test]
+async fn a_window_past_its_reset_stops_gating_dispatch() {
+    let h = harness(TWO_UNCAPPED).await;
+    let now = OffsetDateTime::now_utc();
+    for who in ["main", "alt"] {
+        h.pool.observe_quota(
+            &id(who),
+            RateLimitSnapshot {
+                status: LimitStatus::Warning,
+                windows: vec![LimitWindow {
+                    scope: LimitScope::FiveHour,
+                    utilization: 0.99,
+                    resets_at: Some(now - Duration::from_secs(60)),
+                    measured: true,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+        );
+    }
+    assert!(
+        h.pool
+            .all_exhausted(Provider::Anthropic, &HashSet::new())
+            .is_none(),
+        "a rolled window must not leave the pool permanently exhausted"
+    );
+    acquire(&h.pool, 200).await.expect("the window has rolled");
+}
+
+/// A provider whose accounts are all hard-gated is exactly where failover is the only help,
+/// so the predicate `retry.rs` uses has to answer for it too.
+#[tokio::test]
+async fn a_hard_gated_provider_reports_no_capacity_for_failover() {
+    let h = harness(TWO_UNCAPPED).await;
+    for who in ["main", "alt"] {
+        h.pool.report(
+            &id(who),
+            Some(&Failure::AuthExpired {
+                detected_by: Detector::ExitCode,
+                detail: "token expired".into(),
+            }),
+            None,
+        );
+    }
+    let Some(NoCapacity::Exhausted { reason }) =
+        h.pool.all_exhausted(Provider::Anthropic, &HashSet::new())
+    else {
+        panic!("auth-broken accounts are capacity the pool will never regain");
+    };
+    assert!(reason.contains("re-authentication"), "{reason}");
+}
+
+/// Two buckets are two allowances: a snapshot for one must not inherit the other's windows.
+#[test]
+fn a_snapshot_never_merges_across_limit_buckets() {
+    let now = OffsetDateTime::now_utc();
+    let mut state = AccountState::default();
+    state.apply_quota(
+        RateLimitSnapshot {
+            limit_id: Some("codex".into()),
+            windows: vec![
+                LimitWindow {
+                    scope: LimitScope::FiveHour,
+                    utilization: 0.97,
+                    resets_at: Some(now + Duration::from_secs(3600)),
+                    measured: true,
+                    ..Default::default()
+                },
+                LimitWindow {
+                    scope: LimitScope::SevenDay,
+                    utilization: 0.30,
+                    resets_at: Some(now + Duration::from_secs(86400)),
+                    measured: true,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        },
+        swamp::dispatch::account::QuotaSource::AppServer,
+        now,
+    );
+    state.apply_quota(
+        RateLimitSnapshot {
+            limit_id: Some("codex_bengalfox".into()),
+            windows: vec![LimitWindow {
+                scope: LimitScope::SevenDay,
+                utilization: 0.0,
+                resets_at: Some(now + Duration::from_secs(86400)),
+                measured: true,
+                ..Default::default()
+            }],
+            ..Default::default()
+        },
+        swamp::dispatch::account::QuotaSource::AppServer,
+        now,
+    );
+    let quota = state.quota.as_ref().expect("a snapshot");
+    assert_eq!(quota.limit_id.as_deref(), Some("codex_bengalfox"));
+    assert_eq!(quota.measured_utilization_at(now), Some(0.0));
+    assert_eq!(
+        state.quota_buckets["codex"].measured_utilization_at(now),
+        Some(0.97),
+        "the other bucket keeps its own windows"
+    );
+}
+
+/// The token counter is keyed to the longest window, so a five-hour reading overtaking a
+/// seven-day one is not a roll and must not zero what the account has spent.
+#[test]
+fn the_token_window_does_not_roll_when_the_tightest_scope_changes() {
+    let now = OffsetDateTime::now_utc();
+    let five = now + Duration::from_secs(3600);
+    let seven = now + Duration::from_secs(86400);
+    let snapshot = |five_util: f64| RateLimitSnapshot {
+        windows: vec![
+            LimitWindow {
+                scope: LimitScope::FiveHour,
+                utilization: five_util,
+                resets_at: Some(five),
+                window_minutes: Some(300),
+                measured: true,
+            },
+            LimitWindow {
+                scope: LimitScope::SevenDay,
+                utilization: 0.64,
+                resets_at: Some(seven),
+                window_minutes: Some(10080),
+                measured: true,
+            },
+        ],
+        ..Default::default()
+    };
+    let mut state = AccountState::default();
+    state.apply_quota(
+        snapshot(0.10),
+        swamp::dispatch::account::QuotaSource::Telemetry,
+        now,
+    );
+    state.credit_tokens(&tokens(800_000));
+    let rolled = state.apply_quota(
+        snapshot(0.70),
+        swamp::dispatch::account::QuotaSource::Telemetry,
+        now,
+    );
+    assert!(!rolled, "no window rolled, only the tightest one changed");
+    assert_eq!(state.window_tokens.billable(), 800_000);
+}
+
+/// An estimate stands in for a missing measurement, never for a live one.
+#[test]
+fn an_estimate_never_replaces_a_measurement_that_has_not_rolled() {
+    let now = OffsetDateTime::now_utc();
+    let measured = RateLimitSnapshot {
+        windows: vec![LimitWindow {
+            scope: LimitScope::SevenDay,
+            utilization: 0.99,
+            resets_at: Some(now + Duration::from_secs(86400)),
+            measured: true,
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let estimate = RateLimitSnapshot {
+        windows: vec![LimitWindow {
+            scope: LimitScope::SevenDay,
+            utilization: 0.04,
+            resets_at: Some(now + Duration::from_secs(86400)),
+            measured: false,
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let merged = estimate.merged_over(&measured, now);
+    assert_eq!(merged.measured_utilization_at(now), Some(0.99));
+}

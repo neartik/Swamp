@@ -180,7 +180,7 @@ Commands: `/help`, `/status`, `/accounts`, `/usage [--json]`, `/trace [node]`, `
 
 `[ui]` settings: `chat_theme` (`auto`, `truecolor`, `ansi256`, `plain`), `collapse_lines`
 (default 3), `chat_history` (default 500 entries, kept in `.swamp/chat_history`), `refresh_hz`
-(default 12), `show_thinking`.
+(default 20), `show_thinking`.
 
 ## Commands
 
@@ -211,7 +211,6 @@ Swamp adds `/.swamp/` to `.git/info/exclude`, never to a tracked `.gitignore`.
   runs/<run_id>/
     run.json                   header: cwd, git HEAD, config hash, version, argv
     journal.jsonl              the run tree, append-only, one JSON object per line
-    ctl.sock                   MCP control socket, 0600 in a 0700 directory
     tools/                     the arguments of every brain tool call
     nodes/<node_short>/
       prompt.md                the exact bytes fed to the worker's stdin
@@ -226,6 +225,7 @@ Swamp adds `/.swamp/` to `.git/info/exclude`, never to a tracked `.gitignore`.
 
 ~/.swamp/
   accounts.json                cross-run, cross-repo quota and cooldown state (file-locked)
+  sock/<run_short>.sock        MCP control socket, 0600 in a 0700 directory
   worktrees/<repo>-<hash8>/<run_short>/<node_short>-<attempt>/
 ```
 

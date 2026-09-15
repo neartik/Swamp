@@ -513,7 +513,7 @@ tests/account_pool.rs
 // pool.rs
 pub struct AccountPool { /* ... */ }
 pub struct Lease { pub account: AccountId, pub exec: String, pub env: BTreeMap<String, String> }
-pub enum NoCapacity { AllCooling { retry_at: OffsetDateTime }, Saturated, Exhausted { reason: String } }
+pub enum NoCapacity { AllExhausted { retry_at: OffsetDateTime, why: String }, Saturated, Exhausted { reason: String }, Cancelled }
 
 impl AccountPool {
     pub fn new(cfg: Arc<Config>, state_path: Utf8PathBuf, journal: JournalHandle) -> anyhow::Result<Arc<Self>>;

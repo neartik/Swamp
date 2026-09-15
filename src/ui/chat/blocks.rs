@@ -57,6 +57,15 @@ pub enum Block {
         head: String,
         body: Vec<String>,
     },
+    /// `/usage` while an out-of-band probe is in flight: drawn live, committed once the
+    /// readings land or the wait runs out, so the table is re-rendered at most once.
+    Usage {
+        rows: Vec<crate::ui::usage::AccountRow>,
+        waiting: Vec<crate::model::core::AccountId>,
+        since: time::OffsetDateTime,
+        until: time::OffsetDateTime,
+        max_age: std::time::Duration,
+    },
 }
 
 /// Everything a block needs to draw itself, live or committed.
@@ -89,6 +98,9 @@ impl Block {
                 ..
             } => tool(name, preview, *state, result, *expanded, cx),
             Block::Dispatch(batch) => batch.render(cx.width, t, cx.tick, !cx.live),
+            Block::Usage { rows, max_age, .. } => {
+                crate::ui::usage::render(rows, cx.width, t, *max_age)
+            }
             Block::Slash { title, body } => {
                 let mut out = Vec::new();
                 if !title.is_empty() {

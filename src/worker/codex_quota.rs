@@ -270,9 +270,11 @@ fn find_rollout(dir: &Utf8Path, thread_id: &str, depth: usize) -> Option<Utf8Pat
 
 /// Swamp's own counters against a configured window size. Never a measurement, so it can
 /// only deprioritise an account: Swamp does not know an OpenAI plan's real ceiling.
+/// The window boundary is quantised on the epoch rather than taken from the account's
+/// `window_started_at`: that field is written by the roll this estimate triggers, so keying on
+/// it would make every observation a fresh window and zero the counter it just read.
 pub fn estimated(
     window_tokens: &Usage,
-    window_started_at: Option<OffsetDateTime>,
     window: std::time::Duration,
     window_limit: u64,
     now: OffsetDateTime,
@@ -280,9 +282,13 @@ pub fn estimated(
     if window_limit == 0 {
         return None;
     }
-    let minutes = (window.as_secs() / 60) as u32;
-    let started = window_started_at.unwrap_or(now);
-    let resets_at = time::Duration::try_from(window).ok().map(|d| started + d);
+    let secs = window.as_secs();
+    if secs == 0 {
+        return None;
+    }
+    let minutes = (secs / 60) as u32;
+    let started = now.unix_timestamp() - now.unix_timestamp().rem_euclid(secs as i64);
+    let resets_at = OffsetDateTime::from_unix_timestamp(started + secs as i64).ok();
     Some(RateLimitSnapshot {
         status: LimitStatus::Allowed,
         windows: vec![LimitWindow {
@@ -302,7 +308,8 @@ pub async fn resolve_codex_home(exec: &str, env: &BTreeMap<String, String>) -> O
     if let Some(home) = env.get("CODEX_HOME") {
         return Some(Utf8PathBuf::from(home));
     }
-    if let Some(hit) = homes().lock().get(exec) {
+    let key = home_key(exec, env);
+    if let Some(hit) = homes().lock().get(&key) {
         return hit.clone();
     }
     let found = match probe(exec, env).await {
@@ -312,8 +319,21 @@ pub async fn resolve_codex_home(exec: &str, env: &BTreeMap<String, String>) -> O
             None
         }
     };
-    homes().lock().insert(exec.to_owned(), found.clone());
+    homes().lock().insert(key, found.clone());
     found
+}
+
+/// The resolved home depends on the whole environment the app-server is spawned with, so two
+/// accounts sharing an executable must not share a cache entry.
+fn home_key(exec: &str, env: &BTreeMap<String, String>) -> String {
+    let mut key = exec.to_owned();
+    for (k, v) in env {
+        key.push('\u{0}');
+        key.push_str(k);
+        key.push('=');
+        key.push_str(v);
+    }
+    key
 }
 
 /// `initialize` -> `initialized` -> `account/rateLimits/read` on stdio. Free of model tokens,
@@ -325,7 +345,7 @@ pub async fn read_rate_limits(
 ) -> anyhow::Result<RateLimitsRead> {
     let (home, read) = probe(exec, env).await?;
     if home.is_some() && !env.contains_key("CODEX_HOME") {
-        homes().lock().insert(exec.to_owned(), home);
+        homes().lock().insert(home_key(exec, env), home);
     }
     read.ok_or_else(|| anyhow::anyhow!("{exec} app-server returned no rate limits"))
 }
@@ -558,19 +578,11 @@ mod tests {
             ..Usage::default()
         };
         assert!(
-            estimated(
-                &spent,
-                None,
-                std::time::Duration::from_secs(7 * 86400),
-                0,
-                now()
-            )
-            .is_none(),
+            estimated(&spent, std::time::Duration::from_secs(7 * 86400), 0, now()).is_none(),
             "0 means no estimate, not 100%"
         );
         let snap = estimated(
             &spent,
-            Some(now()),
             std::time::Duration::from_secs(7 * 86400),
             10_000,
             now(),
@@ -584,6 +596,37 @@ mod tests {
             None,
             "an estimate never parks an account"
         );
+    }
+
+    /// The estimated window is keyed to a fixed boundary, so two observations inside one
+    /// window agree and the counter is not re-rolled (and zeroed) on every node.
+    #[test]
+    fn two_estimates_in_one_window_agree_and_the_next_window_moves_on() {
+        let spent = Usage {
+            input_tokens: 1_000,
+            ..Usage::default()
+        };
+        let window = std::time::Duration::from_secs(7 * 86400);
+        let first = estimated(&spent, window, 10_000, now()).expect("estimate");
+        let later =
+            estimated(&spent, window, 10_000, now() + time::Duration::hours(6)).expect("estimate");
+        assert_eq!(first.windows[0].resets_at, later.windows[0].resets_at);
+
+        let next = estimated(&spent, window, 10_000, now() + time::Duration::days(8))
+            .expect("estimate")
+            .windows[0]
+            .resets_at;
+        assert!(next > first.windows[0].resets_at, "the window has to roll");
+    }
+
+    /// Two accounts sharing an executable differ by their env overlay, so the resolved
+    /// CODEX_HOME cannot be cached under the executable alone.
+    #[test]
+    fn the_codex_home_cache_key_separates_two_env_overlays() {
+        let personal = BTreeMap::from([("HOME".to_owned(), "/p".to_owned())]);
+        let work = BTreeMap::from([("HOME".to_owned(), "/w".to_owned())]);
+        assert_ne!(home_key("codex", &personal), home_key("codex", &work));
+        assert_eq!(home_key("codex", &personal), home_key("codex", &personal));
     }
 
     #[test]

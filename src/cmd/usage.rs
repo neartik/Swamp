@@ -49,7 +49,7 @@ pub async fn run(ctx: &Ctx, args: &UsageArgs) -> anyhow::Result<i32> {
 
     let width = terminal_width();
     let theme = Theme::detect(ctx.color, None);
-    let lines = usage::render(&rows, width, &theme);
+    let lines = usage::render(&rows, width, &theme, ctx.cfg.quota_max_age());
     let text = crate::ui::chat::blocks::text_of(&lines).join("\n");
     ctx.out(&format!("{text}\n"));
     Ok(0)

@@ -32,7 +32,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use time::OffsetDateTime;
 
-const DEFAULT_REFRESH_HZ: u16 = 12;
+const DEFAULT_REFRESH_HZ: u16 = 20;
 const DEFAULT_HISTORY: usize = 500;
 /// How long a resize burst has to stay quiet before the live area is repaired.
 const RESIZE_QUIET: Duration = Duration::from_millis(50);
@@ -118,6 +118,7 @@ async fn interactive(
     );
     let mut app = App::new(paths.run, theme, welcome(ctx, &disp), history, &cfg);
     app.set_pool(disp.pool().snapshot());
+    app.set_stale_accounts(disp.pool().unconfigured());
 
     let mut tailer = Tailer::open(&paths.journal())?;
     let period = Duration::from_millis(
@@ -230,6 +231,7 @@ async fn interactive(
                     );
                     effects.extend(app.trace_output(&text));
                 }
+                Effect::ProbeQuota(ids) => probe_quota(&cfg, &disp, ids),
                 Effect::Clear => term.clear_screen()?,
                 Effect::Quit(c) => quit = Some(c),
             }
@@ -243,6 +245,39 @@ async fn interactive(
     println!();
     brain.shutdown().await?;
     Ok(code)
+}
+
+/// One `account/rateLimits/read` per stale account, off the chat loop: the table is already
+/// on screen and re-renders itself when a reading lands.
+fn probe_quota(
+    cfg: &Arc<crate::config::Config>,
+    disp: &Arc<Dispatcher>,
+    ids: Vec<crate::model::core::AccountId>,
+) {
+    for id in ids {
+        let Some(account) = cfg.accounts.iter().find(|a| a.id == id) else {
+            continue;
+        };
+        let (exec, limit_id) = (account.exec.clone(), account.limit_id.clone());
+        let env = crate::config::resolve::expand_env(&account.env);
+        let pool = Arc::clone(disp.pool());
+        tokio::spawn(async move {
+            let read = tokio::time::timeout(
+                crate::worker::codex_quota::PROBE_TIMEOUT,
+                crate::worker::codex_quota::read_rate_limits(&exec, &env),
+            )
+            .await;
+            if let Ok(Ok(read)) = read
+                && let Some(snap) = read.select(limit_id.as_deref(), None)
+            {
+                pool.observe_quota_from(
+                    &id,
+                    snap,
+                    crate::dispatch::account::QuotaSource::AppServer,
+                );
+            }
+        });
+    }
 }
 
 fn size() -> (u16, u16) {

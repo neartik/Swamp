@@ -669,3 +669,20 @@ limit_id = "codex"
     let cfg = sb.load(Some(&path), None).expect("valid keys load clean");
     assert_eq!(cfg.accounts[0].limit_id.as_deref(), Some("codex"));
 }
+
+/// `quota_source` is a closed set: a typo used to fall through to `auto`, quietly doing the
+/// opposite of what the user asked for.
+#[test]
+fn an_unknown_quota_source_is_rejected_by_name() {
+    let sb = Sandbox::new();
+    let path = sb.write(
+        "bad_source.toml",
+        r#"
+[providers.openai]
+quota_source = "app_server"
+"#,
+    );
+    let text = err_text(&sb.load(Some(&path), None).unwrap_err());
+    assert!(text.contains("providers.openai.quota_source"), "{text}");
+    assert!(text.contains("app-server"), "{text}");
+}

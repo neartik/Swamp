@@ -291,6 +291,8 @@ impl AccountPool {
             Capacity::AllExhausted { retry_at, why } => {
                 Some(NoCapacity::AllExhausted { retry_at, why })
             }
+            // No timer will rescue this provider, so failover is the only thing that can.
+            Capacity::Exhausted { reason } => Some(NoCapacity::Exhausted { reason }),
             _ => None,
         }
     }
@@ -567,8 +569,35 @@ impl AccountPool {
         Some(best)
     }
 
+    /// Whether holding one account back would leave the workers with none. Counting
+    /// configured accounts is not enough: a disabled or auth-broken peer cannot take work.
     fn solo(&self, p: Provider) -> bool {
-        self.accounts.values().filter(|a| a.provider == p).count() < 2
+        self.usable(p) < 2
+    }
+
+    /// Accounts of `p` that could take a node right now, reservation ignored.
+    fn usable(&self, p: Provider) -> usize {
+        let now = OffsetDateTime::now_utc();
+        let candidates: Vec<&Account> =
+            self.accounts.values().filter(|a| a.provider == p).collect();
+        let state = self.state.lock();
+        let ledger = self.ledger.lock();
+        let live = live_states(&state, &ledger, &candidates);
+        let pool_window = pool_window(&live);
+        live.iter()
+            .filter(|(a, s)| score(self.policy, a, s, pool_window, &self.scoring, now).is_some())
+            .count()
+    }
+
+    /// Accounts the shared state file remembers but this repo's config no longer names.
+    /// `/usage` lists them last; the pool never dispatches to them.
+    pub fn unconfigured(&self) -> Vec<(AccountId, AccountState)> {
+        self.state
+            .lock()
+            .iter()
+            .filter(|(id, _)| !self.accounts.contains_key(id))
+            .map(|(id, s)| (id.clone(), s.clone()))
+            .collect()
     }
 
     /// Loop iterations spent inside `acquire`. A spinning pool shows up here.
@@ -698,7 +727,7 @@ impl AccountPool {
         let util = s
             .quota
             .as_ref()
-            .and_then(|q| q.measured_utilization())
+            .and_then(|q| q.measured_utilization_at(now))
             .unwrap_or(0.0);
         let scope = scope_word(
             s.quota
@@ -913,7 +942,11 @@ async fn cancelled(token: Option<&CancellationToken>) {
 }
 
 fn health_from_quota(s: &AccountState, warn_at: f64) -> Health {
-    let util = s.quota.as_ref().map_or(0.0, |q| q.worst_utilization());
+    let now = OffsetDateTime::now_utc();
+    let util = s
+        .quota
+        .as_ref()
+        .map_or(0.0, |q| q.worst_utilization_at(now));
     if util >= warn_at {
         Health::Degraded
     } else {

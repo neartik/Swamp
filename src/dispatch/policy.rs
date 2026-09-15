@@ -7,6 +7,7 @@ use time::OffsetDateTime;
 pub const DEFAULT_QUOTA_WARN: f64 = 0.90;
 pub const DEFAULT_QUOTA_STOP: f64 = 0.98;
 pub const DEFAULT_NEAR_EXHAUSTION_PENALTY: f64 = 2.0;
+pub const DEFAULT_QUOTA_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(60);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -140,15 +141,20 @@ pub fn score(
     }
     // Proactive, before any provider error, and on MEASURED windows only: an estimate is a
     // guess and must never park a working subscription.
+    // A window whose reset has passed measures an allowance that has already rolled: gating
+    // on it strands the account forever, because only a node running on it can refresh it.
     if s.quota
         .as_ref()
-        .and_then(|q| q.measured_utilization())
+        .and_then(|q| q.measured_utilization_at(now))
         .is_some_and(|u| u >= cfg.stop_at)
     {
         return None;
     }
 
-    let util = s.quota.as_ref().map_or(0.0, |q| q.worst_utilization());
+    let util = s
+        .quota
+        .as_ref()
+        .map_or(0.0, |q| q.worst_utilization_at(now));
     let load = load(a, s);
     let share = s.window_tokens.billable() as f64 / pool_window.max(1) as f64;
     let idle = s.last_used.map_or(1.0, |t| {

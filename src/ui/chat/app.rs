@@ -23,6 +23,8 @@ pub const MIN_LIVE: u16 = 4;
 const ARM: Duration = Duration::from_secs(2);
 const NOTE: Duration = Duration::from_secs(3);
 const DEFAULT_COLLAPSE: usize = 3;
+/// How long `/usage` keeps its table live waiting for an out-of-band reading to land.
+const USAGE_PROBE_WAIT: Duration = Duration::from_secs(10);
 const DIFF_COLLAPSE: usize = 10;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -53,6 +55,8 @@ pub enum Effect {
     Trace(Option<NodeId>),
     Clear,
     Quit(i32),
+    /// §3.2: one out-of-band quota probe per account whose reading has gone stale.
+    ProbeQuota(Vec<AccountId>),
 }
 
 pub struct App {
@@ -67,6 +71,9 @@ pub struct App {
     pub pool: Vec<(Provider, AccountId, AccountState)>,
     /// `exec` and `max_concurrency` for `/usage`; the pool snapshot alone does not carry them.
     account_cfg: Vec<AccountCfg>,
+    /// Accounts `accounts.json` remembers that this repo's config no longer names.
+    stale_accounts: Vec<(AccountId, AccountState)>,
+    quota_max_age: Duration,
     pub blocks: Vec<Block>,
     pub editor: Editor,
     pub history: History,
@@ -113,6 +120,8 @@ impl App {
             view: RunView::default(),
             pool: Vec::new(),
             account_cfg: cfg.accounts.clone(),
+            stale_accounts: Vec::new(),
+            quota_max_age: cfg.quota_max_age(),
             blocks: Vec::new(),
             editor: Editor::default(),
             history,
@@ -181,6 +190,44 @@ impl App {
 
     pub fn set_pool(&mut self, pool: Vec<(Provider, AccountId, AccountState)>) {
         self.pool = pool;
+        self.refresh_usage();
+    }
+
+    /// The state file's own entries for accounts this repo does not configure. `swamp usage`
+    /// lists them last, and `/usage` renders the same bytes only if it sees them too.
+    pub fn set_stale_accounts(&mut self, stale: Vec<(AccountId, AccountState)>) {
+        self.stale_accounts = stale;
+        self.refresh_usage();
+    }
+
+    /// A live `/usage` table redraws from the pool, and stops waiting on a probe that landed.
+    fn refresh_usage(&mut self) {
+        if !self.blocks.iter().any(|b| matches!(b, Block::Usage { .. })) {
+            return;
+        }
+        let rows = crate::ui::usage::rows_from(&self.account_cfg, &self.pool, &self.stale_accounts);
+        let observed: Vec<(AccountId, Option<OffsetDateTime>)> = self
+            .pool
+            .iter()
+            .map(|(_, id, s)| (id.clone(), s.quota_observed_at))
+            .collect();
+        for block in &mut self.blocks {
+            if let Block::Usage {
+                rows: r,
+                waiting,
+                since,
+                ..
+            } = block
+            {
+                *r = rows.clone();
+                let since = *since;
+                waiting.retain(|id| {
+                    !observed
+                        .iter()
+                        .any(|(who, at)| who == id && at.is_some_and(|at| at > since))
+                });
+            }
+        }
     }
 
     /// The same liveness rule `swamp watch` uses: a dead worker stops spinning forever.
@@ -194,7 +241,8 @@ impl App {
 
     /// Whether anything on screen is animating; an idle chat must not wake 12 times a second.
     pub fn animating(&self) -> bool {
-        self.working()
+        self.blocks.iter().any(|b| matches!(b, Block::Usage { .. }))
+            || self.working()
             || self.note.is_some()
             || self.esc_armed.is_some()
             || self.quit_armed.is_some()
@@ -490,8 +538,10 @@ impl App {
 
     /// Commits every live block that has nothing left to say.
     fn sweep(&mut self) -> Vec<Effect> {
+        let now = self.now;
         let Some(at) = self.blocks.iter().position(|b| match b {
             Block::Dispatch(batch) => batch.done(),
+            Block::Usage { waiting, until, .. } => waiting.is_empty() || *until <= now,
             _ => false,
         }) else {
             return Vec::new();
@@ -861,7 +911,7 @@ impl App {
                 let body = self.accounts_body();
                 vec![self.output("", body)]
             }
-            "usage" => vec![self.usage_output(arg.as_deref() == Some("--json"))],
+            "usage" => self.usage_output(arg.as_deref() == Some("--json")),
             "cost" => {
                 let body = self.cost_body();
                 vec![self.output("", body)]
@@ -1018,18 +1068,44 @@ impl App {
 
     /// Shares `ui::usage::render` byte-for-byte with `swamp usage`; only `--json` goes through
     /// `Block::Slash` since a table needs its own colouring, not the block's flat `meta`.
-    fn usage_output(&mut self, json: bool) -> Effect {
-        let stale: Vec<(AccountId, AccountState)> = Vec::new();
-        let rows = crate::ui::usage::rows_from(&self.account_cfg, &self.pool, &stale);
+    fn usage_output(&mut self, json: bool) -> Vec<Effect> {
+        let rows = crate::ui::usage::rows_from(&self.account_cfg, &self.pool, &self.stale_accounts);
         if json {
             let text =
                 serde_json::to_string_pretty(&crate::ui::usage::json(&rows)).unwrap_or_default();
             let mut body: Vec<String> = vec!["```json".to_owned()];
             body.extend(text.lines().map(str::to_owned));
             body.push("```".to_owned());
-            return self.output("", body);
+            return vec![self.output("", body)];
         }
-        Effect::Commit(crate::ui::usage::render(&rows, self.width, &self.theme))
+        // Anthropic telemetry only arrives inside a worker stream, so only OpenAI accounts
+        // have anything to probe.
+        let waiting: Vec<AccountId> = self
+            .pool
+            .iter()
+            .filter(|(p, _, s)| {
+                *p == Provider::Openai
+                    && s.quota_observed_at
+                        .is_none_or(|at| (self.now - at) > self.quota_max_age)
+            })
+            .map(|(_, id, _)| id.clone())
+            .collect();
+        if waiting.is_empty() {
+            return vec![Effect::Commit(crate::ui::usage::render(
+                &rows,
+                self.width,
+                &self.theme,
+                self.quota_max_age,
+            ))];
+        }
+        self.blocks.push(Block::Usage {
+            rows,
+            waiting: waiting.clone(),
+            since: self.now,
+            until: self.now + USAGE_PROBE_WAIT,
+            max_age: self.quota_max_age,
+        });
+        vec![Effect::ProbeQuota(waiting)]
     }
 
     fn cost_body(&self) -> Vec<String> {

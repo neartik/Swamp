@@ -64,10 +64,15 @@ pub struct WindowKey {
 }
 
 impl WindowKey {
-    /// The window a snapshot keys its counters to: the tightest one, which is also the one
-    /// dispatch scores against. A snapshot with no reset time keys nothing.
+    /// The window a snapshot keys its counters to: the longest one it carries. Keying on the
+    /// tightest window instead would re-key whenever another scope overtook it, zeroing a
+    /// counter no window had actually rolled. A snapshot with no reset time keys nothing.
     pub fn of(snap: &RateLimitSnapshot) -> Option<Self> {
-        let w = snap.tightest()?;
+        let w = snap
+            .named()
+            .filter(|w| w.resets_at.is_some())
+            .max_by_key(|w| w.minutes())
+            .or_else(|| snap.tightest())?;
         Some(Self {
             scope: w.scope,
             resets_at: w.resets_at.or(snap.resets_at)?,
@@ -122,9 +127,11 @@ impl AccountState {
         source: QuotaSource,
         now: OffsetDateTime,
     ) -> bool {
+        // Two buckets are two allowances: merging across them lets one bucket inherit the
+        // other's windows and park a model family that has no limit at all.
         let merged = match &self.quota {
-            Some(prev) => snap.merged_over(prev),
-            None => snap,
+            Some(prev) if prev.limit_id == snap.limit_id => snap.merged_over(prev, now),
+            _ => snap,
         };
         let rolled = self.roll_window(WindowKey::of(&merged), now);
         if let Some(id) = merged.limit_id.clone() {

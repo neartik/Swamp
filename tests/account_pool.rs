@@ -613,3 +613,18 @@ async fn reporting_accumulates_lifetime_counters() {
     assert_eq!(state.lifetime_nodes, 2);
     assert!((state.lifetime_cost_usd - 1.5).abs() < f64::EPSILON);
 }
+
+/// Counting configured accounts is not enough: a peer that cannot take work is not a peer, and
+/// holding back the only usable account leaves every worker with nothing to lease.
+#[tokio::test]
+async fn the_brain_never_reserves_the_last_usable_account() {
+    let h = harness(TWO_ACCOUNTS).await;
+    h.pool.set_enabled(&id("alt"), false);
+    assert_eq!(
+        h.pool.reserve_for_brain(Provider::Anthropic),
+        None,
+        "main is the only account left that can run anything"
+    );
+    let lease = acquire(&h.pool).await.expect("a worker lease");
+    assert_eq!(lease.account, id("main"));
+}

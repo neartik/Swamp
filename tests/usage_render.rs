@@ -10,6 +10,7 @@ use ratatui::{TerminalOptions, Viewport};
 use std::collections::BTreeMap;
 use support::Harness;
 use swamp::dispatch::account::{AccountState, Health, QuotaSource};
+use swamp::dispatch::policy::DEFAULT_QUOTA_MAX_AGE as MAX_AGE;
 use swamp::model::core::{
     AccountId, LimitReached, LimitScope, LimitStatus, LimitWindow, Provider, RateLimitSnapshot,
     Usage,
@@ -88,7 +89,7 @@ fn the_table_drops_columns_in_the_documented_order() {
     );
     for width in [100u16, 86, 78, 62] {
         let body = screen(
-            &usage::render(std::slice::from_ref(&r), width, &Theme::plain()),
+            &usage::render(std::slice::from_ref(&r), width, &Theme::plain(), MAX_AGE),
             width,
         );
         assert!(body.contains("claude-main"), "{width}: {body}");
@@ -96,20 +97,20 @@ fn the_table_drops_columns_in_the_documented_order() {
         assert!(body.contains("WINDOW"), "{width}: {body}");
     }
     let wide = screen(
-        &usage::render(std::slice::from_ref(&r), 100, &Theme::plain()),
+        &usage::render(std::slice::from_ref(&r), 100, &Theme::plain(), MAX_AGE),
         100,
     );
     assert!(wide.contains("LIFETIME") && wide.contains("COST") && wide.contains("HEALTH"));
 
     let below_lifetime = screen(
-        &usage::render(std::slice::from_ref(&r), 90, &Theme::plain()),
+        &usage::render(std::slice::from_ref(&r), 90, &Theme::plain(), MAX_AGE),
         90,
     );
     assert!(!below_lifetime.contains("LIFETIME"), "{below_lifetime}");
     assert!(below_lifetime.contains("COST"), "{below_lifetime}");
 
     let below_cost = screen(
-        &usage::render(std::slice::from_ref(&r), 80, &Theme::plain()),
+        &usage::render(std::slice::from_ref(&r), 80, &Theme::plain(), MAX_AGE),
         80,
     );
     assert!(!below_cost.contains("COST"), "{below_cost}");
@@ -119,14 +120,14 @@ fn the_table_drops_columns_in_the_documented_order() {
     );
 
     let collapsed = screen(
-        &usage::render(std::slice::from_ref(&r), 70, &Theme::plain()),
+        &usage::render(std::slice::from_ref(&r), 70, &Theme::plain(), MAX_AGE),
         70,
     );
     assert!(!collapsed.contains("7D"), "{collapsed}");
     assert!(collapsed.contains("HEALTH"), "{collapsed}");
 
     let narrow = screen(
-        &usage::render(std::slice::from_ref(&r), 62, &Theme::plain()),
+        &usage::render(std::slice::from_ref(&r), 62, &Theme::plain(), MAX_AGE),
         62,
     );
     assert!(!narrow.contains("HEALTH"), "{narrow}");
@@ -137,7 +138,7 @@ fn the_table_drops_columns_in_the_documented_order() {
 #[test]
 fn missing_quota_is_a_dash_and_an_estimate_carries_a_tilde() {
     let bare = row("claude-main", Provider::Anthropic, Health::Healthy);
-    let body = screen(&usage::render(&[bare], 100, &Theme::plain()), 100);
+    let body = screen(&usage::render(&[bare], 100, &Theme::plain(), MAX_AGE), 100);
     assert!(!body.contains("0%"), "{body}");
     assert!(body.contains(" - "), "{body}");
 
@@ -146,7 +147,7 @@ fn missing_quota_is_a_dash_and_an_estimate_carries_a_tilde() {
         0.02,
         false,
     );
-    let body = screen(&usage::render(&[est], 100, &Theme::plain()), 100);
+    let body = screen(&usage::render(&[est], 100, &Theme::plain(), MAX_AGE), 100);
     assert!(body.contains("~2%"), "{body}");
     assert!(body.contains("~in"), "{body}");
 }
@@ -160,12 +161,18 @@ fn continuation_rows_name_the_cooldown_and_the_broken_account() {
         reached: Some(LimitReached::RateLimit),
         ..RateLimitSnapshot::default()
     });
-    let body = screen(&usage::render(&[cooling], 100, &Theme::plain()), 100);
+    let body = screen(
+        &usage::render(&[cooling], 100, &Theme::plain(), MAX_AGE),
+        100,
+    );
     assert!(body.contains("until"), "{body}");
     assert!(body.contains("rate_limit"), "{body}");
 
     let broken = row("claude-broke", Provider::Anthropic, Health::AuthBroken);
-    let body = screen(&usage::render(&[broken], 100, &Theme::plain()), 100);
+    let body = screen(
+        &usage::render(&[broken], 100, &Theme::plain(), MAX_AGE),
+        100,
+    );
     assert!(body.contains("auth broken"), "{body}");
     assert!(body.contains("re-auth claude-broke-cli"), "{body}");
 }
@@ -183,11 +190,18 @@ fn json_matches_the_documented_shape_and_round_trips() {
     assert!(v["totals"]["accounts_without_quota_source"].is_number());
     let acct = &v["accounts"][0];
     assert_eq!(acct["account"], "main");
-    let tokens = &acct["tokens"]["lifetime"];
-    let billable = tokens["input_tokens"].as_u64().unwrap()
-        + tokens["cache_write_tokens"].as_u64().unwrap()
-        + tokens["output_tokens"].as_u64().unwrap();
-    assert_eq!(billable, 0);
+    for which in ["window", "lifetime"] {
+        let tokens = &acct["tokens"][which];
+        let billable = tokens["billable"]
+            .as_u64()
+            .unwrap_or_else(|| panic!("tokens.{which}.billable is documented in USAGE 3.3"));
+        assert_eq!(
+            billable,
+            tokens["input_tokens"].as_u64().unwrap()
+                + tokens["cache_write_tokens"].as_u64().unwrap()
+                + tokens["output_tokens"].as_u64().unwrap()
+        );
+    }
     let back: serde_json::Value =
         serde_json::from_str(&serde_json::to_string(&v).unwrap()).unwrap();
     assert_eq!(v, back);
@@ -224,7 +238,7 @@ fn a_stale_observed_time_renders_in_the_err_role() {
     r.quota_observed_at = Some(OffsetDateTime::now_utc() - time::Duration::minutes(5));
     r.quota_source = Some(QuotaSource::Telemetry);
     let theme = Theme::plain();
-    let lines = usage::render(&[r], 100, &theme);
+    let lines = usage::render(&[r], 100, &theme, MAX_AGE);
     let err_style = theme.style(Role::Err);
     let found = lines.iter().any(|l| {
         l.spans
@@ -238,12 +252,102 @@ fn a_stale_observed_time_renders_in_the_err_role() {
 #[test]
 fn a_control_character_in_an_account_id_is_neutralised() {
     let r = row("evil\u{1b}[2J", Provider::Anthropic, Health::Healthy);
-    let lines = usage::render(&[r], 100, &Theme::plain());
+    let lines = usage::render(&[r], 100, &Theme::plain(), MAX_AGE);
     for l in &lines {
         for s in &l.spans {
             assert!(!s.content.contains('\u{1b}'), "{:?}", s.content);
         }
     }
+}
+
+/// A seven-day window resets days away, and `fmt::duration` has no day unit: the cell used to
+/// come out truncated inside the 9-column budget.
+#[test]
+fn a_reset_days_away_fits_the_column_with_a_day_unit() {
+    let mut r = row("claude-main", Provider::Anthropic, Health::Healthy);
+    r.quota = Some(RateLimitSnapshot {
+        status: LimitStatus::Allowed,
+        windows: vec![LimitWindow {
+            scope: LimitScope::SevenDay,
+            utilization: 0.05,
+            resets_at: Some(OffsetDateTime::now_utc() + time::Duration::hours(165)),
+            window_minutes: Some(10080),
+            measured: true,
+        }],
+        ..RateLimitSnapshot::default()
+    });
+    let body = screen(
+        &usage::render(std::slice::from_ref(&r), 100, &Theme::plain(), MAX_AGE),
+        100,
+    );
+    assert!(
+        body.contains("in 6d20h") || body.contains("in 6d21h"),
+        "{body}"
+    );
+    assert!(!body.contains('\u{2026}'), "{body}");
+
+    r.quota.as_mut().unwrap().windows[0].measured = false;
+    let body = screen(&usage::render(&[r], 100, &Theme::plain(), MAX_AGE), 100);
+    assert!(body.contains("~in 6d"), "{body}");
+    assert!(!body.contains('\u{2026}'), "{body}");
+}
+
+/// `dispatch.quota_max_age` is the threshold for the table too, not a hardcoded 60s.
+#[test]
+fn the_observed_age_honours_the_configured_quota_max_age() {
+    let mut r = row("claude-main", Provider::Anthropic, Health::Healthy);
+    r.quota_observed_at = Some(OffsetDateTime::now_utc() - time::Duration::minutes(5));
+    r.quota_source = Some(QuotaSource::Telemetry);
+    let theme = Theme::plain();
+    let err_style = theme.style(Role::Err);
+    let painted = |max_age| {
+        usage::render(std::slice::from_ref(&r), 100, &theme, max_age)
+            .iter()
+            .any(|l| {
+                l.spans
+                    .iter()
+                    .any(|s| s.content.contains("claude-main") && s.style == err_style)
+            })
+    };
+    assert!(painted(std::time::Duration::from_secs(60)));
+    assert!(
+        !painted(std::time::Duration::from_secs(600)),
+        "a 5m reading is fresh when the user allows 10m"
+    );
+}
+
+/// `not in config` is listed last, under every real provider, matching `swamp accounts`.
+#[test]
+fn the_not_in_config_section_is_listed_last() {
+    let mut stale = row("codex-gone", Provider::Openai, Health::Healthy);
+    stale.provider = None;
+    stale.in_config = false;
+    let rows = vec![
+        row("claude-main", Provider::Anthropic, Health::Healthy),
+        row("codex-main", Provider::Openai, Health::Healthy),
+        stale,
+    ];
+    let body = screen(&usage::render(&rows, 100, &Theme::plain(), MAX_AGE), 100);
+    let at = |needle: &str| {
+        body.find(needle)
+            .unwrap_or_else(|| panic!("{needle}: {body}"))
+    };
+    assert!(at("anthropic") < at("not in config"), "{body}");
+    assert!(at("openai") < at("not in config"), "{body}");
+}
+
+/// Two accounts without a source own `their utilization`, not `its`.
+#[test]
+fn the_totals_footnote_agrees_with_itself_in_the_plural() {
+    let rows = vec![
+        row("claude-main", Provider::Anthropic, Health::Healthy),
+        row("claude-alt", Provider::Anthropic, Health::Healthy),
+    ];
+    let body = screen(&usage::render(&rows, 100, &Theme::plain(), MAX_AGE), 100);
+    assert!(
+        body.contains("2 accounts have no quota source; their utilization is estimated"),
+        "{body}"
+    );
 }
 
 fn test_config() -> swamp::config::Config {
@@ -296,7 +400,10 @@ fn chat_and_cli_render_the_same_bytes() {
     )];
     let rows = usage::rows_from(&cfg.accounts, &pool, &[]);
     let width = 100u16;
-    let cli_text = screen(&usage::render(&rows, width, &Theme::plain()), width);
+    let cli_text = screen(
+        &usage::render(&rows, width, &Theme::plain(), MAX_AGE),
+        width,
+    );
 
     let mut app = swamp::ui::chat::app::App::new(
         swamp::RunId::new(),
@@ -323,4 +430,142 @@ fn chat_and_cli_render_the_same_bytes() {
     }
     let chat_text = screen(&chat_lines, width);
     assert_eq!(chat_text, cli_text);
+}
+
+/// The chat block and the CLI must still agree once `accounts.json` holds an account the
+/// config no longer names: `/usage` has to see those entries too.
+#[test]
+fn chat_lists_the_accounts_that_are_no_longer_in_config() {
+    let cfg = test_config();
+    let pool = vec![(
+        Provider::Anthropic,
+        AccountId("main".into()),
+        AccountState::default(),
+    )];
+    let stale = vec![(
+        AccountId("codex-gone".into()),
+        AccountState {
+            lifetime_nodes: 2,
+            ..AccountState::default()
+        },
+    )];
+    let width = 100u16;
+    let rows = usage::rows_from(&cfg.accounts, &pool, &stale);
+    let cli_text = screen(
+        &usage::render(&rows, width, &Theme::plain(), MAX_AGE),
+        width,
+    );
+    assert!(cli_text.contains("not in config"), "{cli_text}");
+
+    let mut app = chat_app(&cfg, width);
+    app.pool = pool;
+    app.set_stale_accounts(stale);
+    assert_eq!(usage_commit(&mut app, width), cli_text);
+}
+
+/// USAGE 3.2: a stale OpenAI reading kicks one background probe instead of committing a
+/// table nothing will ever refresh.
+#[test]
+fn a_stale_openai_account_kicks_one_background_probe() {
+    let cfg = openai_config();
+    let mut app = chat_app(&cfg, 100);
+    app.pool = vec![(
+        Provider::Openai,
+        AccountId("codex-main".into()),
+        AccountState::default(),
+    )];
+    let effects = usage_effects(&mut app);
+    let probed: Vec<AccountId> = effects
+        .iter()
+        .filter_map(|e| match e {
+            swamp::ui::chat::app::Effect::ProbeQuota(ids) => Some(ids.clone()),
+            _ => None,
+        })
+        .flatten()
+        .collect();
+    assert_eq!(probed, vec![AccountId("codex-main".into())]);
+    assert!(
+        !effects
+            .iter()
+            .any(|e| matches!(e, swamp::ui::chat::app::Effect::Commit(_))),
+        "the table stays live until the reading lands"
+    );
+
+    // A fresh reading lands: the block commits once, and no second probe is asked for.
+    app.pool = vec![(
+        Provider::Openai,
+        AccountId("codex-main".into()),
+        AccountState {
+            quota_observed_at: Some(OffsetDateTime::now_utc()),
+            quota_source: Some(QuotaSource::AppServer),
+            ..AccountState::default()
+        },
+    )];
+    app.set_stale_accounts(Vec::new());
+    app.now = OffsetDateTime::now_utc();
+    let after = app.reduce(swamp::ui::chat::app::Msg::Tick);
+    assert!(
+        after
+            .iter()
+            .any(|e| matches!(e, swamp::ui::chat::app::Effect::Commit(_))),
+        "the landed reading commits the block"
+    );
+}
+
+fn chat_app(cfg: &swamp::config::Config, width: u16) -> swamp::ui::chat::app::App {
+    let mut app = swamp::ui::chat::app::App::new(
+        swamp::RunId::new(),
+        Theme::plain(),
+        swamp::ui::chat::blocks::WelcomeInfo::default(),
+        swamp::ui::chat::input::History::load(None, 10),
+        cfg,
+    );
+    app.width = width;
+    app
+}
+
+fn usage_effects(app: &mut swamp::ui::chat::app::App) -> Vec<swamp::ui::chat::app::Effect> {
+    for c in "/usage".chars() {
+        app.reduce(key(crossterm::event::KeyCode::Char(c)));
+    }
+    // Effect 0 is the echoed `> /usage` bar; the table itself follows.
+    app.reduce(key(crossterm::event::KeyCode::Enter))
+        .into_iter()
+        .skip(1)
+        .collect()
+}
+
+fn usage_commit(app: &mut swamp::ui::chat::app::App, width: u16) -> String {
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    for effect in usage_effects(app) {
+        if let swamp::ui::chat::app::Effect::Commit(body) = effect {
+            lines.extend(body);
+        }
+    }
+    screen(&lines, width)
+}
+
+fn openai_config() -> swamp::config::Config {
+    let schema: swamp::config::Schema = toml::from_str(
+        r#"
+version = 1
+[providers.openai]
+models = { high = "gpt-5-codex", mid = "gpt-5-codex", low = "gpt-5-codex" }
+[[accounts]]
+id = "codex-main"
+provider = "openai"
+exec = "codex-main"
+"#,
+    )
+    .expect("fixture config parses");
+    let layers = vec![
+        swamp::config::load::default_layer(),
+        swamp::config::load::Layer {
+            origin: "test".into(),
+            schema,
+        },
+    ];
+    let mut cfg = swamp::config::resolve::from_schema(swamp::config::load::merge(layers));
+    swamp::config::validate::validate(&mut cfg).expect("fixture config is valid");
+    cfg
 }

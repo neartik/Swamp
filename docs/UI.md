@@ -41,7 +41,7 @@ pub collapse_lines: Option<usize>,  // default 3
 pub chat_history: Option<usize>,    // default 500
 ```
 
-`refresh_hz` already exists and drives the chat redraw tick (default 12).
+`refresh_hz` already exists and drives the chat redraw tick (default 20).
 
 Everything else is additive. `src/ui/chat.rs` becomes the directory `src/ui/chat/`;
 `ui::chat::repl(brain, disp, ctx) -> Result<i32>` keeps its signature so `src/cmd/chat.rs` is
@@ -266,7 +266,7 @@ scrolling.
 Event sources: crossterm keys, the `BrainEvent` stream, journal-fold polls, and the refresh tick.
 
 ```rust
-let period = Duration::from_millis(1000 / u64::from(cfg.ui.refresh_hz.unwrap_or(12)).max(1));
+let period = Duration::from_millis(1000 / u64::from(cfg.ui.refresh_hz.unwrap_or(20)).max(1));
 let mut ticker = tokio::time::interval(period);
 loop {
     term.set_height(render::live_height(&app, rows))?;

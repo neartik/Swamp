@@ -67,6 +67,17 @@ fn a_killed_supervisor_leaves_an_adoptable_worker_and_resume_finishes_it() {
         "the original worker was adopted, not rerun"
     );
 
+    // A recovered node spent real tokens, and the account has to be charged for them.
+    let state = h.accounts_state();
+    let account = state
+        .get(&swamp::model::core::AccountId("main".into()))
+        .expect("the account state");
+    assert!(
+        account.lifetime_tokens.billable() > 0,
+        "resume credited no tokens: {:?}",
+        account.lifetime_tokens
+    );
+
     let view = h.last_view();
     let node = view.nodes.values().next().expect("the node");
     assert_eq!(node.state, NodeState::Succeeded);
