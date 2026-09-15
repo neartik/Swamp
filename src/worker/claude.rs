@@ -82,10 +82,6 @@ impl ProviderAdapter for ClaudeAdapter {
             _ => a.push("--strict-mcp-config".into()),
         }
 
-        if let Some(b) = spec.budget_usd {
-            a.push("--max-budget-usd".into());
-            a.push(format!("{b}").into());
-        }
         if let Some(text) = &spec.append_system_prompt {
             a.push("--append-system-prompt".into());
             a.push(text.clone().into());

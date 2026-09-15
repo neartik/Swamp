@@ -132,7 +132,6 @@ pub fn build(
         kind: NodeKind::Brain,
         permission_mode: cfg.brain.permission_mode.clone().unwrap_or_default(),
         sandbox: String::new(),
-        budget_usd: cfg.node_budget_usd(tier),
         append_system_prompt: Some(append_system_prompt(cfg, &cwd, mode)),
         allow_tools: cfg.brain.allow_tools.clone(),
         deny_tools: cfg.brain.deny_tools.clone(),

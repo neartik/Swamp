@@ -104,7 +104,6 @@ fn spec(n: &Node) -> LaunchSpec {
         kind: NodeKind::Worker,
         permission_mode: "acceptEdits".into(),
         sandbox: "workspace-write".into(),
-        budget_usd: None,
         append_system_prompt: None,
         allow_tools: Vec::new(),
         deny_tools: Vec::new(),

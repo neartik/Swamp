@@ -35,7 +35,7 @@ pub enum SwampError {
 }
 
 /// Scripts branch on these. 3 vs 4 is "try again in an hour" vs "your task is broken".
-/// 5 = merge conflict, 6 = cancelled, 7 = budget exceeded: set by the cmd layer.
+/// 5 = merge conflict, 6 = cancelled: set by the cmd layer.
 pub fn exit_code(e: &anyhow::Error) -> i32 {
     match e.downcast_ref::<SwampError>() {
         Some(SwampError::ConfigInvalid(_)) => 2,

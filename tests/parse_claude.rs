@@ -9,7 +9,7 @@ use std::str::FromStr;
 use swamp::config::FailurePatterns;
 use swamp::ids::{NodeId, NodeIds};
 use swamp::model::core::{
-    ChangeKind, Cost, CostBasis, EvidenceSource, FinalSummary, LimitScope, LimitStatus, NodeKind,
+    ChangeKind, CostBasis, EvidenceSource, FinalSummary, LimitScope, LimitStatus, NodeKind,
     Provider, RateLimitSnapshot, SessionHandle, Tier, Usage,
 };
 use swamp::model::event::WorkerEvent;
@@ -46,7 +46,6 @@ fn spec() -> LaunchSpec {
         kind: NodeKind::Worker,
         permission_mode: "acceptEdits".into(),
         sandbox: "workspace-write".into(),
-        budget_usd: None,
         append_system_prompt: None,
         allow_tools: Vec::new(),
         deny_tools: Vec::new(),
@@ -259,21 +258,32 @@ fn a_worker_gets_no_mcp_allow_list() {
     assert!(!argv.iter().any(|a| a.starts_with("mcp__")), "{argv:?}");
 }
 
+/// `LaunchSpec` no longer carries a budget at all, so the flag can never reach argv, resumed
+/// session or not.
 #[test]
-fn budget_and_resume_flags_appear_only_when_asked_for() {
+fn argv_never_carries_a_budget_flag() {
+    assert!(!argv_of(&spec()).iter().any(|a| a == "--max-budget-usd"));
+    let mut s = spec();
+    s.session = SessionPlan::Resume(SessionHandle {
+        account: swamp::model::core::AccountId("main".into()),
+        id: "sess-1".into(),
+        preassigned: true,
+    });
+    assert!(!argv_of(&s).iter().any(|a| a == "--max-budget-usd"));
+}
+
+#[test]
+fn resume_flags_appear_only_when_asked_for() {
     let plain = argv_of(&spec());
-    assert!(!plain.iter().any(|a| a == "--max-budget-usd"));
     assert!(!plain.iter().any(|a| a == "--resume"));
 
     let mut s = spec();
-    s.budget_usd = Some(3.0);
     s.session = SessionPlan::Resume(SessionHandle {
         account: swamp::model::core::AccountId("main".into()),
         id: "sess-1".into(),
         preassigned: true,
     });
     let argv = argv_of(&s);
-    assert!(argv.windows(2).any(|w| w[0] == "--max-budget-usd"));
     assert_eq!(
         argv.iter()
             .skip_while(|a| *a != "--resume")
@@ -560,17 +570,15 @@ fn api_error_status_drives_rate_limit_and_overload() {
 
 #[test]
 fn the_budget_subtype_is_our_own_guard_not_a_provider_failure() {
-    let mut f = final_of("error_max_budget_usd", "");
-    f.cost = Some(Cost {
-        usd: 3.4,
-        basis: CostBasis::Reported,
-    });
+    let f = final_of("error_max_budget_usd", "");
     let st = ParseState {
         last_final: Some(f),
         ..ParseState::default()
     };
     let failure = classify_with(&st, None, false).expect("a failure");
-    assert!(matches!(failure, Failure::BudgetExceeded { spent_usd, .. } if spent_usd == 3.4));
+    assert!(
+        matches!(failure, Failure::WorkerError { ref subtype, .. } if subtype == "error_max_budget_usd")
+    );
     assert!(failure.is_terminal());
 }
 

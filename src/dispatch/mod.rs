@@ -26,12 +26,10 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
-use tokio::sync::{Notify, Semaphore};
+use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
 const DEFAULT_MAX_ATTEMPTS: u32 = 3;
-const DEFAULT_MAX_PARALLEL_DISPATCH: usize = 6;
-const DEFAULT_MAX_HIGH_TIER: usize = 2;
 const DEFAULT_MAX_NODES_PER_RUN: u32 = 32;
 const DEFAULT_MAX_DEPTH: u32 = 2;
 
@@ -47,10 +45,6 @@ pub struct Dispatcher {
     pub workspace: Arc<WorkspaceManager>,
     pub journal: JournalHandle,
     runner: Arc<dyn NodeRunner>,
-    /// limits.max_parallel_dispatch: queueing, not rejection.
-    batch: Arc<Semaphore>,
-    /// limits.max_high_tier_concurrent: the expensive tier gets its own ceiling.
-    high_tier: Arc<Semaphore>,
     results: Mutex<HashMap<NodeId, NodeResult>>,
     cancels: Mutex<HashMap<NodeId, CancellationToken>>,
     depths: Mutex<HashMap<NodeId, u32>>,
@@ -84,16 +78,6 @@ impl Dispatcher {
         journal: JournalHandle,
         runner: Arc<dyn NodeRunner>,
     ) -> Arc<Self> {
-        let batch = cfg
-            .limits
-            .max_parallel_dispatch
-            .unwrap_or(DEFAULT_MAX_PARALLEL_DISPATCH)
-            .max(1);
-        let high = cfg
-            .limits
-            .max_high_tier_concurrent
-            .unwrap_or(DEFAULT_MAX_HIGH_TIER)
-            .max(1);
         Arc::new(Self {
             cfg,
             pool,
@@ -101,8 +85,6 @@ impl Dispatcher {
             workspace: ws,
             journal,
             runner,
-            batch: Arc::new(Semaphore::new(batch)),
-            high_tier: Arc::new(Semaphore::new(high)),
             results: Mutex::new(HashMap::new()),
             cancels: Mutex::new(HashMap::new()),
             depths: Mutex::new(HashMap::new()),
@@ -112,6 +94,7 @@ impl Dispatcher {
         })
     }
 
+    /// Every task starts at once; each then queues on its own account's capacity.
     pub async fn dispatch_batch(
         self: &Arc<Self>,
         parent: NodeId,
@@ -248,12 +231,6 @@ impl Dispatcher {
             .lock()
             .insert(id, running(id, &task, tier, provider));
 
-        let _batch = self.batch.clone().acquire_owned().await;
-        let _high = match tier {
-            Tier::High => Some(self.high_tier.clone().acquire_owned().await),
-            _ => None,
-        };
-
         let cancel = CancellationToken::new();
         self.cancels.lock().insert(id, cancel.clone());
         self.spawned.fetch_add(1, Ordering::Relaxed);
@@ -371,7 +348,6 @@ impl Dispatcher {
             kind: NodeKind::Worker,
             permission_mode: worker.permission_mode.clone().unwrap_or_default(),
             sandbox: worker.sandbox.clone().unwrap_or_default(),
-            budget_usd: self.cfg.node_budget_usd(tier),
             append_system_prompt: None,
             allow_tools: worker.allow_tools.clone(),
             deny_tools: worker.deny_tools.clone(),

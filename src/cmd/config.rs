@@ -6,7 +6,6 @@ use crate::config::{Config, load};
 const TEMPLATE: &str = r#"version = 1
 
 [limits]
-max_parallel = 4
 worker_timeout = "25m"
 
 [dispatch]

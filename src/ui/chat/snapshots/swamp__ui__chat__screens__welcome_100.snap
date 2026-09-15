@@ -1,6 +1,6 @@
 ---
 source: src/ui/chat/screens.rs
-expression: "screen(welcome, 100)"
+expression: welcome_100
 ---
 ╭──────────────────────────────────────────────────────────────────────────────────────────────────╮
 │ ✻ Welcome to Swamp                                                                               │
@@ -8,6 +8,6 @@ expression: "screen(welcome, 100)"
 │   /help for commands, /status for the run tree                                                   │
 │   cwd: /Users/me/projects/example/repo-one                                                       │
 │   brain: anthropic/main · claude-opus-4-20250514 · tier high                                     │
-│   workers: 4 accounts · 3 ready, 1 cooling · max 4 parallel · budget $10.00                      │
+│   workers: 4 accounts · 3 ready, 1 cooling · 12% of the tightest window used                     │
 │   run: 9g5fav                                                                                    │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯

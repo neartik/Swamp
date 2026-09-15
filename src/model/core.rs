@@ -156,7 +156,6 @@ impl NodeState {
 pub enum CancelSource {
     User,
     Brain,
-    Budget,
     Timeout,
     Shutdown,
 }

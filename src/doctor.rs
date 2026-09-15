@@ -1,7 +1,7 @@
 use crate::config::Config;
 use crate::journal::paths::Paths;
 use crate::journal::record::{JournalEvent, JournalLine};
-use crate::model::core::{Provider, Tier};
+use crate::model::core::{LimitScope, Provider, Tier};
 use crate::model::failure::{Detector, Failure};
 use camino::{Utf8Path, Utf8PathBuf};
 use std::collections::BTreeMap;
@@ -59,6 +59,7 @@ pub async fn checks(cfg: &Config, paths: &Paths, probe: bool, schema: bool) -> V
     let mut out = Vec::new();
     environment(paths, &mut out).await;
     accounts(cfg, paths, probe, &mut out).await;
+    quota(cfg, paths, &mut out);
     tiers(cfg, &mut out);
     unsafe_args(cfg, &mut out);
     permission_modes(cfg, &mut out);
@@ -255,6 +256,39 @@ async fn accounts(cfg: &Config, paths: &Paths, probe: bool, out: &mut Vec<Check>
     }
 }
 
+/// One line per account: whether dispatch has quota telemetry to balance load on, or is
+/// reduced to token share alone. Read from the last persisted snapshot, no network.
+fn quota(cfg: &Config, paths: &Paths, out: &mut Vec<Check>) {
+    let state = crate::dispatch::persist::load_state(&paths.accounts_state()).unwrap_or_default();
+    for account in &cfg.accounts {
+        let name = format!("providers/{}/quota", account.id.0);
+        let snapshot = state.get(&account.id).and_then(|s| s.quota.as_ref());
+        let Some(snapshot) = snapshot else {
+            out.push(Check::new(
+                name,
+                Level::Warn,
+                "no quota source; utilization is estimated from token counters alone",
+            ));
+            continue;
+        };
+        let window = |scope| {
+            snapshot
+                .windows
+                .iter()
+                .find(|w| w.scope == scope)
+                .map(|w| format!("{:.0}%", w.utilization * 100.0))
+        };
+        let mut detail = "quota telemetry available".to_owned();
+        if let Some(u) = window(LimitScope::FiveHour) {
+            detail.push_str(&format!("  5h {u}"));
+        }
+        if let Some(u) = window(LimitScope::SevenDay) {
+            detail.push_str(&format!("  7d {u}"));
+        }
+        out.push(Check::new(name, Level::Ok, detail));
+    }
+}
+
 /// `--version` needs no credentials, so it proves nothing about the subscription. This sends
 /// one real one-token turn down the adapter's own argv and classifies what comes back.
 pub async fn probe_account(
@@ -375,7 +409,6 @@ fn probe_spec(
         kind: crate::model::core::NodeKind::Worker,
         permission_mode: worker.permission_mode.clone().unwrap_or_default(),
         sandbox: worker.sandbox.clone().unwrap_or_default(),
-        budget_usd: None,
         append_system_prompt: None,
         allow_tools: worker.allow_tools.clone(),
         deny_tools: worker.deny_tools.clone(),

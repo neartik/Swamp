@@ -38,12 +38,6 @@ pub fn classify(cx: &ExitContext<'_>) -> Option<Failure> {
                 ),
             });
         }
-        if f.subtype == BUDGET_SUBTYPE {
-            return Some(Failure::BudgetExceeded {
-                limit_usd: 0.0,
-                spent_usd: f.cost.map_or(0.0, |c| c.usd),
-            });
-        }
         // Provider-neutral success: the adapter already decided what `ok` means on its wire.
         if f.ok && f.permission_denials == 0 {
             return None;
@@ -136,10 +130,6 @@ pub fn classify(cx: &ExitContext<'_>) -> Option<Failure> {
         _ => Some(Failure::Crashed { signal: None }),
     }
 }
-
-/// The one provider marker DESIGN 5.6 places in this layer: our own budget guard tripped,
-/// and failing over would only spend a second subscription on the same overrun.
-const BUDGET_SUBTYPE: &str = "error_max_budget_usd";
 
 /// Byte-bounded and char-boundary safe: evidence is shown to humans, never re-parsed.
 pub fn truncate(s: &str, max: usize) -> String {

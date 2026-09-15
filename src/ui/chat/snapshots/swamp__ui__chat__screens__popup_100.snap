@@ -9,8 +9,8 @@ expression: "live(&mut app, 100)"
   /status     the run tree, same output as swamp trace
   /accounts   the account pool, health and spend
   /cost       tokens and spend for this run
-  /workers    show or set how many workers run at once
-  … +5 more
+  /cancel     stop one worker or all of them
+  … +4 more
 ────────────────────────────────────────────────────────────────────────────────────────────────────
 > /t
 ────────────────────────────────────────────────────────────────────────────────────────────────────

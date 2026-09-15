@@ -214,7 +214,6 @@ impl Harness {
             r#"version = 1
 
 [limits]
-max_parallel = 4
 worker_timeout = "90s"
 grace_period = "2s"
 unsafe_ack = false

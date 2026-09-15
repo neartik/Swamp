@@ -159,10 +159,6 @@ mod tests {
                 denials: 3,
                 tools: Vec::new(),
             },
-            Failure::BudgetExceeded {
-                limit_usd: 1.0,
-                spent_usd: 2.0,
-            },
             Failure::NoCapacity {
                 detail: "none".into(),
             },

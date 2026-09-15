@@ -256,7 +256,6 @@ pub(crate) fn failure_summary(f: &Failure) -> String {
             format!("auth_expired ({})", detector_word(detected_by))
         }
         Failure::Overloaded { .. } => "overloaded".to_owned(),
-        Failure::BudgetExceeded { .. } => "budget_exceeded".to_owned(),
         Failure::Timeout { after_s } => format!("timeout ({after_s}s)"),
         Failure::WorkerError { subtype, .. } => format!("worker_error ({subtype})"),
         Failure::PermissionDenied { denials, .. } => format!("permission_denied ({denials})"),
@@ -281,10 +280,6 @@ pub(crate) fn failure_detail(f: &Failure) -> String {
             "WorkerError({subtype}): {}",
             fmt::truncate(detail, 100).trim()
         ),
-        Failure::BudgetExceeded {
-            limit_usd,
-            spent_usd,
-        } => format!("BudgetExceeded: spent ${spent_usd:.2} of ${limit_usd:.2}"),
         Failure::PermissionDenied { denials, tools } => {
             let which = tool_tally(tools);
             format!("PermissionDenied: {denials} tool calls were auto-denied{which}")

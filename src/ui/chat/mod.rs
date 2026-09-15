@@ -287,13 +287,15 @@ fn welcome(ctx: &Ctx, disp: &Arc<Dispatcher>) -> WelcomeInfo {
     if cooling > 0 {
         workers.push_str(&format!(", {cooling} cooling"));
     }
+    let tightest = snapshot
+        .iter()
+        .filter_map(|(_, _, s)| s.quota.as_ref())
+        .map(|q| q.worst_utilization())
+        .fold(0.0_f64, f64::max);
     workers.push_str(&format!(
-        " · max {} parallel",
-        cfg.limits.max_parallel.unwrap_or(4)
+        " · {:.0}% of the tightest window used",
+        tightest * 100.0
     ));
-    if let Some(budget) = cfg.limits.run_budget_usd {
-        workers.push_str(&format!(" · budget ${budget:.2}"));
-    }
     WelcomeInfo {
         cwd: ctx.paths.repo.to_string(),
         brain,

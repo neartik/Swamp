@@ -43,10 +43,7 @@ pub struct Schema {
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Limits {
-    pub max_parallel: Option<usize>,
     pub max_nodes_per_run: Option<u32>,
-    pub max_parallel_dispatch: Option<usize>,
-    pub max_high_tier_concurrent: Option<usize>,
     pub max_depth: Option<u32>,
     #[serde(default, with = "humantime_serde")]
     pub worker_timeout: Option<Duration>,
@@ -54,8 +51,6 @@ pub struct Limits {
     pub brain_turn_timeout: Option<Duration>,
     #[serde(default, with = "humantime_serde")]
     pub grace_period: Option<Duration>,
-    pub run_budget_usd: Option<f64>,
-    pub node_budget_usd: Option<f64>,
     pub max_prompt_bytes: Option<usize>,
     pub max_result_bytes: Option<usize>,
     pub unsafe_ack: Option<bool>,
@@ -86,6 +81,22 @@ pub struct DispatchCfg {
     pub cross_provider_failover: Option<bool>,
     pub default_provider: Option<Provider>,
     pub default_tier: Option<Tier>,
+    /// Out-of-band probe threshold for `/usage` and dispatch.
+    #[serde(default, with = "humantime_serde")]
+    pub quota_max_age: Option<Duration>,
+    pub near_exhaustion_penalty: Option<f64>,
+    #[serde(default)]
+    pub weights: Option<WeightsCfg>,
+}
+
+#[derive(Debug, Default, Clone, Copy, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WeightsCfg {
+    pub util: Option<f64>,
+    pub load: Option<f64>,
+    pub share: Option<f64>,
+    pub weight: Option<f64>,
+    pub idle: Option<f64>,
 }
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
@@ -145,6 +156,12 @@ pub struct ProviderCfg {
     pub tier_extra: BTreeMap<Tier, BTreeMap<String, String>>,
     #[serde(default)]
     pub worker: WorkerCfg,
+    /// openai only: auto | rollout | app-server | none.
+    pub quota_source: Option<String>,
+    #[serde(default, with = "humantime_serde")]
+    pub estimated_window: Option<Duration>,
+    /// 0 = no estimate, render "-".
+    pub estimated_window_tokens: Option<u64>,
 }
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
@@ -189,6 +206,8 @@ pub struct AccountCfg {
     /// Per-account tier override: a plan without the top model maps high to something else.
     #[serde(default)]
     pub models: BTreeMap<Tier, String>,
+    /// Which quota bucket this account routes against, e.g. codex's `limit_id`.
+    pub limit_id: Option<String>,
 }
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
@@ -196,7 +215,6 @@ pub struct AccountCfg {
 pub struct TierCfg {
     #[serde(default)]
     pub provider_order: Vec<Provider>,
-    pub node_budget_usd: Option<f64>,
     #[serde(default, with = "humantime_serde")]
     pub timeout: Option<Duration>,
 }

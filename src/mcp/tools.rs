@@ -42,9 +42,9 @@ pub fn schemas() -> Vec<ToolSchema> {
         ToolSchema {
             name: "swamp_dispatch".into(),
             description: "Create one or more worker nodes and run them in parallel, each in its \
-                          own git worktree. Returns one result per node. Caps on parallelism, \
-                          node count, depth and budget are enforced by Swamp, not by you: a \
-                          refusal comes back as a failed node, never as a crash."
+                          own git worktree. Returns one result per node. Caps on node count and \
+                          depth are enforced by Swamp, not by you: a refusal comes back as a \
+                          failed node, never as a crash."
                 .into(),
             input_schema: json!({
                 "type": "object",

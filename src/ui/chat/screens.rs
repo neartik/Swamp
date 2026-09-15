@@ -103,10 +103,20 @@ Reading the handler now";
 #[test]
 fn welcome_and_idle() {
     let mut app = fx::app(100);
-    let welcome = app.take_welcome();
-    insta::assert_snapshot!("welcome_100", screen(welcome, 100));
+    let welcome_100 = screen(app.take_welcome(), 100);
+    insta::assert_snapshot!("welcome_100", welcome_100);
     insta::assert_snapshot!("idle_100", live(&mut app, 100));
     insta::assert_snapshot!("idle_62", live(&mut app, 62));
+
+    let mut app62 = fx::app(62);
+    let welcome_62 = screen(app62.take_welcome(), 62);
+    insta::assert_snapshot!("welcome_62", welcome_62);
+
+    // WP-A acceptance: the welcome box no longer names a global cap or a budget, at any width.
+    for text in [&welcome_100, &welcome_62] {
+        assert!(!text.contains("parallel"), "{text}");
+        assert!(!text.contains("budget"), "{text}");
+    }
 }
 
 // ---------------------------------------------------------------- 3.2

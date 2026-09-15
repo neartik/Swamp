@@ -111,7 +111,6 @@ fn example_config_loads_and_maps_tiers() {
         cfg.model_for(Provider::Anthropic, Tier::Low, None).unwrap(),
         "haiku"
     );
-    assert_eq!(cfg.limits.max_parallel, Some(4));
     assert_eq!(cfg.accounts.len(), 4);
     assert_eq!(cfg.accounts_for(Provider::Openai).len(), 1);
     assert!(cfg.warnings.is_empty(), "{:?}", cfg.warnings);
@@ -119,8 +118,6 @@ fn example_config_loads_and_maps_tiers() {
         cfg.node_timeout(Tier::High),
         std::time::Duration::from_secs(45 * 60)
     );
-    assert_eq!(cfg.node_budget_usd(Tier::High), Some(8.0));
-    assert_eq!(cfg.node_budget_usd(Tier::Mid), Some(3.0));
     assert_eq!(
         cfg.provider_order(Tier::Low),
         vec![Provider::Anthropic],
@@ -183,14 +180,14 @@ models = { mid = "model-mid" }
 #[test]
 fn layers_stack_repo_over_user_and_env_over_both() {
     let sb = Sandbox::new();
-    sb.user_config("[limits]\nmax_parallel = 2\nmax_nodes_per_run = 11\n");
+    sb.user_config("[limits]\nmax_depth = 2\nmax_nodes_per_run = 11\n");
 
     let user_only = sb.load(None, None).unwrap();
-    assert_eq!(user_only.limits.max_parallel, Some(2));
+    assert_eq!(user_only.limits.max_depth, Some(2));
 
-    sb.repo_config("[limits]\nmax_parallel = 5\n");
+    sb.repo_config("[limits]\nmax_depth = 5\n");
     let repo_wins = sb.load(None, None).unwrap();
-    assert_eq!(repo_wins.limits.max_parallel, Some(5));
+    assert_eq!(repo_wins.limits.max_depth, Some(5));
     assert_eq!(
         repo_wins.limits.max_nodes_per_run,
         Some(11),
@@ -198,19 +195,15 @@ fn layers_stack_repo_over_user_and_env_over_both() {
     );
 
     let env_wins = sb
-        .load_with(&[("SWAMP_LIMITS__MAX_PARALLEL", "9")], None, None)
+        .load_with(&[("SWAMP_LIMITS__MAX_DEPTH", "9")], None, None)
         .unwrap();
-    assert_eq!(env_wins.limits.max_parallel, Some(9));
+    assert_eq!(env_wins.limits.max_depth, Some(9));
 
-    let explicit = sb.write("over.toml", "[limits]\nmax_parallel = 12\n");
+    let explicit = sb.write("over.toml", "[limits]\nmax_depth = 12\n");
     let explicit_wins = sb
-        .load_with(
-            &[("SWAMP_LIMITS__MAX_PARALLEL", "9")],
-            Some(&explicit),
-            None,
-        )
+        .load_with(&[("SWAMP_LIMITS__MAX_DEPTH", "9")], Some(&explicit), None)
         .unwrap();
-    assert_eq!(explicit_wins.limits.max_parallel, Some(12));
+    assert_eq!(explicit_wins.limits.max_depth, Some(12));
     assert_eq!(explicit_wins.sources.len(), 3);
 }
 
@@ -219,16 +212,16 @@ fn layers_stack_repo_over_user_and_env_over_both() {
 #[test]
 fn a_layer_only_contributes_the_keys_it_sets() {
     let sb = Sandbox::new();
-    sb.user_config("version = 1\n\n[limits]\nmax_parallel = 7\n");
+    sb.user_config("version = 1\n\n[limits]\nmax_depth = 7\n");
 
     let cfg = sb.load(None, None).expect("the user config loads");
     assert_eq!(cfg.version, 1, "the declared version survives the merge");
 
     let with_env = sb
-        .load_with(&[("SWAMP_LIMITS__MAX_PARALLEL", "9")], None, None)
+        .load_with(&[("SWAMP_LIMITS__MAX_DEPTH", "9")], None, None)
         .expect("the env layer loads");
     assert_eq!(with_env.version, 1, "an env override sets one key, not all");
-    assert_eq!(with_env.limits.max_parallel, Some(9));
+    assert_eq!(with_env.limits.max_depth, Some(9));
 }
 
 #[test]
@@ -237,17 +230,17 @@ fn unrelated_swamp_env_vars_are_not_config() {
     let cfg = sb
         .load_with(&[("SWAMP_DEPTH", "1"), ("SWAMP_LOG", "debug")], None, None)
         .unwrap();
-    assert_eq!(cfg.limits.max_parallel, Some(4));
+    assert_eq!(cfg.limits.max_depth, Some(2));
 }
 
 #[test]
 fn a_bad_env_override_names_the_variable() {
     let sb = Sandbox::new();
     let err = sb
-        .load_with(&[("SWAMP_LIMITS__MAX_PARALLEL", "loads")], None, None)
+        .load_with(&[("SWAMP_LIMITS__MAX_DEPTH", "loads")], None, None)
         .unwrap_err();
     assert!(
-        err_text(&err).contains("SWAMP_LIMITS__MAX_PARALLEL"),
+        err_text(&err).contains("SWAMP_LIMITS__MAX_DEPTH"),
         "{err}"
     );
 }
@@ -258,7 +251,6 @@ fn profile_applies_dotted_overrides() {
     let example = example_config();
     let cfg = sb.load(Some(&example), Some("cheap")).unwrap();
     assert_eq!(cfg.dispatch.default_tier, Some(Tier::Low));
-    assert_eq!(cfg.limits.max_parallel, Some(2));
     assert_eq!(cfg.brain.tier, Some(Tier::Mid));
 
     let plain = sb.load(Some(&example), None).unwrap();
@@ -376,19 +368,16 @@ provider_order = ["anthropic"]
     );
 }
 
+/// `workspace.isolation = "shared"` used to force `limits.max_parallel = 1`; the cap is gone,
+/// so a shared checkout is now bounded only by each account's own `max_concurrency`, same as
+/// any other isolation mode.
 #[test]
-fn shared_isolation_forces_one_worker_and_warns() {
+fn shared_isolation_sets_no_warning_of_its_own() {
     let sb = Sandbox::new();
     let path = sb.write("shared.toml", "[workspace]\nisolation = \"shared\"\n");
     let cfg = sb.load(Some(&path), None).unwrap();
     assert_eq!(cfg.workspace.isolation, Some(IsolationMode::Shared));
-    assert_eq!(cfg.limits.max_parallel, Some(1));
-    assert_eq!(cfg.warnings.len(), 1);
-    assert!(
-        cfg.warnings[0].contains("max_parallel"),
-        "{:?}",
-        cfg.warnings
-    );
+    assert!(cfg.warnings.is_empty(), "{:?}", cfg.warnings);
 }
 
 #[test]
@@ -574,4 +563,115 @@ exec = "claude-main"
             .expect_err("an unknown adapter is refused"),
     );
     assert!(text.contains("providers.anthropic.adapter"), "{text}");
+}
+
+/// WP-A acceptance: every removed cap/budget key is refused by name, with a redirect to the
+/// per-account replacement.
+#[test]
+fn removed_keys_are_rejected_with_a_redirect_to_max_concurrency() {
+    for (toml, key) in [
+        ("[limits]\nmax_parallel = 4\n", "max_parallel"),
+        (
+            "[limits]\nmax_parallel_dispatch = 6\n",
+            "max_parallel_dispatch",
+        ),
+        (
+            "[limits]\nmax_high_tier_concurrent = 2\n",
+            "max_high_tier_concurrent",
+        ),
+        ("[limits]\nrun_budget_usd = 25.0\n", "run_budget_usd"),
+        ("[limits]\nnode_budget_usd = 3.0\n", "node_budget_usd"),
+        ("[tiers.high]\nnode_budget_usd = 8.0\n", "node_budget_usd"),
+    ] {
+        let sb = Sandbox::new();
+        let path = sb.write("removed.toml", toml);
+        let err = sb
+            .load(Some(&path), None)
+            .expect_err(&format!("{key} must be refused"));
+        let text = err_text(&err);
+        assert!(text.contains(key), "{key} missing from:\n{text}");
+        assert!(
+            text.contains("accounts[].max_concurrency"),
+            "{key} has no redirect:\n{text}"
+        );
+    }
+}
+
+/// WP-A acceptance: no cap anywhere means a large fleet with no per-account ceiling is fine.
+#[test]
+fn thirty_accounts_with_no_max_concurrency_validate_clean() {
+    let sb = Sandbox::new();
+    let mut toml = String::from("[providers.anthropic]\nmodels = { mid = \"sonnet\" }\n");
+    for i in 0..30 {
+        toml.push_str(&format!(
+            "[[accounts]]\nid = \"a{i}\"\nprovider = \"anthropic\"\nexec = \"claude-{i}\"\n"
+        ));
+    }
+    let path = sb.write("fleet.toml", &toml);
+    let cfg = sb
+        .load(Some(&path), None)
+        .expect("30 uncapped accounts are fine");
+    assert_eq!(cfg.accounts.len(), 30);
+    assert!(cfg.accounts.iter().all(|a| a.max_concurrency.is_none()));
+}
+
+/// The new §4.8 keys get the same "report everything at once" validation as the rest.
+#[test]
+fn new_dispatch_and_provider_keys_are_validated() {
+    let sb = Sandbox::new();
+    let path = sb.write(
+        "new_keys.toml",
+        r#"
+[dispatch]
+quota_max_age = "1s"
+near_exhaustion_penalty = -1.0
+[dispatch.weights]
+util = -0.5
+[providers.anthropic]
+estimated_window_tokens = 100
+"#,
+    );
+    let text = err_text(&sb.load(Some(&path), None).unwrap_err());
+    for key in [
+        "dispatch.weights.util",
+        "dispatch.quota_max_age",
+        "dispatch.near_exhaustion_penalty",
+        "providers.anthropic.estimated_window",
+    ] {
+        assert!(text.contains(key), "missing `{key}` in:\n{text}");
+    }
+}
+
+/// A config that only sets the new §4.8 keys within their valid ranges loads clean.
+#[test]
+fn new_dispatch_and_provider_keys_accept_valid_values() {
+    let sb = Sandbox::new();
+    let path = sb.write(
+        "new_keys_ok.toml",
+        r#"
+[dispatch]
+quota_max_age = "30s"
+near_exhaustion_penalty = 3.0
+[dispatch.weights]
+util = 0.5
+load = 0.3
+share = 0.15
+weight = 0.05
+idle = 0.02
+[providers.openai]
+quota_source = "auto"
+estimated_window = "7d"
+estimated_window_tokens = 0
+[[accounts]]
+id = "codex-main"
+provider = "openai"
+exec = "codex-main"
+limit_id = "codex"
+"#,
+    );
+    let cfg = sb.load(Some(&path), None).expect("valid keys load clean");
+    assert_eq!(
+        cfg.accounts[0].limit_id.as_deref(),
+        Some("codex")
+    );
 }

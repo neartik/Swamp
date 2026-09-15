@@ -26,7 +26,6 @@ const CONFIG: &str = r#"
 [brain]
 reserve_brain_slot = false
 [limits]
-max_parallel = 4
 max_result_bytes = 400
 [providers.anthropic]
 models = { low = "tier-low", mid = "tier-mid", high = "tier-high" }

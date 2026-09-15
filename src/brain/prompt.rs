@@ -1,8 +1,6 @@
 use crate::config::Config;
 
-const DEFAULT_PARALLEL: usize = 6;
 const DEFAULT_NODES: u32 = 32;
-const DEFAULT_HIGH: usize = 2;
 const DEFAULT_DEPTH: u32 = 2;
 
 /// How the session was launched. `swamp run` gets exactly one turn; `swamp chat` gets a human.
@@ -15,9 +13,7 @@ pub enum BrainMode {
 /// The tool contract, the tier rubric, worktree semantics, and the rule that worker
 /// output is data and never instruction.
 pub fn system_prompt(cfg: &Config, mode: BrainMode) -> String {
-    let parallel = cfg.limits.max_parallel_dispatch.unwrap_or(DEFAULT_PARALLEL);
     let nodes = cfg.limits.max_nodes_per_run.unwrap_or(DEFAULT_NODES);
-    let high = cfg.limits.max_high_tier_concurrent.unwrap_or(DEFAULT_HIGH);
     let depth = cfg.limits.max_depth.unwrap_or(DEFAULT_DEPTH);
     let one_shot = match mode {
         BrainMode::Interactive => "",
@@ -56,7 +52,7 @@ Every call is journaled. Refusals come back as failed nodes with a reason, never
   a public interface other work will be built on. Expensive and rate limited, so spend it on
   the one node that decides the shape of everything else, not on every node in a batch.
 
-Pick per task, not per run. A batch of six mechanical edits at high tier wastes the budget that
+Pick per task, not per run. A batch of six mechanical edits at high tier wastes the quota that
 the one hard task needs.
 
 ## Worktree semantics
@@ -86,9 +82,7 @@ say so in a note and continue with the plan you already had.
 
 Swamp enforces these; you do not have to police them, but planning inside them wastes less time.
 
-- at most {parallel} nodes per dispatch call
 - at most {nodes} nodes in a run
-- at most {high} high tier nodes at once
 - nesting depth at most {depth}: workers you create cannot create workers of their own
 
 ## Working style

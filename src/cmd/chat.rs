@@ -97,12 +97,6 @@ fn overrides(ctx: &Ctx, args: &ChatArgs) -> anyhow::Result<Config> {
         );
         cfg.brain.account = Some(id);
     }
-    if let Some(n) = args.workers {
-        cfg.limits.max_parallel = Some(n.max(1));
-    }
-    if let Some(b) = args.budget {
-        cfg.limits.run_budget_usd = Some(b);
-    }
     if args.dry_run {
         cfg.warnings
             .push("--dry-run: dispatch tools journal and return a fake success".into());

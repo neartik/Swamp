@@ -74,7 +74,6 @@ pub struct App {
     pub note: Option<(String, OffsetDateTime)>,
     pub show_thinking: bool,
     pub tier: Tier,
-    pub max_parallel: usize,
     pub collapse: usize,
     pub placeholder: String,
     pub turns: u32,
@@ -120,7 +119,6 @@ impl App {
             note: None,
             show_thinking: cfg.ui.show_thinking.unwrap_or(false),
             tier: cfg.dispatch.default_tier.unwrap_or(Tier::Mid),
-            max_parallel: cfg.limits.max_parallel.unwrap_or(4).max(1),
             collapse: cfg.ui.collapse_lines.unwrap_or(DEFAULT_COLLAPSE).max(1),
             placeholder: "Try \"dispatch two workers to split the pagination work\"".to_owned(),
             turns: 0,
@@ -834,7 +832,6 @@ impl App {
                 vec![self.output("", body)]
             }
             "tier" => self.set_tier(arg.as_deref()),
-            "workers" => self.set_workers(arg.as_deref()),
             "cancel" => self.cancel(arg.as_deref()),
             "diff" => self.diff(arg.as_deref()),
             "thinking" => {
@@ -905,23 +902,6 @@ impl App {
             }
             Err(_) => {
                 self.note("/tier takes low, mid or high");
-                Vec::new()
-            }
-        }
-    }
-
-    fn set_workers(&mut self, arg: Option<&str>) -> Vec<Effect> {
-        let Some(arg) = arg else {
-            return vec![self.output("", vec![format!("max parallel: {}", self.max_parallel)])];
-        };
-        match arg.parse::<usize>() {
-            Ok(n) if n >= 1 => {
-                let body = vec![format!("max parallel: {} -> {n}", self.max_parallel)];
-                self.max_parallel = n;
-                vec![self.output("", body)]
-            }
-            _ => {
-                self.note("/workers takes a number of workers");
                 Vec::new()
             }
         }
@@ -1114,7 +1094,7 @@ impl App {
             t.g(Glyph::Mode),
             self.tier,
             if running > 0 {
-                format!(" · {running}/{} workers", self.max_parallel)
+                format!(" · {running} running")
             } else {
                 String::new()
             }

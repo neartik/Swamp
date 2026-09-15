@@ -37,7 +37,6 @@ fn spec(cwd: &str) -> LaunchSpec {
         kind: NodeKind::Worker,
         permission_mode: "acceptEdits".into(),
         sandbox: "workspace-write".into(),
-        budget_usd: Some(3.0),
         append_system_prompt: None,
         allow_tools: Vec::new(),
         deny_tools: Vec::new(),

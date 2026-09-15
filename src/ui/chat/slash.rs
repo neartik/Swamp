@@ -43,11 +43,6 @@ pub const COMMANDS: &[Cmd] = &[
         help: "show or set the default dispatch tier",
     },
     Cmd {
-        name: "/workers",
-        args: "[n]",
-        help: "show or set how many workers run at once",
-    },
-    Cmd {
         name: "/cancel",
         args: "<node|all>",
         help: "stop one worker or all of them",
@@ -162,9 +157,16 @@ pub fn find(name: &str) -> Option<&'static Cmd> {
     COMMANDS.iter().find(|c| c.name == name)
 }
 
+/// Commands removed outright, pointing at what replaced them: too far apart in spelling for
+/// `distance` to ever suggest the right one.
+const REPLACED: &[(&str, &str)] = &[("workers", "/usage")];
+
 /// `unknown command /foo; did you mean /force?` beats a bare refusal.
 pub fn did_you_mean(name: &str) -> String {
     let bare = name.trim_start_matches('/');
+    if let Some((_, to)) = REPLACED.iter().find(|(from, _)| *from == bare) {
+        return format!("did you mean {to}?");
+    }
     let best = COMMANDS
         .iter()
         .map(|c| (distance(bare, c.name.trim_start_matches('/')), c.name))
@@ -305,12 +307,19 @@ mod tests {
         assert_eq!(did_you_mean("/zzzzzzz"), "try /help");
     }
 
+    /// `/workers` was removed outright; `/usage` replaces it in spirit, not in spelling.
+    #[test]
+    fn workers_is_gone_and_points_at_usage() {
+        assert!(find("/workers").is_none());
+        assert_eq!(did_you_mean("/workers"), "did you mean /usage?");
+    }
+
     #[test]
     fn the_popup_marks_the_selection_and_caps_at_eight_rows() {
         let lines = popup("/", 1, 100, &Theme::plain());
         assert_eq!(lines.len(), MAX_ROWS + 1);
         let text = crate::ui::chat::blocks::text_of(&lines);
         assert!(text[1].starts_with('▌'), "{text:?}");
-        assert!(text.last().unwrap().contains("+5 more"), "{text:?}");
+        assert!(text.last().unwrap().contains("+4 more"), "{text:?}");
     }
 }

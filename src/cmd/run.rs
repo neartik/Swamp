@@ -287,7 +287,6 @@ fn exit_code(failure: Option<&Failure>, interrupted: bool) -> i32 {
         None => 0,
         Some(Failure::NoCapacity { .. }) => 3,
         Some(Failure::Cancelled { .. }) => 6,
-        Some(Failure::BudgetExceeded { .. }) => 7,
         Some(_) => 4,
     }
 }
@@ -295,15 +294,8 @@ fn exit_code(failure: Option<&Failure>, interrupted: bool) -> i32 {
 /// CLI flags are the last config layer, applied here so everything below sees one Config.
 fn overrides(ctx: &Ctx, args: &RunArgs) -> anyhow::Result<Config> {
     let mut cfg = (*ctx.cfg).clone();
-    if let Some(n) = args.workers {
-        cfg.limits.max_parallel = Some(n.max(1));
-    }
     if let Some(t) = &args.timeout {
         cfg.limits.worker_timeout = Some(parse_duration(t)?);
-    }
-    if let Some(b) = args.budget {
-        cfg.limits.run_budget_usd = Some(b);
-        cfg.limits.node_budget_usd = Some(b);
     }
     if let Some(n) = args.max_attempts {
         cfg.dispatch.max_attempts = Some(n.max(1));
@@ -382,7 +374,6 @@ fn launch_spec(
         kind: NodeKind::Worker,
         permission_mode: worker.permission_mode.clone().unwrap_or_default(),
         sandbox: worker.sandbox.clone().unwrap_or_default(),
-        budget_usd: cfg.node_budget_usd(tier),
         append_system_prompt: None,
         allow_tools: worker.allow_tools.clone(),
         deny_tools: worker.deny_tools.clone(),
@@ -491,7 +482,31 @@ mod tests {
     use crate::cli::RunArgs;
     use crate::config::{load, resolve};
     use crate::journal::paths::Paths;
+    use crate::model::core::CancelSource;
     use camino::Utf8PathBuf;
+
+    /// WP-A acceptance: exit code 7 (budget exceeded) is retired and never reused.
+    #[test]
+    fn exit_code_seven_is_retired() {
+        let failures = [
+            None,
+            Some(Failure::NoCapacity {
+                detail: "none".into(),
+            }),
+            Some(Failure::Cancelled {
+                by: CancelSource::User,
+            }),
+            Some(Failure::Timeout { after_s: 1 }),
+            Some(Failure::WorkerError {
+                subtype: "x".into(),
+                detail: "x".into(),
+            }),
+        ];
+        for f in &failures {
+            assert_ne!(exit_code(f.as_ref(), false), 7);
+        }
+        assert_ne!(exit_code(None, true), 7);
+    }
 
     fn git(dir: &Utf8PathBuf, args: &[&str]) {
         let out = std::process::Command::new("git")
@@ -539,12 +554,10 @@ mod tests {
             tier: Some(Tier::Mid),
             provider: None,
             account: None,
-            workers: None,
             isolation: None,
             base: None,
             include_dirty: false,
             timeout: None,
-            budget: None,
             max_attempts: None,
             wait: true,
             detach: false,

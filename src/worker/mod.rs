@@ -275,7 +275,7 @@ pub async fn execute(req: ExecReq<'_>) -> anyhow::Result<RunOutcome> {
             patterns,
             deadline_hit: deadline_hit.load(Ordering::SeqCst),
         })
-        .map(|f| refine(f, spec, timeout, stream_offset));
+        .map(|f| refine(f, timeout, stream_offset));
 
     let summary = st
         .last_final
@@ -298,16 +298,12 @@ pub async fn execute(req: ExecReq<'_>) -> anyhow::Result<RunOutcome> {
 }
 
 /// The classifier works from the stream alone; these three numbers come from the launch.
-fn refine(f: Failure, spec: &LaunchSpec, timeout: Duration, offset: u64) -> Failure {
+fn refine(f: Failure, timeout: Duration, offset: u64) -> Failure {
     match f {
         Failure::Timeout { .. } => Failure::Timeout {
             after_s: timeout.as_secs(),
         },
         Failure::Truncated { .. } => Failure::Truncated { offset },
-        Failure::BudgetExceeded { spent_usd, .. } => Failure::BudgetExceeded {
-            limit_usd: spec.budget_usd.unwrap_or(0.0),
-            spent_usd,
-        },
         other => other,
     }
 }

@@ -1,0 +1,13 @@
+---
+source: src/ui/chat/screens.rs
+expression: welcome_62
+---
+╭────────────────────────────────────────────────────────────╮
+│ ✻ Welcome to Swamp                                         │
+│                                                            │
+│   /help for commands, /status for the run tree             │
+│   cwd: /Users/me/projects/example/repo-one                 │
+│   brain: anthropic/main · claude-opus-4-20250514 · tier h… │
+│   workers: 4 accounts · 3 ready, 1 cooling · 12% of the t… │
+│   run: 9g5fav                                              │
+╰────────────────────────────────────────────────────────────╯

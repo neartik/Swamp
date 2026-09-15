@@ -24,11 +24,6 @@ pub enum Failure {
     Overloaded {
         detail: String,
     },
-    /// Our own guard tripped. Do NOT fail over: another account would spend too.
-    BudgetExceeded {
-        limit_usd: f64,
-        spent_usd: f64,
-    },
     Timeout {
         after_s: u64,
     },
@@ -91,7 +86,6 @@ impl Failure {
         matches!(
             self,
             Self::WorkerError { .. }
-                | Self::BudgetExceeded { .. }
                 | Self::Timeout { .. }
                 | Self::PermissionDenied { .. }
                 | Self::NoCapacity { .. }
@@ -119,7 +113,6 @@ mod tests {
             Failure::Overloaded { .. } => Class::Retry,
             Failure::Crashed { .. } => Class::Retry,
             Failure::Truncated { .. } => Class::Retry,
-            Failure::BudgetExceeded { .. } => Class::Terminal,
             Failure::Timeout { .. } => Class::Terminal,
             Failure::WorkerError { .. } => Class::Terminal,
             Failure::PermissionDenied { .. } => Class::Terminal,
@@ -142,10 +135,6 @@ mod tests {
             },
             Failure::Overloaded {
                 detail: "529".into(),
-            },
-            Failure::BudgetExceeded {
-                limit_usd: 3.0,
-                spent_usd: 3.5,
             },
             Failure::Timeout { after_s: 1500 },
             Failure::WorkerError {

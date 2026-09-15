@@ -271,8 +271,6 @@ pub fn config() -> crate::config::Config {
     let schema: crate::config::Schema = toml::from_str(
         r#"
 version = 1
-[limits]
-max_parallel = 4
 [dispatch]
 default_tier = "mid"
 [providers.anthropic]
@@ -316,7 +314,7 @@ pub fn welcome() -> WelcomeInfo {
     WelcomeInfo {
         cwd: "/Users/me/projects/example/repo-one".to_owned(),
         brain: "anthropic/main · claude-opus-4-20250514 · tier high".to_owned(),
-        workers: "4 accounts · 3 ready, 1 cooling · max 4 parallel · budget $10.00".to_owned(),
+        workers: "4 accounts · 3 ready, 1 cooling · 12% of the tightest window used".to_owned(),
         run: run_id().short(),
     }
 }

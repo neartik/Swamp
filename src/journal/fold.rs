@@ -536,7 +536,6 @@ fn failure_kind(f: &Failure) -> &'static str {
         Failure::RateLimited { .. } => "rate_limited",
         Failure::AuthExpired { .. } => "auth_expired",
         Failure::Overloaded { .. } => "overloaded",
-        Failure::BudgetExceeded { .. } => "budget_exceeded",
         Failure::Timeout { .. } => "timeout",
         Failure::WorkerError { .. } => "worker_error",
         Failure::PermissionDenied { .. } => "permission_denied",

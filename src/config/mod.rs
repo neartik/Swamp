@@ -5,7 +5,7 @@ pub mod validate;
 
 pub use schema::{
     AccountCfg, BrainCfg, CooldownCfg, DispatchCfg, FailureCfg, JournalCfg, Limits, PricingCfg,
-    ProviderCfg, Schema, TierCfg, UiCfg, WorkerCfg, WorkspaceCfg,
+    ProviderCfg, Schema, TierCfg, UiCfg, WeightsCfg, WorkerCfg, WorkspaceCfg,
 };
 
 use crate::error::SwampError;
@@ -36,7 +36,7 @@ pub struct Config {
     pub profiles: BTreeMap<String, BTreeMap<String, toml::Value>>,
     /// Files that contributed a layer, lowest priority first.
     pub sources: Vec<Utf8PathBuf>,
-    /// Non-fatal adjustments made at load time, e.g. shared isolation forcing max_parallel = 1.
+    /// Non-fatal adjustments made at load time.
     pub warnings: Vec<String>,
 }
 
@@ -167,13 +167,6 @@ impl Config {
                 ("overloaded".to_owned(), cfg.overloaded.clone()),
             ]),
         })
-    }
-
-    pub fn node_budget_usd(&self, t: Tier) -> Option<f64> {
-        self.tiers
-            .get(&t)
-            .and_then(|tc| tc.node_budget_usd)
-            .or(self.limits.node_budget_usd)
     }
 
     pub fn node_timeout(&self, t: Tier) -> Duration {

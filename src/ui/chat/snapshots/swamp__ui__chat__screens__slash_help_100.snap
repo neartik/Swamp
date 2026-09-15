@@ -10,7 +10,6 @@ commands
 /trace [node]             the run tree with its events
 /cost                     tokens and spend for this run
 /tier [low|mid|high]      show or set the default dispatch tier
-/workers [n]              show or set how many workers run at once
 /cancel <node|all>        stop one worker or all of them
 /diff <node>              the stat of a worker's captured patch
 /thinking [on|off]        show or hide the brain's thinking

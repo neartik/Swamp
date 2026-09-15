@@ -412,7 +412,6 @@ fn spec_for(session: &RunSession, record: &NodeRecord) -> LaunchSpec {
         kind: record.kind,
         permission_mode: worker.permission_mode.clone().unwrap_or_default(),
         sandbox: worker.sandbox.clone().unwrap_or_default(),
-        budget_usd: session.cfg.node_budget_usd(record.tier),
         append_system_prompt: None,
         allow_tools: worker.allow_tools.clone(),
         deny_tools: worker.deny_tools.clone(),

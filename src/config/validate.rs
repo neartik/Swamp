@@ -1,6 +1,5 @@
 use crate::config::Config;
 use crate::error::SwampError;
-use crate::model::result::IsolationMode;
 use std::collections::BTreeSet;
 
 /// One validation failure, named by the offending config key.
@@ -12,16 +11,6 @@ pub struct Problem {
 
 /// Reports ALL problems at once; a single bad key must not hide the next one.
 pub fn validate(cfg: &mut Config) -> Result<(), SwampError> {
-    if cfg.workspace.isolation == Some(IsolationMode::Shared) && cfg.limits.max_parallel != Some(1)
-    {
-        cfg.limits.max_parallel = Some(1);
-        cfg.warnings.push(
-            "workspace.isolation = \"shared\" forces limits.max_parallel = 1: the real checkout \
-             cannot host two workers at once"
-                .into(),
-        );
-    }
-
     let problems = problems(cfg);
     if problems.is_empty() {
         return Ok(());
@@ -103,11 +92,45 @@ pub fn problems(cfg: &Config) -> Vec<Problem> {
         );
     }
 
-    if cfg.limits.max_parallel == Some(0) {
+    if let Some(w) = &cfg.dispatch.weights {
+        for (key, v) in [
+            ("util", w.util),
+            ("load", w.load),
+            ("share", w.share),
+            ("weight", w.weight),
+            ("idle", w.idle),
+        ] {
+            if let Some(v) = v
+                && !(v.is_finite() && v >= 0.0)
+            {
+                push(
+                    format!("dispatch.weights.{key}"),
+                    format!("{v} must be finite and non-negative"),
+                );
+            }
+        }
+    }
+    if let Some(age) = cfg.dispatch.quota_max_age
+        && age < std::time::Duration::from_secs(10)
+    {
         push(
-            "limits.max_parallel".into(),
-            "must be at least 1".to_string(),
+            "dispatch.quota_max_age".into(),
+            "must be at least 10s".to_string(),
         );
+    }
+    if cfg.dispatch.near_exhaustion_penalty.is_some_and(|p| p < 0.0) {
+        push(
+            "dispatch.near_exhaustion_penalty".into(),
+            "must be non-negative".to_string(),
+        );
+    }
+    for (p, pc) in &cfg.providers {
+        if pc.estimated_window.is_some() != pc.estimated_window_tokens.is_some() {
+            push(
+                format!("providers.{p}.estimated_window"),
+                "estimated_window and estimated_window_tokens must be set together".to_string(),
+            );
+        }
     }
 
     for (p, fc) in &cfg.failure {

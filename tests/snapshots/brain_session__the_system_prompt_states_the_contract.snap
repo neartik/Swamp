@@ -33,7 +33,7 @@ Every call is journaled. Refusals come back as failed nodes with a reason, never
   a public interface other work will be built on. Expensive and rate limited, so spend it on
   the one node that decides the shape of everything else, not on every node in a batch.
 
-Pick per task, not per run. A batch of six mechanical edits at high tier wastes the budget that
+Pick per task, not per run. A batch of six mechanical edits at high tier wastes the quota that
 the one hard task needs.
 
 ## Worktree semantics
@@ -63,9 +63,7 @@ say so in a note and continue with the plan you already had.
 
 Swamp enforces these; you do not have to police them, but planning inside them wastes less time.
 
-- at most 6 nodes per dispatch call
 - at most 32 nodes in a run
-- at most 2 high tier nodes at once
 - nesting depth at most 2: workers you create cannot create workers of their own
 
 ## Working style

@@ -15,16 +15,11 @@ pub const DEFAULTS_TOML: &str = r#"
 version = 1
 
 [limits]
-max_parallel = 4
 max_nodes_per_run = 32
-max_parallel_dispatch = 6
-max_high_tier_concurrent = 2
 max_depth = 2
 worker_timeout = "25m"
 brain_turn_timeout = "15m"
 grace_period = "5s"
-run_budget_usd = 25.0
-node_budget_usd = 3.0
 max_prompt_bytes = 200000
 max_result_bytes = 8000
 unsafe_ack = false
@@ -44,6 +39,20 @@ max_attempts = 3
 cross_provider_failover = false
 default_provider = "anthropic"
 default_tier = "mid"
+quota_max_age = "60s"
+near_exhaustion_penalty = 2.0
+
+  [dispatch.weights]
+  util = 0.50
+  load = 0.30
+  share = 0.15
+  weight = 0.05
+  idle = 0.02
+
+[providers.openai]
+quota_source = "auto"
+estimated_window = "7d"
+estimated_window_tokens = 0
 
 [cooldown]
 min = "60s"
@@ -126,12 +135,36 @@ pub fn repo_config_path(repo: &Utf8Path) -> camino::Utf8PathBuf {
 pub fn read_layer(path: &Utf8Path) -> Result<Layer, SwampError> {
     let text = std::fs::read_to_string(path)
         .map_err(|e| SwampError::ConfigInvalid(format!("{path}: {e}")))?;
-    let schema: Schema =
-        toml::from_str(&text).map_err(|e| SwampError::ConfigInvalid(format!("{path}: {e}")))?;
+    let schema: Schema = toml::from_str(&text)
+        .map_err(|e| SwampError::ConfigInvalid(format!("{path}: {e}{}", removed_key_hint(&e))))?;
     Ok(Layer {
         origin: path.to_string(),
         schema,
     })
+}
+
+/// Keys WP-A deleted, with the reason and the replacement, so a config written for an older
+/// Swamp gets a redirect instead of a bare "unknown field".
+const REMOVED_KEYS: &[&str] = &[
+    "max_parallel",
+    "max_parallel_dispatch",
+    "max_high_tier_concurrent",
+    "run_budget_usd",
+    "node_budget_usd",
+];
+
+fn removed_key_hint(e: &toml::de::Error) -> String {
+    let msg = e.to_string();
+    REMOVED_KEYS
+        .iter()
+        .find(|k| msg.contains(&format!("unknown field `{k}`")))
+        .map(|k| {
+            format!(
+                "\n`{k}` was removed: Swamp enforces no global parallelism cap and no budget \
+                 cap; set accounts[].max_concurrency per account for a concurrency ceiling."
+            )
+        })
+        .unwrap_or_default()
 }
 
 pub fn env_layer() -> Result<Layer, SwampError> {
@@ -151,7 +184,7 @@ pub fn env_layer() -> Result<Layer, SwampError> {
         set_path(&mut one, &path, parse_scalar(&raw));
         toml::Value::Table(one.clone())
             .try_into::<Schema>()
-            .map_err(|e| SwampError::ConfigInvalid(format!("{key}: {e}")))?;
+            .map_err(|e| SwampError::ConfigInvalid(format!("{key}: {e}{}", removed_key_hint(&e))))?;
         set_path(&mut table, &path, parse_scalar(&raw));
     }
 

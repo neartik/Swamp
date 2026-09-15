@@ -9,4 +9,4 @@ expression: "live(&mut app, 100)"
 ────────────────────────────────────────────────────────────────────────────────────────────────────
 >  Try "dispatch two workers to split the pagination work"
 ────────────────────────────────────────────────────────────────────────────────────────────────────
-  ? for shortcuts          ⏵⏵ dispatch mid · 2/4 workers           run 9g5fav · 2 running · ~$0.19
+  ? for shortcuts           ⏵⏵ dispatch mid · 2 running            run 9g5fav · 2 running · ~$0.19

@@ -252,8 +252,6 @@ async fn quota_aware_prefers_the_less_used_account_and_degrades_without_telemetr
 async fn per_account_concurrency_is_a_hard_ceiling() {
     let h = harness(
         r#"
-[limits]
-max_parallel = 8
 [brain]
 reserve_brain_slot = false
 [providers.anthropic]
@@ -275,16 +273,21 @@ max_concurrency = 2
     );
 }
 
-#[tokio::test]
-async fn the_global_semaphore_caps_total_leases_across_accounts() {
-    let h = harness(&format!("{TWO_ACCOUNTS}\n[limits]\nmax_parallel = 1\n")).await;
-    let _a = acquire(&h.pool).await.expect("first");
-    assert!(matches!(acquire(&h.pool).await, Err(NoCapacity::Saturated)));
-}
+const ONE_ACCOUNT_SOLO: &str = r#"
+[brain]
+reserve_brain_slot = false
+[providers.anthropic]
+models = { mid = "tier-mid" }
+[[accounts]]
+id = "main"
+provider = "anthropic"
+exec = "claude-main"
+max_concurrency = 1
+"#;
 
 #[tokio::test]
 async fn acquire_waits_without_spinning() {
-    let h = harness(&format!("{TWO_ACCOUNTS}\n[limits]\nmax_parallel = 1\n")).await;
+    let h = harness(ONE_ACCOUNT_SOLO).await;
     let _a = acquire(&h.pool).await.expect("first");
     let before = h.pool.wakeups();
     let denied = h
@@ -305,7 +308,7 @@ async fn acquire_waits_without_spinning() {
 
 #[tokio::test]
 async fn a_panicking_task_releases_its_permit_and_slot() {
-    let h = harness(&format!("{TWO_ACCOUNTS}\n[limits]\nmax_parallel = 1\n")).await;
+    let h = harness(ONE_ACCOUNT_SOLO).await;
     let pool = Arc::clone(&h.pool);
     let joined = tokio::spawn(async move {
         let _lease = acquire(&pool).await.expect("lease");
@@ -399,8 +402,6 @@ async fn a_success_clears_the_breaker_count() {
 async fn proactive_quota_stop_blocks_new_leases_but_not_a_running_one() {
     let h = harness(
         r#"
-[limits]
-max_parallel = 8
 [brain]
 reserve_brain_slot = false
 [cooldown]
@@ -482,8 +483,6 @@ async fn a_fresh_pool_does_not_inherit_stale_inflight_counts() {
 async fn a_reserved_brain_account_is_out_of_the_worker_pool() {
     let h = harness(
         r#"
-[limits]
-max_parallel = 4
 [brain]
 reserve_brain_slot = true
 provider = "anthropic"
@@ -522,8 +521,6 @@ max_concurrency = 2
 async fn the_brain_lease_does_not_consume_a_worker_permit() {
     let h = harness(
         r#"
-[limits]
-max_parallel = 4
 [brain]
 reserve_brain_slot = false
 [providers.anthropic]
@@ -549,8 +546,8 @@ max_concurrency = 4
         .expect("a brain lease");
     assert_eq!(brain.account, id("main"));
 
-    // max_parallel defaults to 4 and reserve_brain_slot is off in this fixture, so four
-    // worker leases must still be available with the brain holding its own.
+    // each account allows 4 concurrent workers and reserve_brain_slot is off in this
+    // fixture, so four worker leases must still be available with the brain holding its own.
     let mut leases = Vec::new();
     for _ in 0..4 {
         leases.push(acquire(&h.pool).await.expect("a worker lease"));

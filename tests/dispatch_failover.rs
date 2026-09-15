@@ -361,7 +361,6 @@ fn spec() -> LaunchSpec {
         kind: NodeKind::Worker,
         permission_mode: String::new(),
         sandbox: String::new(),
-        budget_usd: None,
         append_system_prompt: None,
         allow_tools: Vec::new(),
         deny_tools: Vec::new(),
@@ -584,7 +583,7 @@ async fn every_account_cooling_gives_up_with_no_account_available() {
 
 #[tokio::test(start_paused = true)]
 async fn attempts_are_capped_by_max_attempts() {
-    let f = fixture(&format!("{TWO_ACCOUNTS}\n[limits]\nmax_parallel = 8\n")).await;
+    let f = fixture(TWO_ACCOUNTS).await;
     let runner = Scripted::new(
         &f.root,
         vec![
@@ -743,26 +742,6 @@ async fn cross_provider_failover_is_opt_in() {
             }
         }
     }
-}
-
-#[tokio::test]
-async fn max_parallel_dispatch_serializes_a_batch() {
-    let f = fixture(&format!(
-        "{TWO_ACCOUNTS}\n[limits]\nmax_parallel_dispatch = 1\n"
-    ))
-    .await;
-    let runner = Scripted::slow(&f.root, Duration::from_secs(30));
-    let disp = f.dispatcher(runner.clone()).await;
-    let results = disp
-        .dispatch_batch(
-            NodeId::new(),
-            vec![task("one"), task("two")],
-            Duration::from_millis(150),
-        )
-        .await;
-    assert_eq!(results.len(), 2);
-    assert!(results.iter().all(|r| r.state == "running"));
-    assert_eq!(runner.calls().len(), 1, "only one node runs at a time");
 }
 
 /// `esc esc` stops the workers that are still running and nothing else: a finished node has

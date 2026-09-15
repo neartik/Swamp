@@ -88,11 +88,6 @@ pub struct ChatArgs {
     /// Relaunch the brain with --resume plus a state preamble
     #[arg(long, value_name = "RUN")]
     pub resume: Option<String>,
-    /// Override limits.max_parallel
-    #[arg(long, value_name = "N")]
-    pub workers: Option<usize>,
-    #[arg(long, value_name = "USD")]
-    pub budget: Option<f64>,
     /// Boot a real brain whose dispatch tools journal and return a fake success
     #[arg(long)]
     pub dry_run: bool,
@@ -113,8 +108,6 @@ pub struct RunArgs {
     /// Pins the account and disables failover
     #[arg(long, value_name = "ID")]
     pub account: Option<String>,
-    #[arg(long, value_name = "N")]
-    pub workers: Option<usize>,
     #[arg(long, value_name = "MODE")]
     pub isolation: Option<IsolationMode>,
     /// Branch workers from this ref instead of HEAD
@@ -125,8 +118,6 @@ pub struct RunArgs {
     pub include_dirty: bool,
     #[arg(long, value_name = "DUR")]
     pub timeout: Option<String>,
-    #[arg(long, value_name = "USD")]
-    pub budget: Option<f64>,
     #[arg(long, value_name = "N")]
     pub max_attempts: Option<u32>,
     #[arg(long, conflicts_with = "detach")]
@@ -357,7 +348,40 @@ pub struct McpBridgeArgs {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use clap::Parser;
+    use clap::{CommandFactory, Parser};
+
+    /// WP-A acceptance: `--workers` and `--budget` are gone from every surface that used to
+    /// carry them, and the generated `--help` text never mentions either.
+    #[test]
+    fn workers_and_budget_flags_are_gone() {
+        for args in [
+            vec!["swamp", "chat", "--workers", "2"],
+            vec!["swamp", "chat", "--budget", "5"],
+            vec!["swamp", "run", "do it", "--workers", "2"],
+            vec!["swamp", "run", "do it", "--budget", "5"],
+        ] {
+            assert!(
+                Cli::try_parse_from(&args).is_err(),
+                "{args:?} must fail to parse"
+            );
+        }
+        for help in [
+            Cli::command().render_help().to_string(),
+            Cli::command()
+                .find_subcommand_mut("run")
+                .expect("run subcommand")
+                .render_help()
+                .to_string(),
+            Cli::command()
+                .find_subcommand_mut("chat")
+                .expect("chat subcommand")
+                .render_help()
+                .to_string(),
+        ] {
+            assert!(!help.contains("--workers"), "{help}");
+            assert!(!help.contains("--budget"), "{help}");
+        }
+    }
 
     /// `trailing_var_arg` swallowed every flag written after the task, so the README's own
     /// first-run line silently ran the brain at the default tier.
