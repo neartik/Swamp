@@ -37,12 +37,18 @@ const DEFAULT_HISTORY: usize = 500;
 /// How long a resize burst has to stay quiet before the live area is repaired.
 const RESIZE_QUIET: Duration = Duration::from_millis(50);
 
+/// Whether the chat gets the inline viewport. `swamp chat` asks before printing its run
+/// header, so the header and the welcome box never both claim the run id.
+pub fn interactive_stdout() -> bool {
+    std::io::stdout().is_terminal()
+}
+
 /// The chat UI. A tty gets the inline viewport; a pipe gets the plain transcript, so CI and
 /// scripted runs are unaffected.
 pub async fn repl(brain: Box<dyn Brain>, disp: Arc<Dispatcher>, ctx: &Ctx) -> anyhow::Result<i32> {
     let mut brain = brain;
     brain.start().await?;
-    if std::io::stdout().is_terminal() {
+    if interactive_stdout() {
         interactive(brain, disp, ctx).await
     } else {
         plain(brain, disp, ctx).await

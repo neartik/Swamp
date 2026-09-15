@@ -110,7 +110,10 @@ The guard is not `live.rs`'s: `chat::interactive` builds it right after `live::e
 `LeaveAlternateScreen`. `swamp watch` keeps the full-screen view; chat is inline.
 
 **Non-tty.** If `!std::io::stdout().is_terminal()`, `repl` runs the plain printer (`drain_turn`,
-in `mod.rs`). CI, pipes and scripted runs are unaffected.
+in `mod.rs`). CI, pipes and scripted runs are unaffected. `cmd::chat` asks the same question
+through `ui::chat::interactive_stdout()` before printing the one-shot `run <id>` header: the
+welcome box already carries `run: <short>`, so on a tty the header would be a bare line above the
+viewport. `swamp run` and the plain transcript still print it.
 
 ### 1.2 Committing blocks to scrollback
 
@@ -676,6 +679,7 @@ handled (Windows consoles repeat otherwise).
 
 | Key | Condition | Behaviour |
 |---|---|---|
+| `enter` | popup open, the text already names a command | submit it; a spelled-out `/status` never costs a second enter |
 | `enter` | popup open | complete the selected command into the input, close the popup, do not submit |
 | `enter` | buffer ends in `\` | replace the `\` with a newline |
 | `enter` | buffer non-empty | commit the `> ` bar, then run the slash command or `Effect::Send` |
@@ -738,6 +742,10 @@ pub const COMMANDS: &[Cmd] = &[ /* … */ ];
 | `/resume` | `<run\|last>` | prints the exact `swamp chat --resume <run>` line, quits when confirmed with a second `/resume` |
 | `/quit` | | quit 0; aliases `/exit`, `/q` |
 
+`slash::runnable` decides what enter does while the popup is open: the typed text naming a
+command, arguments and all, or leaving one candidate spelled exactly as typed, runs it; anything
+else completes the selection. `tab` always completes.
+
 Every handler returns a `Block`, so command output commits to scrollback exactly like model output.
 Unknown command: an `err` notice, `unknown command /foo; did you mean /force?` using Levenshtein
 distance <= 2 over the table, else `try /help`.
@@ -766,7 +774,7 @@ the line's opening, never its closing.
 
 | Source | Rendered |
 |---|---|
-| ` ```lang ` | emits a `meta` `lang` hint row, opens the fence |
+| ` ```lang ` | emits a `meta` + `DIM` `lang` hint row, opens the fence; a bare ` ``` ` opens it with no row at all |
 | line inside a fence | 2 extra spaces of indent, whole line in `code`, no inline parsing |
 | ` ``` ` | closes the fence |
 | `# ` .. `###### ` | text in `name`, markers stripped, one blank line before unless the previous line was blank |
@@ -781,7 +789,8 @@ Nested lists indent 2 per level, detected from leading whitespace in steps of 2.
 
 Inline pass, single left-to-right scan emitting `Vec<Span>`, never backtracking:
 
-- `` `code` `` -> `code` style, backticks dropped, one space of padding
+- `` `code` `` -> `code` style, backticks dropped, one space of padding only where the palette
+  paints a background; `plain` (`NO_COLOR`, `--no-color`) has none, so the text keeps its own spacing
 - `**bold**`, `__bold__` -> `BOLD`
 - `*em*`, `_em_` -> `ITALIC`
 - `~~strike~~` -> `CROSSED_OUT`

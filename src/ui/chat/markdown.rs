@@ -113,9 +113,10 @@ impl MdStream {
             if lang.trim().is_empty() {
                 return Vec::new();
             }
-            return vec![Line::from(
-                t.span(format!("  {}", lang.trim()), Role::Meta),
-            )];
+            return vec![Line::from(Span::styled(
+                format!("  {}", lang.trim()),
+                t.style(Role::Meta).add_modifier(Modifier::DIM),
+            ))];
         }
         if body.is_empty() {
             if st.prev_blank {
@@ -263,7 +264,13 @@ fn token(chars: &[char], i: usize, t: &Theme, base: Role) -> Option<(Vec<Span<'s
     if c == '`' {
         let end = find(chars, i + 1, "`")?;
         let body: String = chars[i + 1..end].iter().collect();
-        return Some((vec![t.span(format!(" {body} "), Role::Code)], end + 1));
+        // The padding only earns its columns against a background; without one it is stray space.
+        let text = if t.style(Role::Code).bg.is_some() {
+            format!(" {body} ")
+        } else {
+            body
+        };
+        return Some((vec![t.span(text, Role::Code)], end + 1));
     }
     for (marker, modifier) in [
         ("**", Modifier::BOLD),
@@ -452,6 +459,42 @@ mod tests {
         assert_eq!(texts(&body), vec!["    **not bold**".to_owned()]);
         let close = s.push("```\n");
         assert!(close.is_empty());
+    }
+
+    #[test]
+    fn a_fence_header_is_dim_and_a_bare_fence_has_no_header_at_all() {
+        let mut s = md();
+        let open = s.push("```python\n");
+        assert_eq!(texts(&open), vec!["  python".to_owned()]);
+        assert!(
+            open[0].spans[0].style.add_modifier.contains(Modifier::DIM),
+            "{:?}",
+            open[0].spans[0].style
+        );
+        assert_eq!(texts(&s.push("print(1)\n")), vec!["    print(1)".to_owned()]);
+        let mut s = md();
+        assert!(s.push("```\n").is_empty(), "nothing to label");
+    }
+
+    #[test]
+    fn inline_code_is_padded_only_where_the_palette_paints_a_background() {
+        let mut plain = md();
+        assert_eq!(
+            texts(&plain.push("run `calc.py` now\n")),
+            vec!["  run calc.py now".to_owned()],
+            "NO_COLOR gets no stray spaces"
+        );
+        let mut painted = MdStream::new(
+            60,
+            Theme {
+                palette: crate::ui::chat::theme::Palette::TrueColor,
+                ascii: false,
+            },
+        );
+        assert_eq!(
+            texts(&painted.push("run `calc.py` now\n")),
+            vec!["  run  calc.py  now".to_owned()]
+        );
     }
 
     #[test]

@@ -2,4 +2,27 @@
 source: src/ui/chat/screens.rs
 expression: "committed(help, 100)"
 ---
+> /help
+commands
+/help                     commands and keyboard shortcuts
+/status                   the run tree, same output as swamp trace
+/accounts                 the account pool, health and spend
+/trace [node]             the run tree with its events
+/cost                     tokens and spend for this run
+/tier [low|mid|high]      show or set the default dispatch tier
+/workers [n]              show or set how many workers run at once
+/cancel <node|all>        stop one worker or all of them
+/diff <node>              the stat of a worker's captured patch
+/thinking [on|off]        show or hide the brain's thinking
+/clear                    clear the screen, keep the conversation
+/resume <run|last>        the command that reopens a run
+/quit                     leave the chat
 
+enter         send                           ctrl+o    expand the last result
+alt+enter     newline (also shift+enter)     ctrl+l    clear the screen
+esc           interrupt the turn             ctrl+c    clear input, twice to quit
+esc esc       cancel running workers         ctrl+d    quit
+↑ ↓           history (empty input)          /         commands
+
+shift+enter needs a terminal that speaks the kitty keyboard protocol;
+alt+enter and a trailing backslash always work.

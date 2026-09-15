@@ -2,4 +2,17 @@
 source: src/ui/chat/screens.rs
 expression: "committed(status, 100)"
 ---
+> /status
+run 9g5fav  /repo  base 9f3c1ad  started 22:13:21  2m19s  ~$0.23  4.2k tok
 
+* 9g5fav  brain                               anthropic/main    claude-op…        -     1.4k       …
+  |
+  +- 9g5f01  [low ] add pagination to /users            anthropic/main    claude-so…    2m10s     1…
+  |    branch swamp/9g5fav/9g5f01-1   +21 -1   2 files
+  |
+  +- 9g5f02  [mid ] backfill the users index            anthropic/alt     claude-so…    2m06s     1…
+       PermissionDenied: 2 tool calls were auto-denied: Bash x2
+       no failover (task-level failure)
+
+usage  in 3k  out 1.2k  cache-read 0  cache-write 0
+cost   ~$0.23   (1 node reported no cost data)

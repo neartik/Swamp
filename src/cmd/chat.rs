@@ -16,7 +16,10 @@ pub async fn run(ctx: &Ctx, args: &ChatArgs) -> anyhow::Result<i32> {
         None => None,
     };
     let session = RunSession::start(ctx, cfg.clone(), RunId::new(), None).await?;
-    println!("run {}", session.paths.run);
+    // The interactive UI prints the run id in its welcome box; the header would leak above it.
+    if !crate::ui::chat::interactive_stdout() {
+        println!("run {}", session.paths.run);
+    }
 
     let provider = cfg.brain.provider.unwrap_or(Provider::Anthropic);
     let dispatcher = session.dispatcher();

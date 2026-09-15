@@ -145,6 +145,18 @@ pub fn common_prefix(input: &str) -> String {
     prefix
 }
 
+/// Whether enter should run the line instead of completing it: the typed text already names a
+/// command, arguments and all, or leaves one candidate spelled exactly as typed.
+pub fn runnable(input: &str) -> bool {
+    let typed = input.trim();
+    let head = typed.split_whitespace().next().unwrap_or_default();
+    if find(head).is_some() {
+        return true;
+    }
+    let cands = filter(typed);
+    cands.len() == 1 && cands[0].name == typed
+}
+
 pub fn find(name: &str) -> Option<&'static Cmd> {
     let name = name.trim();
     COMMANDS.iter().find(|c| c.name == name)
@@ -269,6 +281,15 @@ mod tests {
         assert_eq!(common_prefix("/tr"), "/trace");
         assert_eq!(common_prefix("/t"), "/t");
         assert_eq!(common_prefix("/c"), "/c", "/cost, /cancel, /clear share only /c");
+    }
+
+    #[test]
+    fn enter_runs_a_name_that_is_already_typed_out_and_completes_anything_else() {
+        assert!(runnable("/status"));
+        assert!(runnable("/tier low"), "arguments do not make it ambiguous");
+        assert!(!runnable("/t"), "three candidates, so enter completes");
+        assert!(!runnable("/q"), "one candidate, but not spelled out");
+        assert!(!runnable("/nope"));
     }
 
     #[test]

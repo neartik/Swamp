@@ -528,7 +528,7 @@ impl App {
                 self.editor.kill_word();
                 Vec::new()
             }
-            KeyCode::Enter if self.popup.is_some() => {
+            KeyCode::Enter if self.popup.is_some() && !slash::runnable(self.editor.text()) => {
                 self.accept_popup();
                 Vec::new()
             }

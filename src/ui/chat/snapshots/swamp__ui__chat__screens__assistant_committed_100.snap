@@ -4,7 +4,7 @@ expression: "committed(scrollback, 100)"
 ---
 ● I'll read the current handler first, then dispatch two workers.
 
-  The endpoint lives in  api/users.rs  and returns the full table today. Two independent pieces of
+  The endpoint lives in api/users.rs and returns the full table today. Two independent pieces of
   work fall out of that:
 
   1. the handler change, cursor based, no schema change

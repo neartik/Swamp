@@ -247,6 +247,31 @@ fn the_slash_popup_and_the_shortcut_overlay() {
 }
 
 #[test]
+fn the_welcome_box_carries_the_run_id_so_chat_drops_the_one_shot_header() {
+    let mut app = fx::app(100);
+    let welcome = screen(app.take_welcome(), 100);
+    assert!(welcome.contains("run: 9g5fav"), "{welcome}");
+}
+
+#[test]
+fn enter_runs_a_command_that_is_typed_out_and_completes_a_partial_one() {
+    let mut app = fx::app(100);
+    app.take_welcome();
+    typed(&mut app, "/status");
+    let out = app.reduce(key(KeyCode::Enter));
+    assert!(app.editor.is_empty(), "the command ran, it did not complete");
+    assert!(app.popup.is_none());
+    assert!(!committed(out, 100).is_empty(), "the run tree committed");
+
+    let mut app = fx::app(100);
+    app.take_welcome();
+    typed(&mut app, "/t");
+    assert!(app.reduce(key(KeyCode::Enter)).is_empty(), "three candidates");
+    assert_eq!(app.editor.text(), "/trace");
+    assert!(app.popup.is_none());
+}
+
+#[test]
 fn slash_help_and_status_commit_like_model_output() {
     let mut app = fx::app(100);
     app.take_welcome();
