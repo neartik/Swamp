@@ -458,7 +458,11 @@ fn permission_modes(cfg: &Config, out: &mut Vec<Check>) {
             warning("providers.anthropic.worker", &worker.permission_mode),
         ));
     }
-    if denies_bash(cfg.brain.permission_mode.as_deref(), &cfg.brain.allow_tools, &[]) {
+    if denies_bash(
+        cfg.brain.permission_mode.as_deref(),
+        &cfg.brain.allow_tools,
+        &[],
+    ) {
         out.push(Check::new(
             "brain/permission_mode",
             Level::Warn,

@@ -147,7 +147,13 @@ impl<W: Write> Inline<W> {
         }
         let mut up = col / width;
         for i in 0..row as usize {
-            up += self.widths.get(i).copied().unwrap_or(0).div_ceil(width).max(1);
+            up += self
+                .widths
+                .get(i)
+                .copied()
+                .unwrap_or(0)
+                .div_ceil(width)
+                .max(1);
         }
         up
     }

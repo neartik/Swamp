@@ -45,7 +45,11 @@ fn the_brain_dispatches_two_workers_and_they_hang_off_its_node() {
         let result: serde_json::Value = serde_json::from_str(&body).expect("valid json");
         assert_eq!(result["state"], "succeeded", "{body}");
         let files = result["files"].as_array().expect("a file list");
-        assert_eq!(files.len(), 1, "a node with a patch lists its files: {body}");
+        assert_eq!(
+            files.len(),
+            1,
+            "a node with a patch lists its files: {body}"
+        );
         assert_eq!(files[0]["source"], "git");
     }
     let titles: std::collections::BTreeSet<&str> =
@@ -136,10 +140,10 @@ fn the_brain_credits_its_node_cost_and_quota_to_its_account() {
     use swamp::model::core::{AccountId, LimitScope};
 
     // `prefer` decides which account the brain reserves; the worker gets the other one.
-    let h = Harness::new()
-        .with_accounts(2, 0)
-        .prefer("alt")
-        .scenario("alt", Scenario::claude().dispatches("lex", "write the lexer"));
+    let h = Harness::new().with_accounts(2, 0).prefer("alt").scenario(
+        "alt",
+        Scenario::claude().dispatches("lex", "write the lexer"),
+    );
 
     h.swamp(&["run", TASK]).assert().success();
 

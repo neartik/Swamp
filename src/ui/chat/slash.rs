@@ -211,7 +211,10 @@ pub fn popup(input: &str, selected: usize, width: u16, t: &Theme) -> Vec<Line<'s
             Span::raw(" "),
             t.span(matched.to_owned(), Role::Accent),
             t.span(format!("{rest:<name_width$}"), Role::Name),
-            t.span(fmt::truncate(c.help, width.saturating_sub(16) as usize), Role::Meta),
+            t.span(
+                fmt::truncate(c.help, width.saturating_sub(16) as usize),
+                Role::Meta,
+            ),
         ];
         if picked {
             let used: usize = spans.iter().map(|s| s.content.width()).sum();
@@ -280,7 +283,11 @@ mod tests {
         assert!(names.starts_with(&["/trace", "/tier", "/thinking"]) || names.len() >= 3);
         assert_eq!(common_prefix("/tr"), "/trace");
         assert_eq!(common_prefix("/t"), "/t");
-        assert_eq!(common_prefix("/c"), "/c", "/cost, /cancel, /clear share only /c");
+        assert_eq!(
+            common_prefix("/c"),
+            "/c",
+            "/cost, /cancel, /clear share only /c"
+        );
     }
 
     #[test]

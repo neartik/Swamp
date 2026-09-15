@@ -56,11 +56,7 @@ pub async fn repl(brain: Box<dyn Brain>, disp: Arc<Dispatcher>, ctx: &Ctx) -> an
 }
 
 /// No raw mode, no escape sequences, one block of text per turn.
-async fn plain(
-    mut brain: Box<dyn Brain>,
-    disp: Arc<Dispatcher>,
-    ctx: &Ctx,
-) -> anyhow::Result<i32> {
+async fn plain(mut brain: Box<dyn Brain>, disp: Arc<Dispatcher>, ctx: &Ctx) -> anyhow::Result<i32> {
     use tokio::io::AsyncBufReadExt;
     println!("swamp {} - /help for commands", crate::VERSION);
     let mut lines = tokio::io::BufReader::new(tokio::io::stdin()).lines();
@@ -120,13 +116,7 @@ async fn interactive(
         Some(&ctx.paths.dot_swamp.join("chat_history")),
         cfg.ui.chat_history.unwrap_or(DEFAULT_HISTORY),
     );
-    let mut app = App::new(
-        paths.run,
-        theme,
-        welcome(ctx, &disp),
-        history,
-        &cfg,
-    );
+    let mut app = App::new(paths.run, theme, welcome(ctx, &disp), history, &cfg);
     app.set_pool(disp.pool().snapshot());
 
     let mut tailer = Tailer::open(&paths.journal())?;

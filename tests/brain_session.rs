@@ -407,7 +407,10 @@ fn one_shot_mode_asks_for_a_decision_and_a_command() {
     let cfg = config(Provider::Anthropic, &Utf8PathBuf::from("/bin/true"));
     let one_shot = system_prompt(&cfg, swamp::brain::BrainMode::OneShot);
     assert!(one_shot.contains("## One shot mode"), "{one_shot}");
-    assert!(one_shot.contains("There is no follow-up turn"), "{one_shot}");
+    assert!(
+        one_shot.contains("There is no follow-up turn"),
+        "{one_shot}"
+    );
     assert!(one_shot.contains("swamp adopt <node>"), "{one_shot}");
     assert!(!one_shot.contains('\u{2014}'), "no em dashes");
 

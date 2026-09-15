@@ -170,7 +170,10 @@ impl Editor {
     }
 
     fn prev_boundary(&self, at: usize) -> Option<usize> {
-        self.buf[..at].chars().next_back().map(|c| at - c.len_utf8())
+        self.buf[..at]
+            .chars()
+            .next_back()
+            .map(|c| at - c.len_utf8())
     }
 
     fn next_boundary(&self, at: usize) -> Option<usize> {
@@ -345,7 +348,11 @@ mod tests {
         assert_eq!(h.prev("draft").as_deref(), Some("second\nline"));
         assert_eq!(h.prev("draft").as_deref(), Some("first"));
         assert_eq!(h.forward().as_deref(), Some("second\nline"));
-        assert_eq!(h.forward().as_deref(), Some("draft"), "the stash comes back");
+        assert_eq!(
+            h.forward().as_deref(),
+            Some("draft"),
+            "the stash comes back"
+        );
         assert_eq!(unescape(&escape("a\nb\\c")), "a\nb\\c");
     }
 

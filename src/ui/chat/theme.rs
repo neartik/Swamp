@@ -129,9 +129,9 @@ impl Theme {
             (Palette::TrueColor, Role::Ok) => base.fg(Color::Rgb(87, 170, 120)),
             (Palette::TrueColor, Role::Err) => base.fg(Color::Rgb(214, 90, 90)),
             (Palette::TrueColor, Role::Meta | Role::Run) => base.fg(Color::Rgb(136, 136, 136)),
-            (Palette::TrueColor, Role::Code) => {
-                base.fg(Color::Rgb(199, 182, 158)).bg(Color::Rgb(38, 38, 38))
-            }
+            (Palette::TrueColor, Role::Code) => base
+                .fg(Color::Rgb(199, 182, 158))
+                .bg(Color::Rgb(38, 38, 38)),
             (Palette::TrueColor, Role::UserBar) => base.bg(Color::Rgb(38, 38, 40)),
             (Palette::TrueColor, Role::TierHi) => base.fg(Color::Rgb(96, 150, 180)),
             (Palette::TrueColor, Role::Text) => base,

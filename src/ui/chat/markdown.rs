@@ -103,7 +103,10 @@ impl MdStream {
             let _ = open;
             st.prev_blank = false;
             return vec![Line::from(t.span(
-                format!("    {}", fmt::truncate(&src, width.saturating_sub(4) as usize)),
+                format!(
+                    "    {}",
+                    fmt::truncate(&src, width.saturating_sub(4) as usize)
+                ),
                 Role::Code,
             ))];
         }
@@ -148,13 +151,10 @@ impl MdStream {
             out.extend(wrap_spans(spans, width, INDENT));
             return out;
         }
-        if let Some(rest) = body.strip_prefix("> ").or_else(|| {
-            if body == ">" {
-                Some("")
-            } else {
-                None
-            }
-        }) {
+        if let Some(rest) = body
+            .strip_prefix("> ")
+            .or_else(|| if body == ">" { Some("") } else { None })
+        {
             st.prev_blank = false;
             let mut spans = vec![t.span(format!("  {} ", t.g(Glyph::Quote)), Role::Meta)];
             let mut quoted = inline(rest, t, Role::Meta);
@@ -185,11 +185,7 @@ impl MdStream {
                 t.span(format!("{marker} "), Role::Meta),
             ];
             spans.extend(inline(rest, t, Role::Text));
-            return wrap_spans(
-                spans,
-                width,
-                INDENT + depth * 2 + marker.width() as u16 + 1,
-            );
+            return wrap_spans(spans, width, INDENT + depth * 2 + marker.width() as u16 + 1);
         }
         st.prev_blank = false;
         let mut spans = vec![t.span(" ".repeat(INDENT as usize), Role::Text)];
@@ -471,7 +467,10 @@ mod tests {
             "{:?}",
             open[0].spans[0].style
         );
-        assert_eq!(texts(&s.push("print(1)\n")), vec!["    print(1)".to_owned()]);
+        assert_eq!(
+            texts(&s.push("print(1)\n")),
+            vec!["    print(1)".to_owned()]
+        );
         let mut s = md();
         assert!(s.push("```\n").is_empty(), "nothing to label");
     }

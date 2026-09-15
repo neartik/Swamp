@@ -327,11 +327,17 @@ impl Batch {
         );
         let mut spans = vec![
             Span::raw("     "),
-            t.span(fmt::truncate(&text, width.saturating_sub(BODY) as usize), Role::Meta),
+            t.span(
+                fmt::truncate(&text, width.saturating_sub(BODY) as usize),
+                Role::Meta,
+            ),
         ];
         // The one string in the block meant to be copied.
         if let Some(adopt) = self.rows.iter().find(|r| r.branch.is_some()) {
-            spans.push(t.span(format!("   (swamp adopt {})", adopt.id.short()), Role::Accent));
+            spans.push(t.span(
+                format!("   (swamp adopt {})", adopt.id.short()),
+                Role::Accent,
+            ));
         }
         Line::from(spans)
     }
@@ -416,7 +422,10 @@ fn account_cell(rec: &NodeRecord) -> String {
 
 fn short_model(model: &str) -> String {
     let mut parts: Vec<&str> = model.split('-').collect();
-    if parts.last().is_some_and(|p| p.len() == 8 && p.chars().all(|c| c.is_ascii_digit())) {
+    if parts
+        .last()
+        .is_some_and(|p| p.len() == 8 && p.chars().all(|c| c.is_ascii_digit()))
+    {
         parts.pop();
     }
     if parts.len() > 2 && matches!(parts[0], "claude" | "gpt" | "o") {

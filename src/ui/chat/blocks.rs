@@ -170,7 +170,9 @@ fn stream_tail(
     if !started {
         bullet_first(&mut lines, t, glyph, role);
     }
-    if cx.live && let Some(last) = lines.last_mut() {
+    if cx.live
+        && let Some(last) = lines.last_mut()
+    {
         last.spans.push(t.span(t.g(Glyph::Caret), Role::Meta));
     }
     lines
@@ -182,7 +184,11 @@ fn welcome(info: &WelcomeInfo, cx: &Ctx<'_>) -> Vec<Line<'static>> {
     let inner = width.saturating_sub(4) as usize;
     let rule = t.g(Glyph::Rule).repeat(width.saturating_sub(2) as usize);
     let mut out = vec![Line::from(t.span(
-        format!("{}{rule}{}", t.g(Glyph::BoxTopLeft), t.g(Glyph::BoxTopRight)),
+        format!(
+            "{}{rule}{}",
+            t.g(Glyph::BoxTopLeft),
+            t.g(Glyph::BoxTopRight)
+        ),
         Role::Meta,
     ))];
     let mut row = |spans: Vec<Span<'static>>| {
@@ -314,7 +320,10 @@ fn notice(
     let room = cx.width.saturating_sub(5) as usize;
     let mut out = vec![Line::from(vec![
         t.span(format!("{glyph} "), role),
-        t.span(fmt::truncate(head, cx.width.saturating_sub(2) as usize), role),
+        t.span(
+            fmt::truncate(head, cx.width.saturating_sub(2) as usize),
+            role,
+        ),
     ])];
     for (i, line) in body.iter().enumerate() {
         let lead = if i == 0 {
@@ -364,10 +373,9 @@ pub mod tool_args {
             let structured = match short.as_str() {
                 "swamp_dispatch" => count(&v, "tasks", "task"),
                 "swamp_await" => count(&v, "nodes", "node"),
-                "swamp_result" | "swamp_worker_diff" => v
-                    .get("node")
-                    .and_then(|n| n.as_str())
-                    .map(short_node),
+                "swamp_result" | "swamp_worker_diff" => {
+                    v.get("node").and_then(|n| n.as_str()).map(short_node)
+                }
                 "swamp_status" => Some(String::new()),
                 "swamp_note" => v
                     .get("text")
@@ -438,7 +446,12 @@ mod tests {
         };
         let text = text_of(&block.render(&cx(80)));
         assert_eq!(text[0], "● Bash(cargo test)");
-        assert!(text.last().unwrap().contains("+14 lines (ctrl+o to expand)"), "{text:?}");
+        assert!(
+            text.last()
+                .unwrap()
+                .contains("+14 lines (ctrl+o to expand)"),
+            "{text:?}"
+        );
         assert!(block.collapsible(3));
     }
 
@@ -456,7 +469,10 @@ mod tests {
             tool_args::preview("Bash", "cargo   test\n--all", 100),
             "cargo test --all"
         );
-        assert_eq!(tool_args::short_name("mcp__swamp__swamp_await"), "swamp_await");
+        assert_eq!(
+            tool_args::short_name("mcp__swamp__swamp_await"),
+            "swamp_await"
+        );
     }
 
     #[test]

@@ -33,10 +33,7 @@ pub fn compose(app: &App) -> Live {
     } else if let Some(sel) = app.popup {
         lines.extend(slash::popup(app.editor.text(), sel, width, t));
     }
-    let rule = Line::from(t.span(
-        t.g(Glyph::Rule).repeat(width as usize),
-        Role::Meta,
-    ));
+    let rule = Line::from(t.span(t.g(Glyph::Rule).repeat(width as usize), Role::Meta));
     lines.push(rule.clone());
 
     let first_input = lines.len() as u16;

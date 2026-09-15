@@ -259,14 +259,20 @@ fn enter_runs_a_command_that_is_typed_out_and_completes_a_partial_one() {
     app.take_welcome();
     typed(&mut app, "/status");
     let out = app.reduce(key(KeyCode::Enter));
-    assert!(app.editor.is_empty(), "the command ran, it did not complete");
+    assert!(
+        app.editor.is_empty(),
+        "the command ran, it did not complete"
+    );
     assert!(app.popup.is_none());
     assert!(!committed(out, 100).is_empty(), "the run tree committed");
 
     let mut app = fx::app(100);
     app.take_welcome();
     typed(&mut app, "/t");
-    assert!(app.reduce(key(KeyCode::Enter)).is_empty(), "three candidates");
+    assert!(
+        app.reduce(key(KeyCode::Enter)).is_empty(),
+        "three candidates"
+    );
     assert_eq!(app.editor.text(), "/trace");
     assert!(app.popup.is_none());
 }
@@ -382,13 +388,20 @@ fn a_submit_during_a_turn_is_queued_and_flushed_on_turn_done() {
     let mut app = fx::app(100);
     typed(&mut app, "first");
     let sent = app.reduce(key(KeyCode::Enter));
-    assert!(sent.iter().any(|e| matches!(e, Effect::Send(t) if t == "first")));
+    assert!(
+        sent.iter()
+            .any(|e| matches!(e, Effect::Send(t) if t == "first"))
+    );
     typed(&mut app, "second");
     let queued = app.reduce(key(KeyCode::Enter));
     assert!(!queued.iter().any(|e| matches!(e, Effect::Send(_))));
     assert_eq!(app.pending_send.as_deref(), Some("second"));
     let flushed = app.reduce(turn_done());
-    assert!(flushed.iter().any(|e| matches!(e, Effect::Send(t) if t == "second")));
+    assert!(
+        flushed
+            .iter()
+            .any(|e| matches!(e, Effect::Send(t) if t == "second"))
+    );
 }
 
 #[test]

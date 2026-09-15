@@ -273,7 +273,10 @@ fn state_for_an_account_that_left_the_config_is_listed_and_droppable() {
         .success()
         .stdout(predicates::str::contains("dropped"));
     let after = h.accounts_state();
-    assert!(!after.contains_key(&AccountId("retired".into())), "{after:?}");
+    assert!(
+        !after.contains_key(&AccountId("retired".into())),
+        "{after:?}"
+    );
     assert!(after.contains_key(&AccountId("main".into())), "{after:?}");
 
     h.swamp(&["accounts"])

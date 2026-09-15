@@ -108,7 +108,10 @@ deny_tools = ["Task", "Agent"]
         .arg("--append-system-prompt")
         .expect("the worker role prompt");
     assert!(role.contains("Swamp worker"), "{role}");
-    assert!(role.contains(&call.cwd), "the role names the worktree: {role}");
+    assert!(
+        role.contains(&call.cwd),
+        "the role names the worktree: {role}"
+    );
     assert!(role.contains("Do not spawn subagents"), "{role}");
     assert!(role.contains("Never ask a question"), "{role}");
 
@@ -147,7 +150,10 @@ fn a_finished_node_writes_result_json_with_the_files_git_saw() {
     // The same list reaches the tree the brain and the user read.
     let node = h.last_view().nodes.remove(&node).expect("the node");
     assert_eq!(
-        node.files.iter().map(|f| f.path.as_str()).collect::<Vec<_>>(),
+        node.files
+            .iter()
+            .map(|f| f.path.as_str())
+            .collect::<Vec<_>>(),
         vec!["fixed.txt"]
     );
 }
@@ -392,7 +398,9 @@ fn diff_stat_matches_git_and_says_so_when_there_is_no_patch() {
     h.swamp(&["diff", "last", "--stat"])
         .assert()
         .success()
-        .stdout(predicates::str::contains("2 files changed, 2 insertions(+)\n"))
+        .stdout(predicates::str::contains(
+            "2 files changed, 2 insertions(+)\n",
+        ))
         .stdout(predicates::str::contains("deletion").not());
 
     // A worker that changed nothing has no patch to stat.
@@ -501,10 +509,10 @@ fn the_file_list_is_gits_relative_paths_and_real_counts() {
         .assert()
         .success()
         .stdout(predicates::str::contains(" calc.py            |    1 +\n"))
+        .stdout(predicates::str::contains(" tests/test_calc.py |    1 +\n"))
         .stdout(predicates::str::contains(
-            " tests/test_calc.py |    1 +\n",
+            "2 files changed, 2 insertions(+)",
         ))
-        .stdout(predicates::str::contains("2 files changed, 2 insertions(+)"))
         .stdout(predicates::str::contains("worktrees").not());
 
     // The same list is what the tree renders.
@@ -530,7 +538,11 @@ fn a_dirty_tree_is_refused_before_any_run_exists() {
             "refusing to run: working tree is dirty",
         ));
 
-    assert!(h.runs().is_empty(), "a refusal created a run: {:?}", h.runs());
+    assert!(
+        h.runs().is_empty(),
+        "a refusal created a run: {:?}",
+        h.runs()
+    );
     assert!(h.invocations("main").is_empty(), "a worker was spawned");
 
     // --include-dirty is still the way through, and it does create a run.

@@ -38,13 +38,34 @@ const DEFAULT_TURN_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
 
 pub enum BrainEvent {
-    Ready { session: String, model: String },
-    Text { delta: String },
-    Thinking { delta: String },
-    ToolCall { id: String, name: String, preview: String },
-    ToolDone { id: String, name: String, ok: bool, detail: Option<String> },
-    TurnDone { usage: Usage, cost: Option<Cost> },
-    Fatal { message: String },
+    Ready {
+        session: String,
+        model: String,
+    },
+    Text {
+        delta: String,
+    },
+    Thinking {
+        delta: String,
+    },
+    ToolCall {
+        id: String,
+        name: String,
+        preview: String,
+    },
+    ToolDone {
+        id: String,
+        name: String,
+        ok: bool,
+        detail: Option<String>,
+    },
+    TurnDone {
+        usage: Usage,
+        cost: Option<Cost>,
+    },
+    Fatal {
+        message: String,
+    },
 }
 
 #[async_trait]

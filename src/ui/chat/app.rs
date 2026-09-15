@@ -225,9 +225,7 @@ impl App {
             BrainEvent::Thinking { delta } if self.show_thinking => self.stream(&delta, true),
             BrainEvent::Thinking { .. } => Vec::new(),
             BrainEvent::ToolCall { id, name, preview } => self.tool_call(id, name, preview),
-            BrainEvent::ToolDone {
-                id, ok, detail, ..
-            } => self.tool_done(&id, ok, detail),
+            BrainEvent::ToolDone { id, ok, detail, .. } => self.tool_done(&id, ok, detail),
             BrainEvent::TurnDone { usage, cost } => {
                 self.turns += 1;
                 self.out_tokens = self.out_tokens.max(usage.output_tokens);
@@ -390,7 +388,9 @@ impl App {
         }
         // A finished tool is scrollback the moment it settles.
         let Some(at) = self.blocks.iter().position(|b| match b {
-            Block::Tool { id: tool, state, .. } => tool == id && *state != ToolState::Running,
+            Block::Tool {
+                id: tool, state, ..
+            } => tool == id && *state != ToolState::Running,
             _ => false,
         }) else {
             return Vec::new();
@@ -852,7 +852,9 @@ impl App {
                     Effect::Clear,
                     self.output(
                         "",
-                        vec!["screen cleared; the brain still remembers the conversation".to_owned()],
+                        vec![
+                            "screen cleared; the brain still remembers the conversation".to_owned(),
+                        ],
                     ),
                 ]
             }
@@ -1032,7 +1034,12 @@ impl App {
                 out.push(format!("  [{tier:<4}] {nodes} nodes  ~${usd:.2}"));
             }
         }
-        let unknown = self.view.nodes.values().filter(|n| n.cost.is_none()).count();
+        let unknown = self
+            .view
+            .nodes
+            .values()
+            .filter(|n| n.cost.is_none())
+            .count();
         if unknown > 0 {
             let plural = if unknown == 1 { "node" } else { "nodes" };
             out.push(format!("({unknown} {plural} reported no cost data)"));
@@ -1082,10 +1089,7 @@ impl App {
             ),
             t.span(format!("{verb}… "), Role::Accent),
             t.span(
-                format!(
-                    "(esc to interrupt · {} · {tail})",
-                    fmt::duration(elapsed)
-                ),
+                format!("(esc to interrupt · {} · {tail})", fmt::duration(elapsed)),
                 Role::Meta,
             ),
         ]))
@@ -1120,9 +1124,17 @@ impl App {
         } else if running > 0 {
             format!("{running} running")
         } else if self.working() {
-            format!("{} turn{}", self.turns + 1, if self.turns == 0 { "" } else { "s" })
+            format!(
+                "{} turn{}",
+                self.turns + 1,
+                if self.turns == 0 { "" } else { "s" }
+            )
         } else if self.turns > 0 {
-            format!("{} turn{}", self.turns, if self.turns == 1 { "" } else { "s" })
+            format!(
+                "{} turn{}",
+                self.turns,
+                if self.turns == 1 { "" } else { "s" }
+            )
         } else {
             "idle".to_owned()
         };

@@ -255,13 +255,20 @@ fn board() -> Vec<&'static str> {
 /// The idle layout with rules that reach the last column, and a status row that does too.
 fn wide_idle(cols: u16) -> Vec<String> {
     let rule = "-".repeat(cols as usize);
-    let status = format!("{:<pad$}{}", "status", "run 01ARZ3", pad = cols as usize - 10);
+    let status = format!(
+        "{:<pad$}{}",
+        "status",
+        "run 01ARZ3",
+        pad = cols as usize - 10
+    );
     vec![rule.clone(), "> ".to_owned(), rule, status]
 }
 
 /// The slash popup over that layout: ten entries, each around half the width of a rule.
 fn popup(cols: u16) -> Vec<String> {
-    let mut rows: Vec<String> = (0..10).map(|i| format!("  /cmd{i}   what it does")).collect();
+    let mut rows: Vec<String> = (0..10)
+        .map(|i| format!("  /cmd{i}   what it does"))
+        .collect();
     rows.extend(wide_idle(cols));
     rows
 }
@@ -477,7 +484,16 @@ fn a_width_shrink_that_splits_the_rules_leaves_no_stale_rows() {
     let rule = "-".repeat(COLS as usize);
     let live = vec![rule.as_str(), "> hi", rule.as_str(), "status"];
     host.frame_at(&live, (1, 4));
-    host.resize(24, ROWS, &["------------------------", "> hi", "------------------------", "st"]);
+    host.resize(
+        24,
+        ROWS,
+        &[
+            "------------------------",
+            "> hi",
+            "------------------------",
+            "st",
+        ],
+    );
 
     let screen = host.screen();
     let seen = screen.iter().filter(|r| r.starts_with("---")).count();
@@ -548,7 +564,10 @@ fn a_commit_after_a_width_change_pushes_no_blank_row_into_scrollback() {
     host.frame_at(&refs(&wide_idle(COLS)), (1, 2));
     let narrow = wide_idle(24);
     host.resize(24, ROWS, &refs(&narrow));
-    host.commit(&["* answer", "  first", "  second", "  third", ""], &refs(&narrow));
+    host.commit(
+        &["* answer", "  first", "  second", "  third", ""],
+        &refs(&narrow),
+    );
 
     let history = host.history();
     assert_in_order(&history, &["row 18", "* answer", "  third"]);

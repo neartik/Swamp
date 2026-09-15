@@ -79,11 +79,15 @@ fn brain() -> NodeRecord {
         parent: None,
         tier: Tier::High,
         model: Some("claude-opus-4-20250514".into()),
-        ..record(id(0), "brain", NodeState::Running {
-            pid: 1,
-            pgid: 1,
-            since: at(1),
-        })
+        ..record(
+            id(0),
+            "brain",
+            NodeState::Running {
+                pid: 1,
+                pgid: 1,
+                since: at(1),
+            },
+        )
     }
 }
 
@@ -230,9 +234,7 @@ pub fn fixture() -> Vec<JournalLine> {
     lines.push(line(
         5,
         Some(id(1)),
-        JournalEvent::NodeSpawned {
-            node: Box::new(ok),
-        },
+        JournalEvent::NodeSpawned { node: Box::new(ok) },
     ));
     lines.push(line(
         6,
