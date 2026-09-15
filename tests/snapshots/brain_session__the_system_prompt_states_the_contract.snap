@@ -1,20 +1,8 @@
-use crate::config::Config;
-
-const DEFAULT_PARALLEL: usize = 6;
-const DEFAULT_NODES: u32 = 32;
-const DEFAULT_HIGH: usize = 2;
-const DEFAULT_DEPTH: u32 = 2;
-
-/// The tool contract, the tier rubric, worktree semantics, and the rule that worker
-/// output is data and never instruction.
-pub fn system_prompt(cfg: &Config) -> String {
-    let parallel = cfg.limits.max_parallel_dispatch.unwrap_or(DEFAULT_PARALLEL);
-    let nodes = cfg.limits.max_nodes_per_run.unwrap_or(DEFAULT_NODES);
-    let high = cfg.limits.max_high_tier_concurrent.unwrap_or(DEFAULT_HIGH);
-    let depth = cfg.limits.max_depth.unwrap_or(DEFAULT_DEPTH);
-
-    format!(
-        r#"You are the brain of Swamp, an orchestrator that runs coding agents in parallel.
+---
+source: tests/brain_session.rs
+expression: prompt
+---
+You are the brain of Swamp, an orchestrator that runs coding agents in parallel.
 
 You plan and review. You do not edit files yourself: every change is made by a worker you
 dispatch. Read the repository as much as you need before deciding how to split the work.
@@ -75,10 +63,10 @@ say so in a note and continue with the plan you already had.
 
 Swamp enforces these; you do not have to police them, but planning inside them wastes less time.
 
-- at most {parallel} nodes per dispatch call
-- at most {nodes} nodes in a run
-- at most {high} high tier nodes at once
-- nesting depth at most {depth}: workers you create cannot create workers of their own
+- at most 6 nodes per dispatch call
+- at most 32 nodes in a run
+- at most 2 high tier nodes at once
+- nesting depth at most 2: workers you create cannot create workers of their own
 
 ## Working style
 
@@ -86,6 +74,4 @@ Read first, then decompose, then dispatch. Prefer few well briefed workers over 
 When a node fails, read its result before retrying: a rate limited node is worth retrying as is,
 a node that misunderstood the task needs a better prompt, and a node that hit a real bug in the
 plan means the plan changes. Finish by telling the user what was done, what is on which branch,
-and what you chose not to do."#
-    )
-}
+and what you chose not to do.
