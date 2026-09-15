@@ -222,7 +222,11 @@ pub enum AccountsCmd {
         #[arg(value_name = "ID")]
         id: String,
     },
-    Reset,
+    /// Drop one account's recorded state, or all of it when no id is given
+    Reset {
+        #[arg(value_name = "ID")]
+        id: Option<String>,
+    },
 }
 
 #[derive(Debug, Args)]

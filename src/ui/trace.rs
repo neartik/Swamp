@@ -196,9 +196,16 @@ fn latest<'a>(view: &'a RunView, row: &TreeRow) -> Option<&'a NodeRecord> {
     row.attempts.iter().rev().find_map(|a| view.nodes.get(a))
 }
 
+/// Which account ran the node is the whole point of a multi-account trace, so the provider
+/// prefix is what gets dropped when the two together do not fit, never the account id.
 fn account_cell(rec: &NodeRecord) -> String {
     let account = rec.account.as_ref().map_or("-", |a| a.0.as_str());
-    format!("{}/{account}", rec.provider)
+    let full = format!("{}/{account}", rec.provider);
+    if full.chars().count() <= ACCOUNT_WIDTH {
+        full
+    } else {
+        account.to_owned()
+    }
 }
 
 fn numbers(rec: &NodeRecord) -> String {

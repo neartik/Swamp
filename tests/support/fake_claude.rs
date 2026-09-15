@@ -53,6 +53,9 @@ fn brain_turn(dir: &std::path::Path, name: &str, argv: &[String], s: &Scenario) 
         .to_string(),
     );
 
+    // A real brain reports its quota mid-turn, and the pool has to see the brain's too.
+    scenario::say(&scenario::recorded_rate_limit_line());
+
     let turn = read_turn(dir, name);
     let tasks: Vec<serde_json::Value> = s
         .dispatch

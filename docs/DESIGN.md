@@ -1584,6 +1584,15 @@ openai     main     codex-main   healthy      0/2     -     -    -           31 
 The 5H/7D columns are blank for OpenAI because `codex exec --json` reports no quota telemetry. That
 absence is exactly why `QuotaAware` is not the v1 default.
 
+The brain is an account's tenant like any worker: it reports its spend per turn, its rate-limit
+snapshots as they stream in, and itself as exactly one node per run when it shuts down. A brain
+that spent a run's planning on `claude-main` and left it at NODES 0 / $0 would also leave the
+history tie-break of `LeastLoaded` and `QuotaAware` blind to the single most expensive node.
+
+`accounts.json` is machine-wide, so it holds entries for ids this repo does not configure: another
+repo may still own them. They are listed under a `not in config` note and dropped only when asked,
+with `swamp accounts reset <id>`. Nothing deletes them silently.
+
 ---
 
 ## 7. Journal and run tree
@@ -1654,6 +1663,8 @@ pub enum JournalEvent {
     /// (last offset, raw file) is a complete crash-safe resume point for the parser.
     NodeEvent { offset: u64, event: WorkerEvent },
     NodeUsage { usage: Usage, cost: Option<Cost> },
+    /// Git's list: paths relative to the worktree root, counts from `--numstat`. The event
+    /// stream's absolute, count-free list is only the fallback when there is no diff.
     NodeFiles { files: Vec<FileChange> },
     NodeBlocked { #[serde(with = "time::serde::rfc3339")] until: OffsetDateTime, why: String },
     NodeRetry { attempt: u32, reason: Failure, rotate: bool },
@@ -1801,7 +1812,10 @@ cost   ~$1.84   (1 node reported no cost data)
 ```
 
 The leading column is the ATTEMPT node id: it names `nodes/<node_short>/` and is what `swamp
-diff` and `swamp adopt` are given, so what is on screen always resolves. The branch keeps the
+diff` and `swamp adopt` are given, so what is on screen always resolves. The account cell holds
+`<provider>/<account>`, and when the two together do not fit it is the provider prefix that goes:
+which subscription ran the node is the whole point of the column, and a real account id is a
+wrapper name like `claude-main`, not `main`. The branch keeps the
 LOGICAL id, which is stable across attempts. Both spellings resolve; a logical short id resolves
 to the node's last finished attempt. Glyphs and columns are in `ui/fmt.rs`. `-` in the cost column means the provider reported nothing;
 never `$0.00`. `~` means list-price or estimated, never money billed.
@@ -1889,7 +1903,9 @@ swamp resume <RUN|last>                     Recover an interrupted run
 
 swamp accounts [list]                       Health, inflight, 5h/7d, cooldown, nodes, spend
   check [--account <ID>]                    Run `<exec> --version` + a 1-token probe per account
-  cooldown <ID> <DUR> | clear <ID> | enable <ID> | disable <ID> | reset
+  cooldown <ID> <DUR> | clear <ID> | enable <ID> | disable <ID> | reset [ID]
+                                            `reset` with an ID drops that one entry, which is
+                                            how an account that left the config leaves the file
 
 swamp diff <NODE> [--stat|--name-only|--patch]
                                             --stat renders the captured patch git-style
@@ -1920,6 +1936,10 @@ swamp mcp-bridge --socket <PATH>            Hidden. stdio <-> UDS pump, spawned 
 
 Exit codes: `0` ok, `1` generic, `2` config invalid, `3` no capacity (all accounts cooling),
 `4` node failed, `5` conflict, `6` cancelled, `7` budget exceeded.
+
+A refusal that happens before anything is launched - a dirty working tree is the common one - is
+checked before the run is created: one line on stderr, the exit code, no run directory and no
+node. A run that exists is a run that spent something.
 
 ---
 

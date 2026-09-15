@@ -63,6 +63,15 @@ pub async fn collect(
     })
 }
 
+/// A file list is relative to the worktree root. Git's already is; the event stream's is not.
+pub fn relativize(files: &mut [FileChange], root: &Utf8Path) {
+    for f in files {
+        if let Ok(rel) = f.path.strip_prefix(root) {
+            f.path = rel.to_owned();
+        }
+    }
+}
+
 /// `<added>\t<removed>\t<path>\0`, and for a rename `<added>\t<removed>\t\0<from>\0<to>\0`.
 fn parse_numstat(raw: &str) -> BTreeMap<String, (u32, u32)> {
     let mut counts = BTreeMap::new();

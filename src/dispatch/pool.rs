@@ -51,6 +51,13 @@ pub struct Lease {
     pool: Arc<AccountPool>,
 }
 
+impl Lease {
+    /// The brain holds its lease for the whole run and reports its own spend through it.
+    pub fn pool(&self) -> &Arc<AccountPool> {
+        &self.pool
+    }
+}
+
 impl Drop for Lease {
     fn drop(&mut self) {
         {
@@ -303,6 +310,20 @@ impl AccountPool {
                     }
                 }
             }
+            entry.health
+        };
+        self.after_change(id, health);
+    }
+
+    /// Spend, without a node: a long brain session bills per turn but is one node per run.
+    pub fn credit(&self, id: &AccountId, cost: Cost) {
+        if cost.usd == 0.0 {
+            return;
+        }
+        let health = {
+            let mut state = self.state.lock();
+            let entry = state.entry(id.clone()).or_default();
+            entry.lifetime_cost_usd += cost.usd;
             entry.health
         };
         self.after_change(id, health);

@@ -513,3 +513,26 @@ fn since_recomputes_the_totals_it_renders() {
         "the footer still totals pruned nodes: {text}"
     );
 }
+
+/// Real account ids are wrapper names: `anthropic/claude-main` did not fit the cell, so the
+/// row read `anthropic/claud…` and hid the one thing a multi-account trace is for.
+#[test]
+fn the_account_id_survives_the_column_the_provider_prefix_does_not() {
+    let mut v = view();
+    for n in v.nodes.values_mut() {
+        n.account = Some(AccountId("claude-main".into()));
+    }
+    let text = render(&v, &TraceOpts::default());
+
+    assert!(text.contains("claude-main"), "{text}");
+    assert!(!text.contains('…'), "the account id is truncated: {text}");
+    // Columns are fixed: showing the id in full costs the row no width at all.
+    let width = |t: &str| {
+        t.lines()
+            .find(|l| l.contains("audit auth middleware"))
+            .expect("the row")
+            .chars()
+            .count()
+    };
+    assert_eq!(width(&text), width(&render(&view(), &TraceOpts::default())));
+}

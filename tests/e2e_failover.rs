@@ -2,6 +2,8 @@
 
 mod support;
 
+use predicates::prelude::PredicateBooleanExt;
+
 use support::{Harness, Scenario, epoch_in};
 use swamp::dispatch::account::Health;
 use swamp::model::core::{AccountId, NodeState};
@@ -238,4 +240,48 @@ fn a_leaked_token_is_redacted_out_of_the_raw_files() {
     assert!(!stream.contains(SECRET), "the token reached stream.jsonl");
     let stderr = std::fs::read_to_string(run.stderr(node.id)).expect("stderr.log");
     assert!(!stderr.contains(SECRET), "the token reached stderr.log");
+}
+
+/// `~/.swamp/accounts.json` is machine-wide, so it keeps entries for ids this repo does not
+/// configure. They were invisible: an old `main` with three infra failures sat in the file
+/// with nothing to name it and no way to drop it.
+#[test]
+fn state_for_an_account_that_left_the_config_is_listed_and_droppable() {
+    let h = Harness::new();
+    let path = h.paths().accounts_state();
+    let mut state = swamp::dispatch::persist::StateMap::new();
+    state.insert(
+        AccountId("retired".into()),
+        swamp::dispatch::AccountState {
+            consecutive_infra_failures: 3,
+            lifetime_nodes: 12,
+            ..Default::default()
+        },
+    );
+    state.insert(AccountId("main".into()), Default::default());
+    swamp::dispatch::persist::save_state(&path, &state).expect("writing accounts.json");
+
+    h.swamp(&["accounts"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("not in config"))
+        .stdout(predicates::str::contains("retired"));
+
+    // Nothing drops it on its own, and dropping one entry leaves the others alone.
+    h.swamp(&["accounts", "reset", "retired"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("dropped"));
+    let after = h.accounts_state();
+    assert!(!after.contains_key(&AccountId("retired".into())), "{after:?}");
+    assert!(after.contains_key(&AccountId("main".into())), "{after:?}");
+
+    h.swamp(&["accounts"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("not in config").not());
+    h.swamp(&["accounts", "reset", "retired"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("no recorded state"));
 }

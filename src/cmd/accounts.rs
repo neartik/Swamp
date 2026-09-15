@@ -41,11 +41,7 @@ pub async fn run(ctx: &Ctx, args: &AccountsArgs) -> anyhow::Result<i32> {
             println!("account {id} disabled");
             Ok(0)
         }
-        AccountsCmd::Reset => {
-            persist::save_state(&path, &StateMap::new())?;
-            println!("account state reset");
-            Ok(0)
-        }
+        AccountsCmd::Reset { id } => reset(&path, id.as_deref()),
     }
 }
 
@@ -54,7 +50,7 @@ fn list(ctx: &Ctx) -> anyhow::Result<i32> {
     let now = OffsetDateTime::now_utc();
 
     if ctx.json {
-        let rows: Vec<_> = ctx
+        let mut rows: Vec<_> = ctx
             .cfg
             .accounts
             .iter()
@@ -72,9 +68,21 @@ fn list(ctx: &Ctx) -> anyhow::Result<i32> {
                     "cooldown_until": s.cooldown_until.map(|t| t.to_string()),
                     "nodes": s.lifetime_nodes,
                     "cost_usd": s.lifetime_cost_usd,
+                    "in_config": true,
                 })
             })
             .collect();
+        for (id, s) in stale(ctx, &state) {
+            rows.push(json!({
+                "account": id,
+                "health": s.health,
+                "consecutive_infra_failures": s.consecutive_infra_failures,
+                "cooldown_until": s.cooldown_until.map(|t| t.to_string()),
+                "nodes": s.lifetime_nodes,
+                "cost_usd": s.lifetime_cost_usd,
+                "in_config": false,
+            }));
+        }
         ctx.out(&format!("{}\n", serde_json::to_string_pretty(&rows)?));
         return Ok(0);
     }
@@ -107,8 +115,37 @@ fn list(ctx: &Ctx) -> anyhow::Result<i32> {
     if ctx.cfg.accounts.is_empty() {
         text.push_str("no accounts configured\n");
     }
+    let stale = stale(ctx, &state);
+    if !stale.is_empty() {
+        text.push_str("\nnot in config (state kept; drop with `swamp accounts reset <id>`):\n");
+        for (id, s) in stale {
+            text.push_str(&format!(
+                "{:<10} {:<8} {:<14} {:<10} {:<9} {:<6} {:<6} {:<10} {:<6} ~{:.2}\n",
+                "-",
+                id.0,
+                "-",
+                crate::ui::watch::health_word(s.health),
+                "-",
+                util(window(&s, LimitScope::FiveHour)),
+                util(window(&s, LimitScope::SevenDay)),
+                cooldown(&s, now),
+                s.lifetime_nodes,
+                s.lifetime_cost_usd,
+            ));
+        }
+    }
     ctx.out(&text);
     Ok(0)
+}
+
+/// Entries for accounts this config does not name. The file is machine-wide, so another
+/// repo may still own them: they are listed, never dropped on their own.
+fn stale(ctx: &Ctx, state: &StateMap) -> Vec<(AccountId, AccountState)> {
+    state
+        .iter()
+        .filter(|(id, _)| ctx.cfg.account(id).is_none())
+        .map(|(id, s)| (id.clone(), s.clone()))
+        .collect()
 }
 
 async fn check(ctx: &Ctx, only: Option<&str>) -> anyhow::Result<i32> {
@@ -125,6 +162,24 @@ async fn check(ctx: &Ctx, only: Option<&str>) -> anyhow::Result<i32> {
         println!("{:<6} {:<10} {}", check.level.label(), a.id.0, check.detail);
     }
     Ok(if failed > 0 { 1 } else { 0 })
+}
+
+/// With an id, drops that one entry: this is how an account that was renamed out of the
+/// config leaves the machine-wide state file, which nothing else is allowed to do silently.
+fn reset(path: &camino::Utf8Path, id: Option<&str>) -> anyhow::Result<i32> {
+    let Some(id) = id else {
+        persist::save_state(path, &StateMap::new())?;
+        println!("account state reset");
+        return Ok(0);
+    };
+    let mut state = persist::load_state(path)?;
+    anyhow::ensure!(
+        state.remove(&AccountId(id.to_owned())).is_some(),
+        "no recorded state for account `{id}`"
+    );
+    persist::save_state(path, &state)?;
+    println!("dropped the recorded state of account {id}");
+    Ok(0)
 }
 
 fn edit(

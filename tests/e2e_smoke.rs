@@ -465,3 +465,77 @@ fn diff_adopt_and_trace_find_a_node_from_an_older_run() {
         .failure()
         .stderr(predicates::str::contains("ambiguous"));
 }
+
+/// The event stream names absolute worktree paths and counts nothing, and its list was
+/// preferred over git's: `result.json` carried `/…/worktrees/…/calc.py` with `0, 0`, and
+/// `--stat` printed those paths with `| 0` and no insertion counts.
+#[test]
+fn the_file_list_is_gits_relative_paths_and_real_counts() {
+    // The stream announces calc.py twice, the way two edits to one file look.
+    let h = Harness::new().scenario(
+        "main",
+        Scenario::claude_edits_announced(&["calc.py", "tests/test_calc.py", "calc.py"]),
+    );
+
+    h.swamp(&["run", "--no-brain", TASK]).assert().success();
+
+    let run = h.last_run();
+    let node = h.last_view().nodes.values().next().expect("the node").id;
+    let body = std::fs::read_to_string(run.result(node)).expect("result.json");
+    let result: serde_json::Value = serde_json::from_str(&body).expect("valid json");
+    let files = result["files"].as_array().expect("a file list");
+
+    assert_eq!(files.len(), 2, "git counts files, not tool calls: {body}");
+    let mut paths: Vec<&str> = files.iter().map(|f| f["path"].as_str().unwrap()).collect();
+    paths.sort_unstable();
+    assert_eq!(paths, ["calc.py", "tests/test_calc.py"], "{body}");
+    for f in files {
+        assert_eq!(f["source"], "git", "{body}");
+        assert_eq!(f["added"], 1, "{body}");
+        assert_eq!(f["removed"], 0, "{body}");
+        assert_eq!(f["kind"], "add", "{body}");
+    }
+    assert_eq!(result["insertions"], 2, "{body}");
+
+    h.swamp(&["diff", "last", "--stat"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(" calc.py            |    1 +\n"))
+        .stdout(predicates::str::contains(
+            " tests/test_calc.py |    1 +\n",
+        ))
+        .stdout(predicates::str::contains("2 files changed, 2 insertions(+)"))
+        .stdout(predicates::str::contains("worktrees").not());
+
+    // The same list is what the tree renders.
+    h.swamp(&["trace", "last"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("+2 -0   2 files"));
+}
+
+/// A setup refusal used to happen after the run was created and a node had been spawned:
+/// the user got an empty trace block, a `failed` node and a run dir for work that never
+/// started. The check belongs in front of all of it.
+#[test]
+fn a_dirty_tree_is_refused_before_any_run_exists() {
+    let h = Harness::new().scenario("main", Scenario::claude().edits("fixed.txt", "patched\n"));
+    std::fs::write(h.repo.join("api.rs"), "uncommitted\n").expect("dirty the checkout");
+
+    h.swamp(&["run", "--no-brain", TASK])
+        .assert()
+        .code(1)
+        .stdout(predicates::str::is_empty())
+        .stderr(predicates::str::contains(
+            "refusing to run: working tree is dirty",
+        ));
+
+    assert!(h.runs().is_empty(), "a refusal created a run: {:?}", h.runs());
+    assert!(h.invocations("main").is_empty(), "a worker was spawned");
+
+    // --include-dirty is still the way through, and it does create a run.
+    h.swamp(&["run", "--no-brain", "--include-dirty", TASK])
+        .assert()
+        .success();
+    assert_eq!(h.runs().len(), 1);
+}

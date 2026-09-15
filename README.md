@@ -138,7 +138,7 @@ Layers, lowest priority first: built-in defaults, `~/.config/swamp/config.toml`,
 
 ```sh
 swamp doctor                                       # PATH, git, tiers, account collisions
-swamp run --no-brain --tier mid "fix the flaky test in tests/api.rs"   # commit first: a dirty tree is refused
+swamp run --no-brain --tier mid "fix the flaky test in tests/api.rs"   # commit first: a dirty tree is refused before the run exists
 swamp trace last                                   # the run tree, with the diff summary
 swamp diff last --stat                             # `last` is the run; <node> works from any run
 swamp adopt last                                   # applies the patch to your checkout
@@ -160,7 +160,7 @@ to answer a follow-up, so it is told to end by naming the nodes worth landing an
 | `swamp doctor` | Health checks. `--probe` calls each account's CLI, `--schema` reports adapter drift, `--reap` removes stale worktrees and sockets, `--fix` creates the directories and the git exclude. Exit 1 on any error, so CI can gate on it. |
 | `swamp chat` | Interactive brain session. |
 | `swamp runs`, `swamp resume`, `swamp cancel` | List runs, recover an interrupted one (`--plan` first, it spends nothing), stop one. |
-| `swamp accounts` | Health, in-flight count, quota windows, cooldowns, lifetime spend. Also `cooldown`, `clear`, `enable`, `disable`, `reset`. |
+| `swamp accounts` | Health, in-flight count, quota windows, cooldowns, lifetime spend, including the brain's. Entries for ids no longer in the config are listed under `not in config`. Also `cooldown`, `clear`, `enable`, `disable`, `reset [ID]`. |
 | `swamp diff`, `swamp adopt`, `swamp worktrees` | Inspect a worker's patch, land it, manage the worktrees. A node is named by its full id, either short id (the attempt's, printed by `swamp trace`, or the logical one in the branch name) or a prefix, searched across every run; `last` and `-2` name a run and resolve to its node. |
 | `swamp gc`, `swamp replay`, `swamp config`, `swamp completions` | Housekeeping, re-render or re-derive a recorded run, inspect config, shell completions. |
 

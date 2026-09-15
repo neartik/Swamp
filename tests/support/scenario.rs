@@ -103,6 +103,19 @@ impl Scenario {
         self
     }
 
+    /// The stream a CLI emits when it edits: one tool call per file, absolute paths, no
+    /// counts, and the same file announced twice when it was edited twice.
+    pub fn claude_edits_announced(paths: &[&str]) -> Scenario {
+        let mut s = Scenario::claude();
+        let result = s.emit.pop().expect("the fixture ends with its result line");
+        for p in paths {
+            s.emit.push(tool_use_line("Edit", &format!("{{cwd}}/{p}")));
+            s = s.edits(p, "patched\n");
+        }
+        s.emit.push(result);
+        s
+    }
+
     /// A subscription that has hit its five-hour window: the CLI reports the rejection in
     /// telemetry and then dies, which is what the real one does.
     pub fn claude_rate_limited(resets_at: i64) -> Scenario {
@@ -172,6 +185,30 @@ pub fn rate_limit_line(status: &str, resets_at: i64) -> String {
                 "five_hour": { "utilization": 1.0, "resetsAt": resets_at },
                 "seven_day": { "utilization": 0.64, "resetsAt": resets_at }
             }
+        },
+        "session_id": "d9dae377-a57f-40d3-8a4d-ec0caa369607"
+    })
+    .to_string()
+}
+
+/// The recorded telemetry line, with the utilization numbers the real CLI reported.
+pub fn recorded_rate_limit_line() -> String {
+    fixture_lines("claude-stream-sample.jsonl")
+        .into_iter()
+        .find(|l| l.contains("rate_limit_event"))
+        .unwrap_or_else(|| rate_limit_line("allowed", 0))
+}
+
+/// One `tool_use` block, the way the CLI announces an edit before it makes it.
+pub fn tool_use_line(name: &str, path: &str) -> String {
+    serde_json::json!({
+        "type": "assistant",
+        "message": {
+            "role": "assistant",
+            "type": "message",
+            "content": [{ "type": "tool_use", "id": "toolu_edit",
+                          "name": name, "input": { "file_path": path } }],
+            "usage": { "input_tokens": 5, "output_tokens": 2 }
         },
         "session_id": "d9dae377-a57f-40d3-8a4d-ec0caa369607"
     })
@@ -318,7 +355,12 @@ pub fn flag(argv: &[String], name: &str) -> Option<String> {
 
 pub fn subst(s: &str, n: u64) -> String {
     let node = std::env::var("SWAMP_NODE").unwrap_or_default();
-    s.replace("{n}", &n.to_string()).replace("{node}", &node)
+    let cwd = std::env::current_dir()
+        .map(|d| d.display().to_string())
+        .unwrap_or_default();
+    s.replace("{n}", &n.to_string())
+        .replace("{node}", &node)
+        .replace("{cwd}", &cwd)
 }
 
 pub fn apply_edits(s: &Scenario, n: u64) {

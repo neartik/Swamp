@@ -332,13 +332,13 @@ pub async fn run_node(cx: &NodeCtx, mut spec: LaunchSpec, task: &TaskRequest) ->
                 .finalize(&fwt, &task.title, spec.tier)
                 .await
                 .unwrap_or_default();
-            // Git is authoritative: a stream that reported no edit still has a patch behind it.
-            if record.files.is_empty()
-                && let Some(w) = &record.work
-            {
+            // Git is authoritative: its paths are relative to the worktree and its counts
+            // are real, where the stream reports absolute paths and no counts at all.
+            if let Some(w) = record.work.as_ref().filter(|w| !w.files.is_empty()) {
                 record.files = w.files.clone();
             }
         }
+        crate::workspace::diff::relativize(&mut record.files, &wt.path);
         crate::cmd::write_result(&cx.journal.paths, &attempt_result(&record, &out));
         emit_for(
             cx,

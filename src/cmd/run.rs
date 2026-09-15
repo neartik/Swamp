@@ -29,6 +29,7 @@ pub async fn run(ctx: &Ctx, args: &RunArgs) -> anyhow::Result<i32> {
     for w in &cfg.warnings {
         tracing::warn!("{w}");
     }
+    preflight(ctx, &cfg).await?;
     let session = RunSession::start(ctx, cfg, RunId::new(), Some(&task)).await?;
     if !ctx.json {
         println!("run {}", session.paths.run);
@@ -38,6 +39,22 @@ pub async fn run(ctx: &Ctx, args: &RunArgs) -> anyhow::Result<i32> {
     } else {
         with_brain(ctx, session, args, task, depth).await
     }
+}
+
+/// Setup refusals belong before the run exists. Refusing after it was created left a run
+/// dir, an empty trace block and a failed node for something no node ever attempted.
+async fn preflight(ctx: &Ctx, cfg: &Config) -> anyhow::Result<()> {
+    let ws = &cfg.workspace;
+    if ws.include_dirty.unwrap_or(false) || !ws.require_clean.unwrap_or(true) {
+        return Ok(());
+    }
+    // `.swamp/` exists by now (the log file); without the exclude it is itself the dirt.
+    ctx.paths.ensure_git_excluded().ok();
+    let git = crate::workspace::Git::discover(&ctx.paths.repo).await?;
+    if !git.is_clean().await? {
+        return Err(crate::error::SwampError::DirtyTree.into());
+    }
+    Ok(())
 }
 
 /// The smallest runnable thing: one process, one worktree, one node, one diff.
@@ -401,9 +418,9 @@ fn node_result(
         model: last.and_then(|r| r.model.clone()),
         attempts: outcome.attempts.len() as u32,
         summary: run.and_then(|o| o.summary.clone()),
-        files: match run.map(|o| o.files.clone()).unwrap_or_default() {
-            // Git is authoritative when the event stream announced no edit at all.
-            files if files.is_empty() => last.map(|r| r.files.clone()).unwrap_or_default(),
+        // The node record already carries git's list; the stream is only the fallback.
+        files: match last.map(|r| r.files.clone()).unwrap_or_default() {
+            files if files.is_empty() => run.map(|o| o.files.clone()).unwrap_or_default(),
             files => files,
         },
         branch: work.as_ref().map(|w| w.branch.clone()),

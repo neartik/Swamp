@@ -168,6 +168,8 @@ pub struct Totals {
     pub usage: Usage,
     pub usd: f64,
     pub basis: Option<crate::model::core::CostBasis>,
+    /// How much of `usd` has already reached the account pool.
+    pub credited_usd: f64,
 }
 
 impl Totals {
@@ -199,6 +201,20 @@ impl Launch {
 
     pub fn latest_session(&self) -> Option<SessionHandle> {
         self.session.lock().clone()
+    }
+
+    /// Hands this turn's spend to the pool. The node itself is counted once, at shutdown.
+    pub fn credit_turn(&self) {
+        if let Some(cost) = self.uncredited() {
+            self.lease.pool().credit(&self.account, cost);
+        }
+    }
+
+    fn uncredited(&self) -> Option<Cost> {
+        let mut t = self.totals.lock();
+        let usd = t.usd - t.credited_usd;
+        t.credited_usd = t.usd;
+        t.basis.map(|basis| Cost { usd, basis })
     }
 
     /// One NodeSpawned so the brain shows up in the run tree like any other node.
@@ -344,6 +360,12 @@ pub(crate) async fn drive<R: AsyncRead + Unpin>(
                     tracing::warn!("cannot journal the brain session: {e}");
                 }
             }
+            if let WorkerEvent::RateLimit(snap) = &event {
+                launch
+                    .lease
+                    .pool()
+                    .observe_quota(&launch.account, snap.clone());
+            }
             if let WorkerEvent::Final(f) = &event {
                 finished = true;
                 let cost = f
@@ -365,6 +387,9 @@ pub(crate) async fn drive<R: AsyncRead + Unpin>(
                         cost: totals.cost(),
                     },
                 );
+                // Per turn, so a chat that runs for hours is visible to selection long
+                // before it shuts down.
+                launch.credit_turn();
             }
             if let Some(out) = brain_event(launch, &event)
                 && tx.send(out).await.is_err()
@@ -433,6 +458,10 @@ pub(crate) fn drain_stderr(launch: &Launch, err: tokio::process::ChildStderr) {
 
 pub(crate) async fn finish(launch: &Launch, state: NodeState) {
     let totals = *launch.totals.lock();
+    let failure = match &state {
+        NodeState::Failed { failure } => Some(failure.clone()),
+        _ => None,
+    };
     launch.journal.emit(
         Some(launch.node()),
         JournalEvent::NodeFinished {
@@ -446,6 +475,12 @@ pub(crate) async fn finish(launch: &Launch, state: NodeState) {
             unparsed_lines: 0,
         },
     );
+    // The brain is one node per run, and the pool has to see it: spend it does not know
+    // about is spend it cannot route around.
+    launch
+        .lease
+        .pool()
+        .report(&launch.account, failure.as_ref(), launch.uncredited());
 }
 
 async fn open_append(path: &Utf8Path) -> Option<tokio::fs::File> {

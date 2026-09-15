@@ -127,3 +127,54 @@ fn the_brain_dispatches_two_workers_and_they_hang_off_its_node() {
         "workers get no MCP server at all"
     );
 }
+
+/// The brain spends a real subscription: a whole run's planning went to one account and
+/// `swamp accounts` still showed it at 0 nodes and $0, so neither the operator nor the
+/// history tie-break in selection could see what the brain had burned.
+#[test]
+fn the_brain_credits_its_node_cost_and_quota_to_its_account() {
+    use swamp::model::core::{AccountId, LimitScope};
+
+    // `prefer` decides which account the brain reserves; the worker gets the other one.
+    let h = Harness::new()
+        .with_accounts(2, 0)
+        .prefer("alt")
+        .scenario("alt", Scenario::claude().dispatches("lex", "write the lexer"));
+
+    h.swamp(&["run", TASK]).assert().success();
+
+    let state = h.accounts_state();
+    let brain = state
+        .get(&AccountId("alt".into()))
+        .expect("the brain's account is in accounts.json");
+    assert_eq!(brain.lifetime_nodes, 1, "the brain is one node per run");
+    assert!(
+        brain.lifetime_cost_usd > 0.0,
+        "the brain's spend never reached the pool: {brain:?}"
+    );
+    assert!(brain.updated_at.is_some(), "{brain:?}");
+    let quota = brain
+        .quota
+        .as_ref()
+        .expect("the brain's rate-limit telemetry");
+    assert!(
+        quota
+            .windows
+            .iter()
+            .any(|w| w.scope == LimitScope::FiveHour && w.utilization > 0.0),
+        "{quota:?}"
+    );
+    assert_eq!(
+        state
+            .get(&AccountId("main".into()))
+            .map(|s| s.lifetime_nodes),
+        Some(1),
+        "the worker's account is counted exactly once"
+    );
+
+    // And the operator's view agrees with the file.
+    h.swamp(&["accounts"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("0.06"));
+}
