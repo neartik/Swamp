@@ -1,24 +1,31 @@
 use crate::config::Config;
+use crate::dispatch::account::AccountState;
 use crate::dispatch::pool::{AccountPool, Lease, NoCapacity, instant_of};
 use crate::ids::{NodeId, NodeIds};
 use crate::journal::{JournalEvent, JournalHandle};
 use crate::model::core::{
-    AccountId, NodeKind, NodeState, Provider, SessionHandle, Tier, WorkspaceRef,
+    AccountId, NodeKind, NodeState, Provider, SessionHandle, Tier, Usage, WorkspaceRef,
 };
+use crate::model::event::WorkerEvent;
 use crate::model::failure::Failure;
 use crate::model::node::NodeRecord;
 use crate::model::result::{NodeResult, TaskRequest};
-use crate::worker::RunOutcome;
 use crate::worker::adapter::{Capability, LaunchSpec, SessionPlan, adapter_for};
+use crate::worker::{EventObserver, RunOutcome, codex_quota};
 use crate::workspace::NodeWorktree;
 use async_trait::async_trait;
 use camino::Utf8PathBuf;
+use parking_lot::Mutex;
 use rand::Rng;
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
+use time::OffsetDateTime;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
+
+/// The default of `dispatch.quota_max_age`: past it an out-of-band probe is worth its cost.
+const DEFAULT_QUOTA_MAX_AGE: Duration = Duration::from_secs(60);
 
 const INITIAL_BACKOFF: Duration = Duration::from_secs(2);
 const MAX_BACKOFF: Duration = Duration::from_secs(120);
@@ -282,6 +289,15 @@ pub async fn run_node(cx: &NodeCtx, mut spec: LaunchSpec, task: &TaskRequest) ->
             tracing::warn!(node = %spec.node.id.short(), "cannot journal NodeSpawned: {e}");
         }
 
+        // Usage and quota reach the pool WHILE the worker runs, not once it is terminal.
+        let telemetry = Arc::new(NodeTelemetry {
+            pool: Arc::clone(&cx.pool),
+            account: lease.account.clone(),
+            node: spec.node.id,
+            total: Mutex::new(Usage::default()),
+        });
+        let _observing = crate::worker::observe_node(spec.node.id, telemetry.clone());
+
         let timeout = cx.cfg.node_timeout(spec.tier);
         let mut out = match cx.runner.run(&spec, timeout, cx.cancel.clone()).await {
             Ok(out) => out,
@@ -295,8 +311,15 @@ pub async fn run_node(cx: &NodeCtx, mut spec: LaunchSpec, task: &TaskRequest) ->
         cx.pool
             .report(&lease.account, out.failure.as_ref(), out.cost);
         // Live telemetry the account pool needs to stop routing BEFORE the provider says no.
+        // The observer has it already for a node this process watched; this is the backstop
+        // for an adopted or resumed one.
         if let Some(snap) = out.rate_limit.clone() {
             cx.pool.observe_quota(&lease.account, snap);
+        }
+        telemetry.commit();
+        if provider == Provider::Openai {
+            let thread = out.session.as_ref().map(|s| s.id.clone());
+            observe_codex_quota(cx, &lease, &spec.model, thread).await;
         }
         // A cancelled node was killed by us: the classifier only sees SIGTERM and would retry.
         if cx.cancel.is_cancelled() {
@@ -408,6 +431,121 @@ pub async fn run_node(cx: &NodeCtx, mut spec: LaunchSpec, task: &TaskRequest) ->
     out.logical = logical;
     out.attempts = attempts;
     out
+}
+
+/// Forwards one running node's telemetry to the pool. Cumulative, never a delta: claude
+/// replaces its running total with the result line's and codex reports a thread total, so a
+/// delta interface would double count both.
+struct NodeTelemetry {
+    pool: Arc<AccountPool>,
+    account: AccountId,
+    node: NodeId,
+    total: Mutex<Usage>,
+}
+
+impl EventObserver for NodeTelemetry {
+    fn on_event(&self, event: &WorkerEvent) {
+        match event {
+            WorkerEvent::Usage(u) => {
+                let mut total = self.total.lock();
+                total.absorb(u);
+                self.pool.observe_usage(&self.account, self.node, *total);
+            }
+            WorkerEvent::Final(f) => {
+                let end = f.account_usage();
+                let mut total = self.total.lock();
+                if end.billable() > 0 {
+                    *total = end;
+                }
+                self.pool.observe_usage(&self.account, self.node, *total);
+            }
+            WorkerEvent::RateLimit(snap) => self.pool.observe_quota(&self.account, snap.clone()),
+            _ => {}
+        }
+    }
+}
+
+impl NodeTelemetry {
+    fn commit(&self) {
+        let total = *self.total.lock();
+        self.pool.commit_usage(&self.account, self.node, total);
+    }
+}
+
+/// `codex exec --json` carries no quota, so it is read out of band once the node is terminal:
+/// the rollout it just appended to first, the app-server only when the cached snapshot is
+/// stale, and Swamp's own counters when neither answers.
+async fn observe_codex_quota(cx: &NodeCtx, lease: &Lease, model: &str, thread: Option<String>) {
+    let pc = cx.cfg.providers.get(&Provider::Openai);
+    let source = pc
+        .and_then(|p| p.quota_source.as_deref())
+        .unwrap_or("auto")
+        .to_owned();
+    if source == "none" {
+        return;
+    }
+    if source != "app-server"
+        && let Some(thread) = thread
+        && let Some(home) = codex_quota::resolve_codex_home(&lease.exec, &lease.env).await
+        && let Some(quota) = codex_quota::tail_rollout(&home, &thread).and_then(|s| s.quota)
+    {
+        cx.pool.observe_quota(&lease.account, quota);
+        return;
+    }
+    let state = account_state(cx, &lease.account);
+    if source != "rollout" && is_stale(cx, state.as_ref()) {
+        match codex_quota::read_rate_limits(&lease.exec, &lease.env).await {
+            Ok(read) => {
+                let pinned = cx
+                    .cfg
+                    .account(&lease.account)
+                    .and_then(|a| a.limit_id.clone());
+                if let Some(quota) = read.select(pinned.as_deref(), Some(model)) {
+                    cx.pool.observe_quota(&lease.account, quota);
+                    return;
+                }
+            }
+            Err(e) => tracing::debug!("no app-server quota for {}: {e:#}", lease.account.0),
+        }
+    }
+    // Neither source: an estimate, which can only deprioritise the account, never park it.
+    let (Some(window), Some(limit), Some(state)) = (
+        pc.and_then(|p| p.estimated_window),
+        pc.and_then(|p| p.estimated_window_tokens),
+        state,
+    ) else {
+        return;
+    };
+    if let Some(quota) = codex_quota::estimated(
+        &state.window_tokens,
+        state.window_started_at,
+        window,
+        limit,
+        OffsetDateTime::now_utc(),
+    ) {
+        cx.pool.observe_quota(&lease.account, quota);
+    }
+}
+
+fn account_state(cx: &NodeCtx, id: &AccountId) -> Option<AccountState> {
+    cx.pool
+        .snapshot()
+        .into_iter()
+        .find(|(_, a, _)| a == id)
+        .map(|(_, _, s)| s)
+}
+
+/// A percentage older than `dispatch.quota_max_age` is what makes dispatch wrong.
+fn is_stale(cx: &NodeCtx, state: Option<&AccountState>) -> bool {
+    let max_age = cx
+        .cfg
+        .dispatch
+        .quota_max_age
+        .unwrap_or(DEFAULT_QUOTA_MAX_AGE);
+    let now = OffsetDateTime::now_utc();
+    state
+        .and_then(|s| s.quota_observed_at)
+        .is_none_or(|at| (now - at) > max_age)
 }
 
 /// `nodes/<attempt>/result.json`: the node's own copy of what it produced, per DESIGN 7.1.

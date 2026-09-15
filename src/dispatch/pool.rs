@@ -4,8 +4,9 @@ use crate::dispatch::account::{Account, AccountState, Health};
 use crate::dispatch::cooldown::cooldown_for;
 use crate::dispatch::persist::{self, StateMap};
 use crate::dispatch::policy::{SelectionPolicy, rank, score};
+use crate::ids::NodeId;
 use crate::journal::{JournalEvent, JournalHandle};
-use crate::model::core::{AccountId, Cost, Provider, RateLimitSnapshot};
+use crate::model::core::{AccountId, Cost, Provider, RateLimitSnapshot, Usage};
 use crate::model::failure::Failure;
 use camino::Utf8PathBuf;
 use parking_lot::Mutex;
@@ -317,6 +318,18 @@ impl AccountPool {
         self.after_change(id, health);
     }
 
+    /// `cumulative` is this node's running total, not a delta. Idempotent: calling it twice
+    /// with the same value changes nothing.
+    pub fn observe_usage(&self, _id: &AccountId, _node: NodeId, _cumulative: Usage) {
+        // WP-D implements this against `UsageLedger`; inert until then, since panicking here
+        // would take down every node WP-B already wired to call it.
+    }
+
+    /// The node is terminal: fold its final total into the committed counters and forget it.
+    pub fn commit_usage(&self, _id: &AccountId, _node: NodeId, _final_total: Usage) {
+        // WP-D: fold into window_tokens and lifetime_tokens and emit AccountUsage.
+    }
+
     pub fn snapshot(&self) -> Vec<(Provider, AccountId, AccountState)> {
         let state = self.state.lock();
         self.accounts
@@ -551,11 +564,16 @@ impl AccountPool {
     }
 
     fn after_change(&self, id: &AccountId, health: Health) {
-        let (cooldown_until, quota) = {
+        let (cooldown_until, quota, quota_observed_at, quota_source) = {
             let mut state = self.state.lock();
             let entry = state.entry(id.clone()).or_default();
             entry.updated_at = Some(OffsetDateTime::now_utc());
-            (entry.cooldown_until, entry.quota.clone())
+            (
+                entry.cooldown_until,
+                entry.quota.clone(),
+                entry.quota_observed_at,
+                entry.quota_source,
+            )
         };
         crate::dispatch::emit(
             &self.journal,
@@ -565,6 +583,8 @@ impl AccountPool {
                 health,
                 cooldown_until,
                 quota,
+                quota_observed_at,
+                quota_source,
             },
         );
         self.persist();

@@ -843,9 +843,10 @@ async fn a_rate_limit_snapshot_from_the_worker_reaches_the_pool() {
         windows: vec![LimitWindow {
             scope: LimitScope::FiveHour,
             utilization: 0.99,
-            resets_at: None,
+            ..Default::default()
         }],
         resets_at: None,
+        ..Default::default()
     });
     let runner = Scripted::new(&f.root, vec![out]);
     let cx = f.ctx(runner.clone(), Duration::from_secs(30));

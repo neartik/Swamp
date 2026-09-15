@@ -49,10 +49,16 @@ expression: all
       {
         "scope": "seven_day",
         "utilization": 0.64,
-        "resets_at": null
+        "resets_at": null,
+        "window_minutes": null,
+        "measured": true
       }
     ],
-    "resets_at": null
+    "resets_at": null,
+    "limit_id": null,
+    "ordinary_usage_allowed": null,
+    "reached": null,
+    "plan": null
   },
   {
     "e": "final",
@@ -73,7 +79,8 @@ expression: all
     "api_error_status": null,
     "num_turns": 3,
     "permission_denials": 0,
-    "denied_tools": []
+    "denied_tools": [],
+    "model_usage": {}
   },
   {
     "e": "unknown",

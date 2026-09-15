@@ -616,14 +616,18 @@ mod tests {
                     account: AccountId("main".into()),
                     health: Health::Degraded,
                     cooldown_until: None,
+                    quota_observed_at: None,
+                    quota_source: None,
                     quota: Some(RateLimitSnapshot {
                         status: LimitStatus::Warning,
                         windows: vec![LimitWindow {
                             scope: LimitScope::SevenDay,
                             utilization: 0.64,
                             resets_at: None,
+                            ..Default::default()
                         }],
                         resets_at: None,
+                        ..Default::default()
                     }),
                 },
             ),

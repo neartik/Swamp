@@ -245,11 +245,35 @@ impl RunView {
                 health,
                 cooldown_until,
                 quota,
+                quota_observed_at,
+                quota_source,
             } => {
                 let s = self.accounts.entry(account.clone()).or_default();
                 s.health = *health;
                 s.cooldown_until = *cooldown_until;
                 s.quota = quota.clone();
+                s.quota_observed_at = *quota_observed_at;
+                s.quota_source = *quota_source;
+            }
+            JournalEvent::AccountUsage {
+                account,
+                window,
+                lifetime,
+                window_key,
+                rolled,
+                source,
+            } => {
+                let at = l.at;
+                let s = self.accounts.entry(account.clone()).or_default();
+                s.window_tokens = *window;
+                s.lifetime_tokens = *lifetime;
+                s.window_key = window_key.clone();
+                if *rolled {
+                    s.window_started_at = Some(at);
+                }
+                if source.is_some() {
+                    s.quota_source = *source;
+                }
             }
             JournalEvent::BrainTurn { .. }
             | JournalEvent::BrainToolCall { .. }

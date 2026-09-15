@@ -322,3 +322,80 @@ fn tier_extra_reaches_the_argv_as_config_overrides() {
         "{argv:?}"
     );
 }
+
+/// WP-B acceptance 6: `thread.failed` used to fall through to `Unknown`, so the thread ended
+/// with no Final at all and a hard failure was misread as a truncated stream.
+#[test]
+fn a_failed_thread_is_a_worker_error_and_not_a_truncated_stream() {
+    let mut st = ParseState::default();
+    let po = codex().parse_line(
+        r#"{"type":"thread.failed","error":{"code":"internal","message":"thread aborted"}}"#,
+        &mut st,
+    );
+    assert!(!po.noise, "a known event type is not drift");
+    assert_eq!(st.unparsed, 0);
+    let WorkerEvent::Final(f) = &po.events[0] else {
+        panic!("expected a final event, got {:?}", po.events);
+    };
+    assert!(!f.ok);
+    assert_eq!(f.subtype, "thread.failed");
+    assert_eq!(f.text.as_deref(), Some("thread aborted"));
+
+    let patterns = swamp::config::FailurePatterns {
+        rate_limit: regex::RegexSet::empty(),
+        auth: regex::RegexSet::empty(),
+        overloaded: regex::RegexSet::empty(),
+        sources: BTreeMap::new(),
+    };
+    let failure = codex().classify(&swamp::worker::ExitContext {
+        exit: Some(swamp::model::node::ExitInfo {
+            code: Some(0),
+            signal: None,
+            duration_ms: 1,
+        }),
+        state: &st,
+        patterns: &patterns,
+        deadline_hit: false,
+    });
+    match failure {
+        Some(swamp::model::failure::Failure::WorkerError { subtype, .. }) => {
+            assert_eq!(subtype, "thread.failed");
+        }
+        other => panic!("expected a worker error, got {other:?}"),
+    }
+}
+
+/// WP-B acceptance 3: `used_percent` is 0..100 and the scope comes from the window length.
+/// `primary` on the `codex` bucket is a seven-day window, whatever its name suggests.
+#[test]
+fn a_codex_rate_limits_payload_is_one_seven_day_window() {
+    use swamp::model::core::LimitScope;
+    use swamp::worker::codex_quota;
+
+    let text = std::fs::read_to_string(
+        Utf8PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("docs/ref/codex-rollout-sample.jsonl"),
+    )
+    .expect("the rollout fixture");
+    let now = time::OffsetDateTime::now_utc();
+    let quota = codex_quota::parse_rollout(&text, now)
+        .quota
+        .expect("rate limits");
+    assert_eq!(quota.windows.len(), 1, "a null secondary is not a window");
+    assert_eq!(quota.windows[0].scope, LimitScope::SevenDay);
+    assert!(
+        (quota.windows[0].utilization - 0.32).abs() < 1e-9,
+        "0..100 is divided by 100"
+    );
+    assert!(quota.windows[0].utilization <= 1.0);
+    assert!(
+        !quota
+            .windows
+            .iter()
+            .any(|w| w.scope == LimitScope::FiveHour),
+        "primary is not five_hour by position"
+    );
+    assert_eq!(
+        quota.measured_utilization(),
+        Some(quota.worst_utilization())
+    );
+}

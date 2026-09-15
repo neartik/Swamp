@@ -113,8 +113,10 @@ mod tests {
                     scope: LimitScope::SevenDay,
                     utilization: 0.64,
                     resets_at: None,
+                    ..Default::default()
                 }],
                 resets_at: None,
+                ..Default::default()
             }),
             WorkerEvent::Final(FinalSummary {
                 ok: true,
@@ -129,6 +131,7 @@ mod tests {
                 num_turns: 3,
                 permission_denials: 0,
                 denied_tools: Vec::new(),
+                ..Default::default()
             }),
             WorkerEvent::Unknown {
                 raw: RawLine(RawValue::from_string(r#"{"type":"future_thing"}"#.into()).unwrap()),

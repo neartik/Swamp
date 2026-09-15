@@ -534,6 +534,8 @@ fn generated(ops: &[(u8, usize)]) -> Vec<JournalLine> {
                 health: swamp::dispatch::account::Health::Degraded,
                 cooldown_until: None,
                 quota: None,
+                quota_observed_at: None,
+                quota_source: None,
             },
         };
         out.push(line(seq, Some(node), event));

@@ -32,13 +32,20 @@ pub fn merge_state(path: &Utf8Path, mine: &StateMap) -> anyhow::Result<StateMap>
     let _guard = lock(path)?;
     let mut merged = read_unlocked(path).unwrap_or_default();
     for (id, ours) in mine {
-        let keep = match merged.get(id) {
+        let theirs = match merged.get(id) {
             Some(theirs) if theirs.updated_at > ours.updated_at => continue,
-            Some(theirs) => theirs.lifetime_nodes.max(ours.lifetime_nodes),
-            None => ours.lifetime_nodes,
+            other => other.cloned(),
         };
         let mut entry = ours.clone();
-        entry.lifetime_nodes = keep;
+        if let Some(theirs) = &theirs {
+            entry.lifetime_nodes = theirs.lifetime_nodes.max(ours.lifetime_nodes);
+            entry.lifetime_tokens.take_max(&theirs.lifetime_tokens);
+            // A rolled window starts at zero: only the SAME window may keep the other
+            // process's count, or a reset window comes straight back from the file.
+            if theirs.window_key == ours.window_key {
+                entry.window_tokens.take_max(&theirs.window_tokens);
+            }
+        }
         // inflight is this process's runtime state and means nothing to anyone else.
         entry.inflight = 0;
         merged.insert(id.clone(), entry);

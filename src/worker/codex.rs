@@ -117,6 +117,17 @@ impl ProviderAdapter for CodexAdapter {
                     so_far,
                 ))
             }
+            // Without this the thread ends with no Final at all and the node reads as truncated.
+            CodexLine::ThreadFailed { error } => {
+                let so_far = st.usage;
+                ParseOutput::one(terminal(
+                    st,
+                    false,
+                    "thread.failed",
+                    error.map(|e| e.message),
+                    so_far,
+                ))
+            }
             CodexLine::Error { message } => {
                 let so_far = st.usage;
                 ParseOutput::one(terminal(st, false, "error", Some(message), so_far))
@@ -178,6 +189,7 @@ fn terminal(
         num_turns: st.last_final.as_ref().map_or(0, |p| p.num_turns) + 1,
         permission_denials: 0,
         denied_tools: Vec::new(),
+        model_usage: Default::default(),
     };
     st.last_final = Some(f.clone());
     WorkerEvent::Final(f)
@@ -288,6 +300,11 @@ enum CodexLine {
     },
     #[serde(rename = "turn.failed")]
     TurnFailed { error: CodexError },
+    #[serde(rename = "thread.failed")]
+    ThreadFailed {
+        #[serde(default)]
+        error: Option<CodexError>,
+    },
     #[serde(rename = "item.started")]
     ItemStarted { item: CodexItem },
     #[serde(rename = "item.updated")]

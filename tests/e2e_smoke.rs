@@ -186,8 +186,13 @@ fn a_codex_run_succeeds_and_keeps_the_banner_line_out_of_the_stream() {
     assert!(lines[0].contains("Reading additional input"), "{noise}");
     assert_eq!(node.unparsed_lines, 1);
 
-    let call = h.invocations("codex").pop().expect("one invocation");
-    assert_eq!(call.argv.get(1).map(String::as_str), Some("exec"));
+    // The account's quota is read out of band once the node ends, so `exec` is no longer
+    // the wrapper's only invocation.
+    let call = h
+        .invocations("codex")
+        .into_iter()
+        .find(|c| c.argv.get(1).map(String::as_str) == Some("exec"))
+        .expect("one exec invocation");
     assert_eq!(call.arg("-m"), Some(MID));
     // `codex exec` has no --append-system-prompt, so the worker role rides in front of the task.
     assert!(call.stdin.contains("Swamp worker"), "{}", call.stdin);

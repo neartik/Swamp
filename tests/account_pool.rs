@@ -115,9 +115,10 @@ fn quota(util: f64) -> RateLimitSnapshot {
         windows: vec![LimitWindow {
             scope: LimitScope::SevenDay,
             utilization: util,
-            resets_at: None,
+            ..Default::default()
         }],
         resets_at: None,
+        ..Default::default()
     }
 }
 

@@ -1,6 +1,6 @@
 use crate::model::core::{
-    ChangeKind, Cost, CostBasis, EvidenceSource, FileChange, FinalSummary, LimitScope, LimitStatus,
-    LimitWindow, NodeKind, Provider, RateLimitSnapshot, Usage,
+    ChangeKind, Cost, CostBasis, EvidenceSource, FileChange, FinalSummary, LimitReached,
+    LimitScope, LimitStatus, LimitWindow, NodeKind, Provider, RateLimitSnapshot, Usage,
 };
 use crate::model::event::WorkerEvent;
 use crate::model::failure::Failure;
@@ -297,6 +297,11 @@ fn result_event(r: ResultLine, st: &mut ParseState) -> ParseOutput {
         num_turns: r.num_turns,
         permission_denials: r.permission_denials.len() as u32,
         denied_tools: denied_tools(&r.permission_denials),
+        model_usage: r
+            .model_usage
+            .iter()
+            .map(|(model, u)| (model.clone(), model_usage_of(u)))
+            .collect(),
     };
     if let Some(s) = r.session_id {
         st.session = Some(s);
@@ -332,32 +337,64 @@ fn usage_of(u: &ClaudeUsage) -> Usage {
 }
 
 fn snapshot(info: &RateLimitInfo) -> RateLimitSnapshot {
+    let status = match info.status.as_str() {
+        "rejected" => LimitStatus::Rejected,
+        "warning" | "warn" => LimitStatus::Warning,
+        _ => LimitStatus::Allowed,
+    };
     RateLimitSnapshot {
-        status: match info.status.as_str() {
-            "rejected" => LimitStatus::Rejected,
-            "warning" | "warn" => LimitStatus::Warning,
-            _ => LimitStatus::Allowed,
-        },
+        status,
         windows: if info.windows.is_empty() {
             info.kind
                 .iter()
-                .map(|k| LimitWindow {
-                    scope: scope_of(k),
-                    utilization: 0.0,
-                    resets_at: reset_time(info.resets_at),
-                })
+                .map(|k| window(k, 0.0, reset_time(info.resets_at)))
                 .collect()
         } else {
             info.windows
                 .iter()
-                .map(|(name, w)| LimitWindow {
-                    scope: scope_of(name),
-                    utilization: w.utilization,
-                    resets_at: reset_time(Some(w.resets_at)),
-                })
+                .map(|(name, w)| window(name, w.utilization, reset_time(Some(w.resets_at))))
                 .collect()
         },
         resets_at: reset_time(info.resets_at),
+        limit_id: info.kind.clone(),
+        ordinary_usage_allowed: None,
+        reached: reached_of(info, status),
+        plan: None,
+    }
+}
+
+fn window(name: &str, utilization: f64, resets_at: Option<OffsetDateTime>) -> LimitWindow {
+    let scope = scope_of(name);
+    LimitWindow {
+        scope,
+        utilization,
+        resets_at,
+        window_minutes: minutes_of(scope),
+        measured: true,
+    }
+}
+
+/// claude names its windows instead of sizing them; the size is what the UI labels.
+fn minutes_of(scope: LimitScope) -> Option<u32> {
+    match scope {
+        LimitScope::Minute => Some(1),
+        LimitScope::FiveHour => Some(300),
+        LimitScope::SevenDay => Some(10080),
+        LimitScope::Unknown => None,
+    }
+}
+
+/// Overage is only a hard stop once the limit itself rejected the turn: `overageStatus:
+/// "rejected"` on an allowed account merely means the plan has no overage, which is normal.
+fn reached_of(info: &RateLimitInfo, status: LimitStatus) -> Option<LimitReached> {
+    if status != LimitStatus::Rejected {
+        return None;
+    }
+    match (info.overage_status.as_deref(), &info.overage_reason) {
+        (Some("rejected"), Some(reason)) if !reason.is_empty() => {
+            Some(LimitReached::CreditsDepleted)
+        }
+        _ => Some(LimitReached::RateLimit),
     }
 }
 
@@ -432,6 +469,10 @@ struct RateLimitInfo {
     kind: Option<String>,
     #[serde(default, rename = "unifiedWindows")]
     windows: BTreeMap<String, Window>,
+    #[serde(default, rename = "overageStatus")]
+    overage_status: Option<String>,
+    #[serde(default, rename = "overageDisabledReason")]
+    overage_reason: Option<String>,
 }
 
 #[derive(Deserialize, Clone, Copy)]
@@ -549,4 +590,32 @@ struct ResultLine {
     permission_denials: Vec<serde_json::Value>,
     #[serde(default)]
     duration_ms: u64,
+    /// Per-model totals. `usage` is the main model alone, so an account's real spend is
+    /// only visible here: a haiku side-call is billed to the same subscription.
+    #[serde(default, rename = "modelUsage")]
+    model_usage: BTreeMap<String, ModelUsage>,
+}
+
+#[derive(Deserialize, Default)]
+struct ModelUsage {
+    #[serde(default, rename = "inputTokens")]
+    input_tokens: u64,
+    #[serde(default, rename = "cacheReadInputTokens")]
+    cache_read_input_tokens: u64,
+    #[serde(default, rename = "cacheCreationInputTokens")]
+    cache_creation_input_tokens: u64,
+    #[serde(default, rename = "outputTokens")]
+    output_tokens: u64,
+    #[serde(default, rename = "thinkingTokens")]
+    thinking_tokens: u64,
+}
+
+fn model_usage_of(u: &ModelUsage) -> Usage {
+    Usage {
+        input_tokens: u.input_tokens,
+        cached_input_tokens: u.cache_read_input_tokens,
+        cache_write_tokens: u.cache_creation_input_tokens,
+        output_tokens: u.output_tokens,
+        reasoning_tokens: u.thinking_tokens,
+    }
 }

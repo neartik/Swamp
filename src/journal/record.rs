@@ -1,4 +1,4 @@
-use crate::dispatch::account::Health;
+use crate::dispatch::account::{Health, QuotaSource, WindowKey};
 use crate::dispatch::policy::SelectionPolicy;
 use crate::ids::{NodeId, RunId};
 use crate::model::core::{
@@ -121,6 +121,22 @@ pub enum JournalEvent {
         #[serde(with = "time::serde::rfc3339::option")]
         cooldown_until: Option<OffsetDateTime>,
         quota: Option<RateLimitSnapshot>,
+        #[serde(default, with = "time::serde::rfc3339::option")]
+        quota_observed_at: Option<OffsetDateTime>,
+        #[serde(default)]
+        quota_source: Option<QuotaSource>,
+    },
+    /// Emitted on every commit_usage and on every window roll, so `swamp replay --reparse`
+    /// re-derives token counters from the journal like everything else.
+    AccountUsage {
+        account: AccountId,
+        window: Usage,
+        lifetime: Usage,
+        #[serde(default)]
+        window_key: Option<WindowKey>,
+        rolled: bool,
+        #[serde(default)]
+        source: Option<QuotaSource>,
     },
     BrainTurn {
         role: TurnRole,

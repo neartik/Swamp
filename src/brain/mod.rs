@@ -190,6 +190,10 @@ pub struct Totals {
     pub basis: Option<crate::model::core::CostBasis>,
     /// How much of `usd` has already reached the account pool.
     pub credited_usd: f64,
+    /// What the ACCOUNT was charged for finished turns: `usage` is the main model alone.
+    pub account_tokens: Usage,
+    /// The current turn's tokens, replaced by its result line when the turn ends.
+    pub turn_tokens: Usage,
 }
 
 impl Totals {
@@ -221,6 +225,35 @@ impl Launch {
 
     pub fn latest_session(&self) -> Option<SessionHandle> {
         self.session.lock().clone()
+    }
+
+    /// Live tokens, mid-turn. The brain is an account's tenant like any worker: a brain that
+    /// spent a run's planning on one account must not leave it looking idle to the next
+    /// worker selection.
+    pub fn observe_tokens(&self, delta: &Usage) {
+        let cumulative = {
+            let mut t = self.totals.lock();
+            t.turn_tokens.absorb(delta);
+            let mut out = t.account_tokens;
+            out.absorb(&t.turn_tokens);
+            out
+        };
+        self.lease
+            .pool()
+            .observe_usage(&self.account, self.node(), cumulative);
+    }
+
+    /// A turn's result line carries that turn's totals and replaces what its deltas summed to.
+    pub fn observe_turn(&self, turn: &Usage) {
+        let cumulative = {
+            let mut t = self.totals.lock();
+            t.account_tokens.absorb(turn);
+            t.turn_tokens = Usage::default();
+            t.account_tokens
+        };
+        self.lease
+            .pool()
+            .observe_usage(&self.account, self.node(), cumulative);
     }
 
     /// Hands this turn's spend to the pool. The node itself is counted once, at shutdown.
@@ -386,6 +419,9 @@ pub(crate) async fn drive<R: AsyncRead + Unpin>(
                     .pool()
                     .observe_quota(&launch.account, snap.clone());
             }
+            if let WorkerEvent::Usage(u) = &event {
+                launch.observe_tokens(u);
+            }
             if let WorkerEvent::Final(f) = &event {
                 finished = true;
                 let cost = f
@@ -409,6 +445,7 @@ pub(crate) async fn drive<R: AsyncRead + Unpin>(
                 );
                 // Per turn, so a chat that runs for hours is visible to selection long
                 // before it shuts down.
+                launch.observe_turn(&f.account_usage());
                 launch.credit_turn();
             }
             if let Some(out) = brain_event(launch, &event)
@@ -506,6 +543,12 @@ pub(crate) async fn finish(launch: &Launch, state: NodeState) {
     );
     // The brain is one node per run, and the pool has to see it: spend it does not know
     // about is spend it cannot route around.
+    let mut tokens = totals.account_tokens;
+    tokens.absorb(&totals.turn_tokens);
+    launch
+        .lease
+        .pool()
+        .commit_usage(&launch.account, launch.node(), tokens);
     launch
         .lease
         .pool()

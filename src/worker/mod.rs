@@ -2,6 +2,7 @@ pub mod adapter;
 pub mod classify;
 pub mod claude;
 pub mod codex;
+pub mod codex_quota;
 pub mod follow;
 pub mod liveness;
 pub mod prompt;
@@ -14,21 +15,57 @@ pub use adapter::{
 pub use spawn::{Detached, NodeIo};
 
 use crate::config::{Config, FailurePatterns};
+use crate::ids::NodeId;
 use crate::journal::raw::{RawSink, Redactor};
 use crate::journal::{JournalEvent, JournalHandle};
 use crate::model::core::{
     AccountId, Cost, FileChange, Provider, RateLimitSnapshot, SessionHandle, Usage,
 };
+use crate::model::event::WorkerEvent;
 use crate::model::failure::Failure;
 use crate::model::node::ExitInfo;
 use crate::worker::follow::{POLL, follow};
 use crate::worker::liveness::wait_exit;
 use crate::worker::spawn::{Reaper, spawn_detached, terminate};
+use parking_lot::Mutex;
+use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
+
+/// Live telemetry, while the worker still runs: usage and quota reach the account pool from
+/// the same consumer loop that journals, instead of only once the node is terminal.
+pub trait EventObserver: Send + Sync + 'static {
+    fn on_event(&self, event: &WorkerEvent);
+}
+
+/// Registered per node rather than passed down `NodeRunner::run`, whose implementors live in
+/// packages this one does not own.
+pub fn observe_node(node: NodeId, observer: Arc<dyn EventObserver>) -> ObserverGuard {
+    observers().lock().insert(node, observer);
+    ObserverGuard(node)
+}
+
+pub fn observer_for(node: NodeId) -> Option<Arc<dyn EventObserver>> {
+    observers().lock().get(&node).cloned()
+}
+
+/// Deregisters on drop, so a panicking node cannot leak its observer.
+pub struct ObserverGuard(NodeId);
+
+impl Drop for ObserverGuard {
+    fn drop(&mut self) {
+        observers().lock().remove(&self.0);
+    }
+}
+
+fn observers() -> &'static Mutex<BTreeMap<NodeId, Arc<dyn EventObserver>>> {
+    static OBSERVERS: OnceLock<Mutex<BTreeMap<NodeId, Arc<dyn EventObserver>>>> = OnceLock::new();
+    OBSERVERS.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
 
 const STDERR_TAIL: usize = 64;
 const DEFAULT_GRACE: Duration = Duration::from_secs(5);
@@ -69,6 +106,8 @@ pub struct ExecReq<'a> {
     /// journal.max_line_bytes: a base64 blob on one line must truncate, not OOM.
     pub max_line: usize,
     pub cancel: CancellationToken,
+    /// Fed every parsed event as it is journaled.
+    pub observer: Option<Arc<dyn EventObserver>>,
 }
 
 impl Executor {
@@ -150,6 +189,7 @@ impl Executor {
                 .max_line_bytes
                 .unwrap_or(crate::worker::classify::MAX_LINE),
             cancel,
+            observer: observer_for(spec.node.id),
         })
         .await?;
         sink.flush().await?;
@@ -176,6 +216,7 @@ pub async fn execute(req: ExecReq<'_>) -> anyhow::Result<RunOutcome> {
         grace,
         max_line,
         cancel,
+        observer,
     } = req;
 
     let (pid, pgid, offset) = match resume {
@@ -237,6 +278,9 @@ pub async fn execute(req: ExecReq<'_>) -> anyhow::Result<RunOutcome> {
         let journal = journal.cloned();
         async move {
             while let Some((node, event, offset)) = rx.recv().await {
+                if let Some(o) = &observer {
+                    o.on_event(&event);
+                }
                 if let Some(j) = &journal {
                     j.emit(Some(node), JournalEvent::NodeEvent { offset, event });
                 }

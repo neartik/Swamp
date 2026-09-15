@@ -340,6 +340,7 @@ async fn a_worker_that_never_exits_is_timed_out_and_its_group_is_gone() {
         grace: Duration::from_millis(500),
         max_line: 8 * 1024 * 1024,
         cancel: CancellationToken::new(),
+        observer: None,
     })
     .await
     .expect("execute");
@@ -388,6 +389,7 @@ async fn a_grandchild_that_ignores_sigterm_still_gets_sigkilled() {
         grace: Duration::from_millis(600),
         max_line: 8 * 1024 * 1024,
         cancel: CancellationToken::new(),
+        observer: None,
     })
     .await
     .expect("execute");

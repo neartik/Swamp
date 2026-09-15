@@ -102,6 +102,7 @@ fn final_of(subtype: &str, text: &str) -> FinalSummary {
         num_turns: 1,
         permission_denials: 0,
         denied_tools: Vec::new(),
+        ..Default::default()
     }
 }
 
@@ -397,6 +398,89 @@ fn a_rate_limit_event_keeps_every_window() {
     assert_eq!(snap.worst_scope(), LimitScope::SevenDay);
 }
 
+fn rate_limits(events: &[WorkerEvent]) -> Vec<RateLimitSnapshot> {
+    events
+        .iter()
+        .filter_map(|e| match e {
+            WorkerEvent::RateLimit(s) => Some(s.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// WP-B acceptance 1: the sample's second event adds `seven_day_overage_included`, which is
+/// not a plan limit; maxing it in used to drive Degraded off an overage window.
+#[test]
+fn an_overage_window_never_decides_the_worst_utilization() {
+    let (events, _) = parse_sample();
+    let snap = rate_limits(&events).pop().expect("a rate limit event");
+    assert_eq!(snap.windows.len(), 3, "the overage window is kept");
+    assert_eq!(snap.limit_id.as_deref(), Some("five_hour"));
+    assert!(snap.reached.is_none(), "an allowed account is not depleted");
+    let overage = snap
+        .windows
+        .iter()
+        .find(|w| w.scope == LimitScope::Unknown)
+        .expect("the overage window");
+    assert_eq!(overage.utilization, 0.07);
+    assert_eq!(overage.window_minutes, None, "no named size for it");
+    assert_eq!(snap.worst_utilization(), 0.64);
+    assert_eq!(snap.measured_utilization(), Some(0.64));
+    assert_eq!(snap.tightest().map(|w| w.scope), Some(LimitScope::SevenDay));
+    for w in &snap.windows {
+        assert!(w.measured, "telemetry is a measurement, never an estimate");
+    }
+    let five = &snap.windows[0];
+    assert_eq!(five.scope, LimitScope::FiveHour);
+    assert_eq!(five.window_minutes, Some(300));
+    assert_eq!(
+        snap.windows
+            .iter()
+            .find(|w| w.scope == LimitScope::SevenDay)
+            .and_then(|w| w.window_minutes),
+        Some(10_080)
+    );
+}
+
+/// The window set varies between two events of one run, so a snapshot merges per scope: a
+/// key dropping out of the newer one must not erase what it measured.
+#[test]
+fn a_later_snapshot_does_not_erase_a_window_it_omits() {
+    let (events, _) = parse_sample();
+    let full = &rate_limits(&events).pop().expect("a rate limit event");
+    let five_only = RateLimitSnapshot {
+        status: LimitStatus::Allowed,
+        windows: vec![
+            full.windows
+                .iter()
+                .find(|w| w.scope == LimitScope::FiveHour)
+                .expect("five hour")
+                .clone(),
+        ],
+        ..Default::default()
+    };
+    let merged = five_only.merged_over(full);
+    assert_eq!(merged.windows.len(), 3);
+    assert_eq!(merged.worst_utilization(), 0.64);
+}
+
+/// WP-B acceptance 2: `result.usage` is the main model alone. The account paid for the haiku
+/// side-call too, and only `modelUsage` reports it.
+#[test]
+fn the_account_total_sums_every_model_the_run_billed() {
+    let (events, _) = parse_sample();
+    let WorkerEvent::Final(f) = events.last().expect("final") else {
+        panic!("last event is not final");
+    };
+    assert_eq!(f.model_usage.len(), 2, "two models billed");
+    let account = f.account_usage();
+    assert_eq!(account.input_tokens, f.usage.input_tokens + 899);
+    assert_eq!(account.output_tokens, f.usage.output_tokens + 12);
+    assert_eq!(account.cached_input_tokens, f.usage.cached_input_tokens);
+    assert_eq!(account.cache_write_tokens, f.usage.cache_write_tokens);
+    assert!(account.billable() > f.usage.billable());
+}
+
 #[test]
 fn the_final_event_carries_reported_cost_and_run_totals() {
     let (events, st) = parse_sample();
@@ -523,9 +607,10 @@ fn telemetry_outranks_a_clean_exit() {
             windows: vec![swamp::model::core::LimitWindow {
                 scope: LimitScope::SevenDay,
                 utilization: 1.0,
-                resets_at: None,
+                ..Default::default()
             }],
             resets_at: None,
+            ..Default::default()
         }),
         ..ParseState::default()
     };

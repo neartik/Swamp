@@ -1,6 +1,7 @@
 use crate::model::failure::Failure;
 use camino::Utf8PathBuf;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use time::OffsetDateTime;
 
 #[derive(
@@ -215,6 +216,15 @@ impl Usage {
         self.output_tokens += o.output_tokens;
         self.reasoning_tokens += o.reasoning_tokens;
     }
+    /// Per-field max. Two processes count the same account independently and the shared
+    /// file has to keep the higher number, never a stale one.
+    pub fn take_max(&mut self, o: &Usage) {
+        self.input_tokens = self.input_tokens.max(o.input_tokens);
+        self.cached_input_tokens = self.cached_input_tokens.max(o.cached_input_tokens);
+        self.cache_write_tokens = self.cache_write_tokens.max(o.cache_write_tokens);
+        self.output_tokens = self.output_tokens.max(o.output_tokens);
+        self.reasoning_tokens = self.reasoning_tokens.max(o.reasoning_tokens);
+    }
     pub fn billable(&self) -> u64 {
         self.input_tokens + self.cache_write_tokens + self.output_tokens
     }
@@ -264,7 +274,7 @@ pub enum EvidenceSource {
     EventStream,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LimitScope {
     FiveHour,
@@ -281,13 +291,48 @@ pub enum LimitStatus {
     Rejected,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LimitReached {
+    /// codex `rate_limit_reached`. Cool the account, it comes back.
+    RateLimit,
+    /// Credits are gone: a human must act, so there is no timer.
+    CreditsDepleted,
+    /// codex `spend_control_reached`. Handled like CreditsDepleted.
+    SpendControl,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LimitWindow {
     pub scope: LimitScope,
-    /// 0.0 ..= 1.0
+    /// 0.0 ..= 1.0, ALWAYS. codex reports 0..100 and is divided at the boundary.
     pub utilization: f64,
     #[serde(with = "time::serde::rfc3339::option")]
     pub resets_at: Option<OffsetDateTime>,
+    /// The provider's own window length. 300 -> five_hour, 10080 -> seven_day. Kept so a
+    /// window Swamp has no scope for is still labelled honestly in the UI.
+    #[serde(default)]
+    pub window_minutes: Option<u32>,
+    /// False when this number came from Swamp's own counters, not the provider.
+    #[serde(default = "measured_default")]
+    pub measured: bool,
+}
+
+/// Every window Swamp stored before estimates existed came from a provider.
+fn measured_default() -> bool {
+    true
+}
+
+impl Default for LimitWindow {
+    fn default() -> Self {
+        Self {
+            scope: LimitScope::Unknown,
+            utilization: 0.0,
+            resets_at: None,
+            window_minutes: None,
+            measured: true,
+        }
+    }
 }
 
 /// The real sample carries five_hour = 0.06 AND seven_day = 0.64 in the same event.
@@ -299,31 +344,86 @@ pub struct RateLimitSnapshot {
     pub windows: Vec<LimitWindow>,
     #[serde(with = "time::serde::rfc3339::option")]
     pub resets_at: Option<OffsetDateTime>,
+    /// codex `limit_id` / claude `rateLimitType`. Names which bucket this is.
+    #[serde(default)]
+    pub limit_id: Option<String>,
+    /// codex `ordinaryUsageAllowed`. The authoritative gate: a client must NOT infer
+    /// recovery from percentages or reset times, so `Some(false)` wins over both.
+    #[serde(default)]
+    pub ordinary_usage_allowed: Option<bool>,
+    /// Why the limit was reached, when the provider says. Decides cooldown vs park.
+    #[serde(default)]
+    pub reached: Option<LimitReached>,
+    /// Plan name, display only.
+    #[serde(default)]
+    pub plan: Option<String>,
+}
+
+impl Default for RateLimitSnapshot {
+    fn default() -> Self {
+        Self {
+            status: LimitStatus::Allowed,
+            windows: Vec::new(),
+            resets_at: None,
+            limit_id: None,
+            ordinary_usage_allowed: None,
+            reached: None,
+            plan: None,
+        }
+    }
 }
 
 impl RateLimitSnapshot {
-    pub fn worst_utilization(&self) -> f64 {
+    /// An `Unknown` window is an overage-inclusive or unmapped bucket: it is never a plan
+    /// limit, so it is skipped as soon as one named window exists.
+    pub fn named(&self) -> impl Iterator<Item = &LimitWindow> {
+        let any_named = self.windows.iter().any(|w| w.scope != LimitScope::Unknown);
         self.windows
             .iter()
+            .filter(move |w| !any_named || w.scope != LimitScope::Unknown)
+    }
+    pub fn worst_utilization(&self) -> f64 {
+        self.named().map(|w| w.utilization).fold(0.0, f64::max)
+    }
+    /// None when every window is an estimate: only a measured number may park an account.
+    pub fn measured_utilization(&self) -> Option<f64> {
+        self.named()
+            .filter(|w| w.measured)
             .map(|w| w.utilization)
-            .fold(0.0, f64::max)
+            .fold(None, |acc: Option<f64>, u| {
+                Some(acc.map_or(u, |a| a.max(u)))
+            })
+    }
+    /// The window §4 scores against: the one closest to exhaustion.
+    pub fn tightest(&self) -> Option<&LimitWindow> {
+        self.named()
+            .max_by(|a, b| a.utilization.total_cmp(&b.utilization))
     }
     pub fn soonest_reset(&self) -> Option<OffsetDateTime> {
-        self.windows
-            .iter()
+        self.named()
             .filter_map(|w| w.resets_at)
             .min()
             .or(self.resets_at)
     }
     pub fn worst_scope(&self) -> LimitScope {
-        self.windows
-            .iter()
-            .max_by(|a, b| a.utilization.total_cmp(&b.utilization))
-            .map_or(LimitScope::Unknown, |w| w.scope)
+        self.tightest().map_or(LimitScope::Unknown, |w| w.scope)
+    }
+
+    /// Per-scope merge, not replacement: two `rate_limit_event`s of one run carry different
+    /// window sets, and a key dropping out of the newer one must not erase what it measured.
+    pub fn merged_over(&self, prev: &RateLimitSnapshot) -> RateLimitSnapshot {
+        let mut out = self.clone();
+        for old in &prev.windows {
+            if !out.windows.iter().any(|w| w.scope == old.scope) {
+                out.windows.push(old.clone());
+            }
+        }
+        out.windows.sort_by_key(|w| w.scope);
+        out
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct FinalSummary {
     pub ok: bool,
     /// Raw provider terminal marker: claude `result.subtype`, codex `turn.completed|failed`.
@@ -341,6 +441,24 @@ pub struct FinalSummary {
     /// The tool names behind those denials, so the cause is visible without stream.jsonl.
     #[serde(default)]
     pub denied_tools: Vec<String>,
+    /// claude `modelUsage`: per-model totals including side-calls `usage` never reports.
+    #[serde(default)]
+    pub model_usage: BTreeMap<String, Usage>,
+}
+
+impl FinalSummary {
+    /// What the ACCOUNT spent. `usage` is the main model only; a haiku side-call is billed
+    /// to the same subscription and appears only in `modelUsage`.
+    pub fn account_usage(&self) -> Usage {
+        if self.model_usage.is_empty() {
+            return self.usage;
+        }
+        let mut out = Usage::default();
+        for u in self.model_usage.values() {
+            out.absorb(u);
+        }
+        out
+    }
 }
 
 #[cfg(test)]
@@ -398,14 +516,17 @@ mod tests {
                     scope: LimitScope::FiveHour,
                     utilization: 0.06,
                     resets_at: None,
+                    ..Default::default()
                 },
                 LimitWindow {
                     scope: LimitScope::SevenDay,
                     utilization: 0.64,
                     resets_at: None,
+                    ..Default::default()
                 },
             ],
             resets_at: None,
+            ..Default::default()
         };
         assert_eq!(snap.worst_utilization(), 0.64);
         assert_eq!(snap.worst_scope(), LimitScope::SevenDay);
@@ -417,6 +538,7 @@ mod tests {
             status: LimitStatus::Allowed,
             windows: vec![],
             resets_at: None,
+            ..Default::default()
         };
         assert_eq!(snap.worst_utilization(), 0.0);
         assert_eq!(snap.worst_scope(), LimitScope::Unknown);
@@ -433,14 +555,17 @@ mod tests {
                     scope: LimitScope::SevenDay,
                     utilization: 0.5,
                     resets_at: Some(late),
+                    ..Default::default()
                 },
                 LimitWindow {
                     scope: LimitScope::FiveHour,
                     utilization: 0.1,
                     resets_at: Some(early),
+                    ..Default::default()
                 },
             ],
             resets_at: Some(late),
+            ..Default::default()
         };
         assert_eq!(snap.soonest_reset(), Some(early));
     }

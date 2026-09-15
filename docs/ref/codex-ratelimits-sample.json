@@ -1,0 +1,33 @@
+{
+  "jsonrpc": "2.0",
+  "id": 2,
+  "result": {
+    "planName": "plus",
+    "rateLimitsByLimitId": {
+      "codex": {
+        "limitId": "codex",
+        "limitName": "gpt-5.1-codex",
+        "ordinaryUsageAllowed": true,
+        "rateLimitReachedType": null,
+        "primary": {
+          "usedPercent": 32.0,
+          "windowMinutes": 10080,
+          "resetsInSeconds": 433200
+        },
+        "secondary": null
+      },
+      "codex_bengalfox": {
+        "limitId": "codex_bengalfox",
+        "limitName": "gpt-5.1-codex-mini",
+        "ordinaryUsageAllowed": true,
+        "rateLimitReachedType": null,
+        "primary": {
+          "usedPercent": 0.0,
+          "windowMinutes": 10080,
+          "resetsInSeconds": 433200
+        },
+        "secondary": null
+      }
+    }
+  }
+}

@@ -115,9 +115,10 @@ mod tests {
             windows: vec![LimitWindow {
                 scope: LimitScope::SevenDay,
                 utilization: v,
-                resets_at: None,
+                ..Default::default()
             }],
             resets_at: None,
+            ..Default::default()
         }
     }
 
