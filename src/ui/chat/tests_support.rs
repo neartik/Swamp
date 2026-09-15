@@ -314,7 +314,7 @@ pub fn app(width: u16) -> App {
 
 pub fn welcome() -> WelcomeInfo {
     WelcomeInfo {
-        cwd: "/Users/quentin/projects/swamp/Swamp".to_owned(),
+        cwd: "/Users/me/projects/example/repo-one".to_owned(),
         brain: "anthropic/main · claude-opus-4-20250514 · tier high".to_owned(),
         workers: "4 accounts · 3 ready, 1 cooling · max 4 parallel · budget $10.00".to_owned(),
         run: run_id().short(),

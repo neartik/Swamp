@@ -428,7 +428,7 @@ Mockups are 100 columns. The ruler is not printed.
 │ ✻ Welcome to Swamp                                                                               │
 │                                                                                                  │
 │   /help for commands, /status for the run tree                                                   │
-│   cwd: /Users/quentin/projects/swamp/Swamp                                                       │
+│   cwd: /Users/me/projects/example/repo-one                                                       │
 │   brain: anthropic/main · claude-opus-4-20250514 · tier high                                     │
 │   workers: 4 accounts · 3 ready, 1 cooling · max 4 parallel · budget $10.00                      │
 │   run: 4x4kj6                                                                                    │

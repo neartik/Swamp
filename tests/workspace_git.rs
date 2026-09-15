@@ -469,7 +469,7 @@ async fn paths_with_spaces_and_unicode_survive() {
     let mut h = harness().await;
     let wt = h.mgr.create(NodeId::new(), 1).await.unwrap();
     write(&wt, "a file with spaces.txt", "one\n");
-    write(&wt, "héllo ünicode/naïve.txt", "deux\n");
+    write(&wt, "héllo ünicode/naïve.txt", "two\n");
 
     h.mgr
         .finalize(&wt, "unicode", Tier::Low)
