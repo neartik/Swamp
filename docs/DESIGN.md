@@ -142,9 +142,10 @@ the only account would leave the workers with none. Without the reservation the 
 the brain blocks in `swamp_await`, workers hold every account, and nothing can finish because the
 brain never gets to run an integration node.
 
-The brain's permit comes from a dedicated one-slot semaphore, never from `max_parallel`. The
-reservation already subtracts a worker permit; charging the brain a second one out of the same
-budget leaves `max_parallel - 2` workers and deadlocks outright at `max_parallel <= 2`.
+The brain's permit comes from a dedicated one-slot semaphore, entirely separate from the worker
+pool. There is no global worker cap to share: reserving the brain's account never reduces how many
+workers can run, it only holds that one account out of dispatch's selection for as long as the
+brain needs it.
 
 ### MCP tool surface
 
@@ -157,9 +158,11 @@ budget leaves `max_parallel - 2` workers and deadlocks outright at `max_parallel
 | `swamp_worker_diff` | a node's patch, truncated, with a path to the full file |
 | `swamp_note` | write an annotation into the journal (the brain's reasoning, preserved) |
 
-Caps are enforced in the dispatcher, never in the prompt: `max_parallel_dispatch`,
-`max_nodes_per_run`, `max_high_tier_concurrent`, `max_depth`, and a pre-spawn USD/token budget check.
-A confused brain must not be able to fork-bomb a subscription.
+Caps are enforced in the dispatcher, never in the prompt: `max_nodes_per_run` and `max_depth`. There
+is no global parallelism cap and no spend cap; a `swamp_dispatch` batch starts every task at once
+and each one queues on its own account's capacity and usage headroom instead (§6.3). A confused
+brain is bounded by `max_nodes_per_run` per batch and by every account's own quota, not by a static
+ceiling on the whole machine.
 
 `swamp_dispatch` always returns within `max_wait_s` with partial results marked `"running"` rather
 than blocking forever. Structurally, `mcp/tools.rs` depends on `dispatch/` and `journal/` and on
@@ -375,7 +378,7 @@ impl NodeState {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum CancelSource { User, Brain, Budget, Timeout, Shutdown }
+pub enum CancelSource { User, Brain, Timeout, Shutdown }
 
 /// A resume handle. ALWAYS carried with the account that minted it: a claude session id
 /// created under CLAUDE_CONFIG_DIR=A does not exist under B. If this invariant breaks,
@@ -532,8 +535,6 @@ pub enum Failure {
     AuthExpired { detail: String, detected_by: Detector },
     /// Transient upstream capacity problem (429-adjacent 529/503). Back off on the SAME account.
     Overloaded { detail: String },
-    /// Our own guard tripped. Do NOT fail over: another account would spend too.
-    BudgetExceeded { limit_usd: f64, spent_usd: f64 },
     Timeout { after_s: u64 },
     /// The task itself failed. NEVER rotate: a bad prompt would burn every subscription.
     WorkerError { subtype: String, detail: String },
@@ -565,8 +566,8 @@ impl Failure {
     }
     /// Stop. The answer is the answer.
     pub fn is_terminal(&self) -> bool {
-        matches!(self, Self::WorkerError { .. } | Self::BudgetExceeded { .. }
-            | Self::Timeout { .. } | Self::PermissionDenied { .. } | Self::NoCapacity { .. })
+        matches!(self, Self::WorkerError { .. } | Self::Timeout { .. }
+            | Self::PermissionDenied { .. } | Self::NoCapacity { .. })
     }
 }
 ```
@@ -737,7 +738,7 @@ pub fn exit_code(e: &anyhow::Error) -> i32 {
         _ => 1,
     }
 }
-// 5 = merge conflict, 6 = cancelled, 7 = budget exceeded: set by the cmd layer.
+// 5 = merge conflict, 6 = cancelled: set by the cmd layer.
 ```
 
 ---
@@ -828,7 +829,6 @@ pub struct LaunchSpec {
     pub kind: NodeKind,                   // Worker or Brain; changes the argv
     pub permission_mode: String,          // from config, e.g. "acceptEdits"
     pub sandbox: String,                  // codex, e.g. "workspace-write"
-    pub budget_usd: Option<f64>,
     pub append_system_prompt: Option<String>,
     pub allow_tools: Vec<String>,
     pub deny_tools: Vec<String>,
@@ -873,7 +873,7 @@ pub struct ExitContext<'a> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Capability {
-    Resume, PreassignedSession, McpStdio, NativeBudget,
+    Resume, PreassignedSession, McpStdio,
     StreamingStdin, ReportedCost, QuotaTelemetry, ToolPolicyFlags,
 }
 
@@ -918,7 +918,6 @@ Worker:
                                    # Never bypassPermissions unless opted in.
   --permission-prompts none        # nobody is at the keyboard; prompts are denied, not hung
   --strict-mcp-config              # with no --mcp-config: workers get exactly zero MCP servers
-  [--max-budget-usd <n>]           # when a per-node budget is set
   --append-system-prompt <text>    # the worker role (worker/prompt.rs) plus, if set,
                                    # providers.<p>.worker.system_prompt_file, read as TEXT
   [--allowed-tools ...providers.<p>.worker.allow_tools]
@@ -1117,7 +1116,7 @@ struct OutDetails { #[serde(default)] thinking_tokens: u64 }
 
 #[derive(Deserialize)]
 struct ResultLine {
-    subtype: String,   // success | error_during_execution | error_max_turns | error_max_budget_usd
+    subtype: String,   // success | error_during_execution | error_max_turns
     #[serde(default)] is_error: bool,
     #[serde(default)] result: Option<String>,
     #[serde(default)] total_cost_usd: Option<f64>,
@@ -1233,8 +1232,7 @@ pub fn classify(cx: &ExitContext<'_>) -> Option<Failure> {
             return Some(Failure::Overloaded { detail: format!("{:?}", f.api_error_status) });
         }
         match f.subtype.as_str() {
-            "error_max_budget_usd" => return Some(Failure::BudgetExceeded {
-                limit_usd: 0.0, spent_usd: f.cost.map_or(0.0, |c| c.usd) }),
+            // A subtype naming a user's own spend-limit flag falls through to WorkerError.
             "success" if f.ok && f.permission_denials == 0 => return None,
             _ => {}
         }
@@ -1381,78 +1379,90 @@ exactly which model ran, even after the config changed. `swamp doctor` prints th
 
 ### 6.3 Concurrency
 
-Three levels of backpressure, all real semaphores:
+No global parallelism cap and no budget cap: `AccountPool` keeps no machine-wide semaphore. The only
+bounds are:
 
-1. **Global**: `limits.max_parallel` caps total live worker processes. Four `claude` processes each
-   running `cargo build` in its own worktree melt a laptop long before they exhaust a quota.
-2. **Per account**: `accounts[].max_concurrency` (default 2). Subscriptions throttle on concurrent
-   sessions, not only on tokens, and blowing past that gets you limited faster than the token budget
-   would.
-3. **Per dispatch batch**: `swamp_dispatch` tasks queue against the above and the tool returns when
-   all complete or `max_wait_s` elapses.
+1. **Per account, optional**: `accounts[].max_concurrency`. Unset means unlimited, which is where
+   most subscription concurrency limits actually live; a user who wants a ceiling sets one.
+2. **Usage headroom**: `QuotaAware` scoring (§6.4) weighs an account's measured utilization and
+   proactively stops leasing it at `cooldown.quota_stop_at`, so an uncapped account is still bounded
+   by how much of its window is left, not by a number. `crowding` in the score keeps an uncapped
+   account from soaking up a whole batch: it rises with every live node on that account and never
+   reaches 1, so an idle capped account and an idle uncapped one still start level.
+3. **Per dispatch batch**: `swamp_dispatch` starts every task at once; each one then queues on its
+   own account's capacity and headroom, and the tool returns when all complete or `max_wait_s`
+   elapses.
 
-`reserve_brain_slot = true` holds one permit and one healthy account of the brain's provider out of
-the worker pool. The held permit is the subtraction from `max_parallel`; the brain's own lease is
-taken from a separate one-slot semaphore, so the reservation costs exactly one slot. `brain.account`
-pins which account the brain leases, and a pin that cannot be leased is an error, never a silent
-fallback to another account.
+`reserve_brain_slot = true` holds one healthy account of the brain's provider out of the worker
+pool, from a dedicated one-slot semaphore unrelated to the bounds above - there is no machine-wide
+permit for it to subtract from. `brain.account` pins which account the brain leases, and a pin that
+cannot be leased is an error, never a silent fallback to another account.
+
+When every account of a provider is cooling, past its measured stop threshold, or hard-gated,
+`acquire` does not fail: it journals one `NodeBlocked { until, why }` and waits for the earliest
+possible recovery, deadline and cancellation permitting (§6.6, `NoCapacity`).
 
 ### 6.4 Selection
 
 ```rust
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
-pub enum SelectionPolicy { RoundRobin, LeastLoaded, QuotaAware }
-
-impl AccountPool {
-    /// Lower is better. None means ineligible.
-    fn score(&self, a: &Account, s: &AccountState, now: OffsetDateTime) -> Option<f64> {
-        match s.health {
-            Health::Disabled | Health::AuthBroken => return None,
-            Health::Cooling if s.cooldown_until.is_some_and(|t| t > now) => return None,
-            _ => {}
-        }
-        if s.inflight >= a.max_concurrency { return None; }
-        let util = s.quota.as_ref().map_or(0.0, |q| q.worst_utilization());
-        if util >= self.cfg.quota_stop_at { return None; }     // proactive, before any error
-        let load = s.inflight as f64 / a.max_concurrency.max(1) as f64;
-        let idle = s.last_used.map_or(f64::MAX, |t| (now - t).as_seconds_f64());
-        Some(match self.policy {
-            SelectionPolicy::RoundRobin  => -idle,
-            SelectionPolicy::LeastLoaded => load - 0.01 * a.weight as f64,
-            SelectionPolicy::QuotaAware  => 0.65 * util + 0.35 * load
-                                            - 0.05 * a.weight as f64
-                                            - 0.02 * (idle / 3600.0).min(1.0),
-        })
-    }
-}
+pub enum SelectionPolicy { RoundRobin, LeastLoaded, #[default] QuotaAware }
 ```
 
-A score alone leaves two idle accounts exactly tied, and the tie then fell to the map order, so
-every sequential single-worker run burned the same subscription. Equal scores are therefore
-settled in order by fewest `lifetime_nodes`, then lowest `lifetime_cost_usd` (both persisted in
-`~/.swamp/accounts.json`, so the rotation survives the process), then by a per-pool cursor that
-rotates the candidate list once per selection. Load always outranks history: a busy account is
-never preferred to an idle one.
+`QuotaAware` is the default: dispatch balances load from *measured usage*, not a static ceiling.
+Every eligibility gate is a hard `return None`, checked before any scoring: `Health::Disabled` /
+`AuthBroken`; a live cooldown; the provider's own authoritative stop
+(`ordinary_usage_allowed == Some(false)`, or `reached` in `{CreditsDepleted, SpendControl}`, neither
+of which is a timer - a human must act); `accounts[].max_concurrency`, when set, reached; and a
+**measured** utilization at or past `cooldown.quota_stop_at` (an estimated one never excludes an
+account - a guess must not park a working subscription). Everything that survives is scored:
 
-`LeastLoaded` is the **v1 default**. `QuotaAware` is implemented and selectable, but it is not the
-default because the telemetry that feeds it exists for Anthropic only: claude emits
-`rate_limit_event.unifiedWindows.*.utilization`, codex emits nothing comparable in
-`codex exec --json`. A default policy that works for half the pool is worse than an honest one. With
-no telemetry `util` is 0.0 and `QuotaAware` degrades into `LeastLoaded` anyway.
+```
+util(s)         = s.quota.worst_utilization()                     // 0.0 with no quota at all
+load(a,s)       = max(saturation(a,s), crowding(s))                // crowding: inflight/(inflight+1)
+share(s, pool)  = s.window_tokens.billable() / pool_window          // this selection's token share
+penalised(s)    = util, or util boosted past `dispatch.near_exhaustion_penalty` once util >= quota_warn_at
+
+score = W.util * penalised(s) + W.load * load(a,s) + W.share * share(s, pool)
+      - W.weight * (a.weight - 1.0) - W.idle * idle(s)     // lower is better; [dispatch.weights]
+```
+
+`crowding` is what keeps an uncapped account from soaking up a whole batch: it rises with every live
+node on that account and never reaches 1, so an idle capped account and an idle uncapped one still
+start level. `share` is measured from Swamp's own token counters, needs no provider telemetry, and
+is what makes a pool of untelemetered OpenAI accounts rotate correctly - `LeastLoaded` could not,
+because every account there reads `util 0.0` and `lifetime_cost_usd 0.0` and ties to map order.
+`RoundRobin` and `LeastLoaded` remain, scored on `idle` and `load` alone. Full derivation, the exact
+weights and five worked examples: `USAGE.md` §4.
+
+A score alone leaves two idle accounts exactly tied, and the tie then fell to the map order, so
+every sequential single-worker run burned the same subscription. Ties are settled by fewer lifetime
+tokens spent, then by a per-pool cursor that rotates the candidate list once per selection - a
+history term blind for OpenAI (no cost, `[pricing]` may be unset) would rank every codex account
+equal and never leave the map order either.
 
 `acquire` never busy-spins: it waits on a `Notify` (a lease came back) or sleeps until the earliest
-journaled reset time.
+reset any candidate could recover at. When every account of a provider is cooling, past its measured
+stop threshold, or hard-gated, `acquire` does **not** return an error: it journals one
+`NodeBlocked { until, why }`, once per blocked node, and waits - an overnight run wants the lease it
+will get in 40 minutes, not a failure now.
 
 ```rust
-pub struct Lease { pub account: AccountId, pub exec: String,
-                   pub env: BTreeMap<String, String>, _permit: OwnedSemaphorePermit, pool: Arc<AccountPool> }
+pub struct Lease { pub account: AccountId, pub exec: String, pub env: BTreeMap<String, String>,
+                    pool: Arc<AccountPool> }
 // Drop decrements inflight and notifies waiters, so a panicking node cannot leak a slot.
 
 pub enum NoCapacity {
-    AllCooling { retry_at: OffsetDateTime },
+    /// Every candidate is cooling, past its measured stop threshold, or hard-gated; `retry_at`
+    /// is the earliest any of them could come back. Not an error: `acquire` waits instead.
+    AllExhausted { retry_at: OffsetDateTime, why: String },
+    /// The caller's own deadline passed while waiting.
     Saturated,
+    /// No candidate account exists for the provider at all: a config problem, not a quota one.
     Exhausted { reason: String },
+    /// The caller's cancellation token fired while waiting.
+    Cancelled,
 }
 
 impl AccountPool {
@@ -1461,6 +1471,10 @@ impl AccountPool {
     pub fn report(&self, id: &AccountId, failure: Option<&Failure>, cost: Option<Cost>);
     /// Fed from every live WorkerEvent::RateLimit, while the worker is still running.
     pub fn observe_quota(&self, id: &AccountId, snap: RateLimitSnapshot);
+    /// `cumulative` is the node's running total, not a delta; idempotent.
+    pub fn observe_usage(&self, id: &AccountId, node: NodeId, cumulative: Usage);
+    /// The node is terminal: fold its final total into the committed counters and forget it.
+    pub fn commit_usage(&self, id: &AccountId, node: NodeId, final_total: Usage);
     pub fn snapshot(&self) -> Vec<(Provider, AccountId, AccountState)>;
 }
 ```
@@ -1581,13 +1595,18 @@ anthropic  alt      claude-alt   cooling      0/2    1.00  0.72  in 41m      88 
 openai     main     codex-main   healthy      0/2     -     -    -           31  ~1.90 est
 ```
 
-The 5H/7D columns are blank for OpenAI because `codex exec --json` reports no quota telemetry. That
-absence is exactly why `QuotaAware` is not the v1 default.
+The 5H/7D columns are blank for OpenAI when it has no live quota source at all; §2.3's rollout
+tailer and app-server probe give it one on most setups, which is exactly what makes `QuotaAware`
+safe as the default. `swamp accounts` stays the health, cooldown and exec-resolution view; the token
+counters, quota windows and their reset times live in `swamp usage` / `/usage` instead (`USAGE.md`
+§3), so the two never need to agree on a number, only on `watch::health_word` and
+`watch::health_color`, which both share.
 
-The brain is an account's tenant like any worker: it reports its spend per turn, its rate-limit
-snapshots as they stream in, and itself as exactly one node per run when it shuts down. A brain
-that spent a run's planning on `claude-main` and left it at NODES 0 / $0 would also leave the
-history tie-break of `LeastLoaded` and `QuotaAware` blind to the single most expensive node.
+The brain is an account's tenant like any worker: it reports its spend and its usage per turn
+(`AccountPool::observe_usage`, fed live so its tokens count toward `share` while it is still
+planning, not only at shutdown), its rate-limit snapshots as they stream in, and itself as exactly
+one node per run when it shuts down. A brain that spent a run's planning on `claude-main` and left
+it at NODES 0 / $0 would also leave the history tie-break blind to the single most expensive node.
 
 `accounts.json` is machine-wide, so it holds entries for ids this repo does not configure: another
 repo may still own them. They are listed under a `not in config` note and dropped only when asked,
@@ -1865,8 +1884,6 @@ swamp / swamp chat                          Interactive session with the brain
       --account <ID>                        Pin the brain to one account
       --tier <high|mid|low>                 Brain tier (default high)
       --resume <RUN|last>                   Relaunch the brain with --resume + a state preamble
-      --workers <N>                         Override limits.max_parallel
-      --budget <USD>
       --dry-run                             Boots a real brain whose dispatch tools journal and
                                             return a fake success. Iterate the system prompt,
                                             which is the actual product surface, without spending.
@@ -1875,12 +1892,11 @@ swamp run <TASK...>                         One-shot, non-interactive
       --no-brain                            Dispatch TASK to a single worker. The v1 smoke path.
       --tier <TIER>                         Default mid
       --provider <P>  --account <ID>        --account pins and disables failover (warns)
-      --workers <N>
       --isolation <worktree|shared|readonly>
       --base <REF>                          Branch workers from this ref instead of HEAD
       --include-dirty                       Base from `git stash create` so uncommitted work is visible
       --timeout <DUR>                       Default 25m
-      --budget <USD>  --max-attempts <N>
+      --max-attempts <N>
       --wait | --detach
       --json | -q                           -q prints only the run id
       -                                     Read TASK from stdin; @file also accepted
@@ -1901,11 +1917,16 @@ swamp resume <RUN|last>                     Recover an interrupted run
       --plan                                Print the Recovery plan and exit, spending nothing
       --only <NODE>... --rerun-failed --no-brain
 
-swamp accounts [list]                       Health, inflight, 5h/7d, cooldown, nodes, spend
+swamp accounts [list]                       Health, inflight, cooldown, nodes, spend
   check [--account <ID>]                    Run `<exec> --version` + a 1-token probe per account
   cooldown <ID> <DUR> | clear <ID> | enable <ID> | disable <ID> | reset [ID]
                                             `reset` with an ID drops that one entry, which is
                                             how an account that left the config leaves the file
+
+swamp usage                                 Per-account tokens and quota windows (USAGE.md §3)
+      --probe                               Force one out-of-band probe per account first,
+                                            waiting up to 10s each; a timeout keeps the cached row
+      --json
 
 swamp diff <NODE> [--stat|--name-only|--patch]
                                             --stat renders the captured patch git-style
@@ -1934,8 +1955,8 @@ swamp completions <SHELL>
 swamp mcp-bridge --socket <PATH>            Hidden. stdio <-> UDS pump, spawned by the brain CLI.
 ```
 
-Exit codes: `0` ok, `1` generic, `2` config invalid, `3` no capacity (all accounts cooling),
-`4` node failed, `5` conflict, `6` cancelled, `7` budget exceeded.
+Exit codes: `0` ok, `1` generic, `2` config invalid, `3` no capacity, `4` node failed, `5` conflict,
+`6` cancelled. 7 is retired and not reused.
 
 A refusal that happens before anything is launched - a dirty working tree is the common one - is
 checked before the run is created: one line on stderr, the exit code, no run directory and no
@@ -2020,16 +2041,11 @@ version = 1
 
 # ---------------------------------------------------------------- limits
 [limits]
-max_parallel          = 4          # machine-wide concurrent worker processes
 max_nodes_per_run     = 32
-max_parallel_dispatch = 6          # per single swamp_dispatch call
-max_high_tier_concurrent = 2       # `high` is expensive and the brain will over-reach
 max_depth             = 2          # brain -> worker -> refused (also via SWAMP_DEPTH)
 worker_timeout        = "25m"
 brain_turn_timeout    = "15m"
 grace_period          = "5s"       # SIGTERM -> SIGKILL window
-run_budget_usd        = 25.0
-node_budget_usd       = 3.0        # -> claude --max-budget-usd; codex has no equivalent
 max_prompt_bytes      = 200000
 max_result_bytes      = 8000       # cap on worker output fed back to the brain
 unsafe_ack            = false      # required before any --dangerously-* flag is accepted
@@ -2042,34 +2058,39 @@ account   = "main"
 tier      = "high"
 reserve_brain_slot = true          # keep this account out of the worker pool
 # Swamp always launches with `--permission-prompts none`: nobody is at the terminal to answer
-# a prompt. Measured against the real CLI, the two halves are gated separately: "auto" denies
-# file writes ("the session currently doesn't have approval enabled for file writes"), so the
-# node produces no diff at all, while "acceptEdits" (and "plan", "manual", "dontAsk") writes
-# files but denies every Bash call that is not allowed by name. "acceptEdits" plus "Bash" in
-# allow_tools is the recommendation here and for the workers below. The trade-off is real: an
-# allowed Bash runs commands without asking, the same trust you extend to a CLI agent in your
-# own shell, and a worktree is a directory, not a sandbox. deny_tools below still keeps the
-# brain from editing files.
+# a prompt. Measured against the real CLI: "auto" denies file writes ("the session currently
+# doesn't have approval enabled for file writes"), so a worker in that mode produces nothing;
+# "acceptEdits" writes files but denies Bash unless Bash is allowed by name. The pair that
+# works is "acceptEdits" plus "Bash" in allow_tools, here and for the workers below. The
+# trade-off is real: an allowed Bash runs commands without asking, the same trust you extend
+# to a CLI agent in your own shell, and a worktree is a directory, not a sandbox.
+# deny_tools below still keeps the brain from editing files.
 permission_mode    = "acceptEdits"
 include_partial_messages = true    # smooth chat streaming; workers keep this off
-# The brain plans and reads; workers write. Keeps the brain from corrupting parallel worktrees.
-# Bash is unqualified so the brain can run git and verify a worker's claim with the test suite.
-allow_tools = [
-  "mcp__swamp__swamp_dispatch", "mcp__swamp__swamp_await", "mcp__swamp__swamp_status",
-  "mcp__swamp__swamp_result", "mcp__swamp__swamp_worker_diff", "mcp__swamp__swamp_note",
-  "Read", "Grep", "Glob", "Bash",
-]
+# Every mcp__swamp__* tool is allowed automatically, from the registry: the brain answers no
+# permission prompt, so a missing name would be denied. These are the extras it also gets.
+# "Bash" unqualified: the brain runs git and the occasional test to verify a worker's claim.
+allow_tools = ["Read", "Grep", "Glob", "Bash"]
 deny_tools = ["Edit", "Write", "MultiEdit", "NotebookEdit"]
 # Swamp reads this file and passes its TEXT via --append-system-prompt.
 system_prompt_file = ".swamp/brain.md"
 
 # ---------------------------------------------------------------- dispatch
 [dispatch]
-policy                  = "least-loaded"   # round-robin | least-loaded | quota-aware
+policy                  = "quota-aware"    # round-robin | least-loaded | quota-aware
 max_attempts            = 3
 cross_provider_failover = false
 default_provider        = "anthropic"
 default_tier            = "mid"
+quota_max_age           = "60s"    # out-of-band probe threshold for /usage and dispatch
+near_exhaustion_penalty = 2.0
+
+  [dispatch.weights]
+  util   = 0.50
+  load   = 0.30
+  share  = 0.15
+  weight = 0.05
+  idle   = 0.02
 
 [cooldown]
 min = "60s"
@@ -2116,16 +2137,18 @@ models  = { high = "opus", mid = "sonnet", low = "haiku" }
 tier_extra = { high = { effort = "high" }, mid = { effort = "medium" }, low = { effort = "low" } }
 
   [providers.anthropic.worker]
-  # "acceptEdits" so the edits land, plus Bash by name so the worker can run the tests it was
+  # "acceptEdits" so edits land, plus Bash by name so the worker can run the tests it was
   # sent to run. See the note under [brain]: "auto" denies the writes.
   permission_mode = "acceptEdits"
-  # Tool NAMES, merged into the single --allowed-tools / --disallowed-tools flag, the way the
-  # brain's lists are. A raw flag in `args` would overwrite the other half instead.
+  # Rendered as one --allowed-tools / --disallowed-tools flag. Put tool names here, not raw
+  # flags in `args`.
   allow_tools = ["Bash"]
-  # Behaviour, not safety: a worker that can reach the delegation tools and inherits a global
-  # CLAUDE.md telling it to orchestrate will spawn a team and report on its behalf.
+  # A worker does the work itself. Left alone it inherits your own CLAUDE.md, spawns a team of
+  # subagents and reports on their behalf, which is slower, more expensive and less honest.
+  # Swamp's built-in worker role prompt says so too; this makes it unavailable, not just
+  # discouraged.
   deny_tools = ["Task", "Agent", "Workflow", "Team"]
-  # Optional, appended after Swamp's built-in worker role prompt.
+  # Optional: appended after Swamp's built-in worker role prompt.
   # system_prompt_file = ".swamp/worker.md"
   args = []
   readonly_args = ["--permission-mode", "plan",
@@ -2137,9 +2160,15 @@ models  = { high = "gpt-6-astra", mid = "gpt-5.6-sol", low = "gpt-5.6-terra" }
 tier_extra = { high = { model_reasoning_effort = "high" },
                mid  = { model_reasoning_effort = "medium" },
                low  = { model_reasoning_effort = "low" } }
+quota_source            = "auto"   # auto | rollout | app-server | none
+estimated_window        = "7d"
+estimated_window_tokens = 0        # 0 = no estimate, render "-"
 
   [providers.openai.worker]
   sandbox = "workspace-write"
+  # `codex exec` has no --append-system-prompt: the worker role, and this file if it is set,
+  # ride at the head of the prompt on stdin instead.
+  # system_prompt_file = ".swamp/worker.md"
   # `codex exec` has NO -a/--ask-for-approval; that is top-level only. Use the config override.
   args = ["-c", "approval_policy=\"never\""]
   readonly_args = ["-s", "read-only"]
@@ -2174,13 +2203,13 @@ id = "codex-main"
 provider = "openai"
 exec = "codex-main"
 max_concurrency = 2
+limit_id = "codex"                # optional: which quota bucket this account routes against
 
 # ---------------------------------------------------------------- tiers
 # Cross-provider order, consulted ONLY when every account of the current provider is cooling
 # and dispatch.cross_provider_failover = true.
 [tiers.high]
 provider_order = ["anthropic", "openai"]
-node_budget_usd = 8.0
 timeout = "45m"
 
 [tiers.mid]
@@ -2188,7 +2217,6 @@ provider_order = ["anthropic", "openai"]
 
 [tiers.low]
 provider_order = ["anthropic"]
-node_budget_usd = 0.75
 timeout = "10m"
 
 # ---------------------------------------------------------------- failure patterns
@@ -2223,21 +2251,27 @@ refresh_hz    = 20
 tree_width    = 46
 show_thinking = false
 tail_lines    = 200
+# `swamp chat`: auto | truecolor | ansi256 | plain, how many result lines survive a collapse,
+# and how many prompts .swamp/chat_history keeps.
+chat_theme     = "auto"
+collapse_lines = 3
+chat_history   = 500
 
 # ---------------------------------------------------------------- profiles
 # `swamp --profile cheap run "..."` layers this over everything above.
 [profiles.cheap]
 "dispatch.default_tier" = "low"
-"limits.max_parallel"   = 2
 "brain.tier"            = "mid"
 ```
 
 Validation runs before anything spawns, and reports **all** errors together with the offending key:
 duplicate account ids; `brain.account` not belonging to `brain.provider`; a tier with no model for
 any provider that could serve it; unparseable regex; `max_concurrency = 0`;
-`quota_warn_at >= quota_stop_at`; `workspace.root` inside `.swamp`; `isolation = "shared"` forces
-`max_parallel = 1` with a printed warning; any `--dangerously-*` in `worker.args` without
-`limits.unsafe_ack = true`.
+`quota_warn_at >= quota_stop_at` (which must also hold for `penalised`'s denominator to be > 0);
+`workspace.root` inside `.swamp`; `dispatch.weights.*` finite and non-negative;
+`dispatch.quota_max_age >= 10s`; `dispatch.near_exhaustion_penalty >= 0`;
+`providers.*.estimated_window` and `estimated_window_tokens` set together; any `--dangerously-*` in
+`worker.args` without `limits.unsafe_ack = true`.
 
 ---
 
@@ -2382,14 +2416,14 @@ and two of them break the product silently.
    itself and passes the text. `doctor --probe` would catch it if this ever changes.
 
 3. **`--verbose` is mandatory alongside `--output-format stream-json` in print mode**, and
-   `--max-budget-usd`, `--permission-prompts`, `--input-format` and `--no-session-persistence` all
-   document "only works with --print".
+   `--permission-prompts`, `--input-format` and `--no-session-persistence` all document "only
+   works with --print".
 
 Flags relied on, all present in the help texts:
 
 - claude: `-p/--print`, `--output-format stream-json`, `--input-format stream-json`, `--verbose`,
   `--model`, `--session-id <uuid>`, `-r/--resume`, `--permission-mode`, `--permission-prompts none`,
-  `--max-budget-usd`, `--mcp-config`, `--strict-mcp-config`, `--append-system-prompt`,
+  `--mcp-config`, `--strict-mcp-config`, `--append-system-prompt`,
   `--allowedTools/--allowed-tools`, `--disallowedTools/--disallowed-tools`,
   `--include-partial-messages`, `--effort`, `--add-dir`, `--setting-sources`,
   `--dangerously-skip-permissions` (gated).
@@ -2431,8 +2465,8 @@ and deterministic.
    (`costBasis: "list"`), which on a subscription is not money billed. Codex reports tokens only.
    Mitigation: `Option<Cost>` with `CostBasis`; absent renders `-`, never `$0.00`; reported and
    estimated both render with `~`; run totals print `~$1.84 (1 node with no cost data)` rather than
-   a confidently wrong number. On pure subscriptions the real budget is quota utilization, not
-   dollars.
+   a confidently wrong number. On pure subscriptions the real constraint is quota utilization, not
+   dollars, which is what dispatch scores against (§6.4).
 
 5. **`--permission-prompts none` silently denies tools.** With nobody to answer, anything requiring
    approval is auto-denied and the worker writes a confident summary of work it never did.

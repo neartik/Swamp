@@ -39,7 +39,7 @@ system_prompt_file = ".swamp/brain.md"
 
 # ---------------------------------------------------------------- dispatch
 [dispatch]
-policy                  = "least-loaded"   # round-robin | least-loaded | quota-aware
+policy                  = "quota-aware"    # round-robin | least-loaded | quota-aware
 max_attempts            = 3
 cross_provider_failover = false
 default_provider        = "anthropic"

@@ -150,7 +150,6 @@ impl Config {
     pub fn accounts_for(&self, p: Provider) -> Vec<&AccountCfg>;
     pub fn provider_order(&self, t: Tier) -> Vec<Provider>;
     pub fn failure_patterns(&self, p: Provider) -> Result<FailurePatterns, SwampError>;
-    pub fn node_budget_usd(&self, t: Tier) -> Option<f64>;
     pub fn node_timeout(&self, t: Tier) -> Duration;
     pub fn estimate_cost(&self, model: &str, u: &Usage) -> Option<Cost>;  // basis = Estimated
 }
@@ -181,14 +180,13 @@ WP0 only.
 - `Config::load` on `swamp.example.toml` succeeds and `model_for(Anthropic, High, None) == "opus"`.
 - Per-account override: `model_for(Anthropic, High, Some("alt")) == "sonnet"`.
 - `model_for` on an unmapped tier returns `SwampError::TierUnmapped`, not a panic or a default.
-- Layering: a repo-level file overriding `limits.max_parallel` wins over the user-level file, and
-  `SWAMP_LIMITS__MAX_PARALLEL=9` wins over both.
+- Layering: a repo-level file overriding `limits.max_nodes_per_run` wins over the user-level file,
+  and `SWAMP_LIMITS__MAX_NODES_PER_RUN=9` wins over both.
 - `--profile cheap` applies dotted-key overrides.
 - Validation reports **all** errors in one message. Test at least: duplicate account id;
   `brain.account` belonging to the wrong provider; `quota_warn_at >= quota_stop_at`;
   `max_concurrency = 0`; an unparseable regex; a `--dangerously-skip-permissions` in `worker.args`
   without `unsafe_ack`. Assert the message names each offending key.
-- `isolation = "shared"` forces `max_parallel = 1` and the config carries a warning string.
 - `Usage::absorb` is commutative and associative over three random usages (proptest).
 - Failure predicates: exactly `RateLimited` and `AuthExpired` return true from `rotates_account`;
   exactly `Overloaded`, `Crashed`, `Truncated` from `retries_same_account`; the three sets are
@@ -433,7 +431,7 @@ WP1 (types, `FailurePatterns`), WP2 (`RawSink`, `JournalHandle`, `RunPaths`).
   argv carries `--append-system-prompt <text>` with the file's contents.
 - Brain argv adds `--input-format stream-json`, `--mcp-config`, `--strict-mcp-config`,
   `--include-partial-messages`; worker argv does not.
-- `--max-budget-usd` appears only when a node budget is set; `--resume` only for `SessionPlan::Resume`.
+- `--resume` appears only for `SessionPlan::Resume`.
 - Codex brain argv carries `-c mcp_servers.swamp.command=...` and `-c mcp_servers.swamp.args=[...]`.
 - `--dangerously-skip-permissions` in `worker.args` is dropped with an error when
   `unsafe_ack = false`, and passed through when true.
@@ -467,7 +465,7 @@ WP1 (types, `FailurePatterns`), WP2 (`RawSink`, `JournalHandle`, `RunPaths`).
 - Telemetry first: `rate_limit_info.status = "rejected"` yields `RateLimited` with
   `Detector::Telemetry`, even when the exit code is 0.
 - `api_error_status = 429` yields `RateLimited { detected_by: StructuredResult }`; `529` yields
-  `Overloaded`; `subtype = "error_max_budget_usd"` yields `BudgetExceeded`.
+  `Overloaded`; `subtype = "error_max_budget_usd"` yields `WorkerError { subtype: "error_max_budget_usd", .. }`.
 - A configured regex matching the final text yields `Detector::Pattern` with the matching substring
   as `evidence`, truncated to 400 bytes.
 - No terminal event + signal yields `Crashed`; no terminal event + exit 0 yields `Truncated`;
@@ -598,9 +596,9 @@ holds; WP3 provides the real impl, WP4's tests provide a scripted one.
   assert a valid parse after 100 interleaved saves.
 - **Brain reservation:** with `reserve_brain_slot = true` and one healthy Anthropic account, a worker
   batch cannot take it.
-- **Caps:** `max_parallel_dispatch`, `max_nodes_per_run`, `max_high_tier_concurrent` and
-  `max_depth` are enforced in the dispatcher and return a clear `NodeResult` failure rather than
-  spawning. A `TaskRequest` with non-empty `deps` is rejected with a message naming v1's limitation.
+- **Caps:** `max_nodes_per_run` and `max_depth` are enforced in the dispatcher and return a clear
+  `NodeResult` failure rather than spawning. A `TaskRequest` with non-empty `deps` is rejected with
+  a message naming v1's limitation.
 - `dispatch_batch` returns within `max_wait` with still-running nodes marked `"running"`, never
   blocking forever.
 
@@ -911,8 +909,7 @@ WP1 through WP6.
 - `cmd::run` with `--no-brain` on a fake CLI produces exactly one node, one worktree, one journal
   with `RunStarted` and `RunFinished`, one patch, and exit code 0. This is the smoke path from
   DESIGN.md section 1 and it must pass before anything else in this package is considered done.
-- `cmd::run` maps outcomes to exit codes: node failure 4, all accounts cooling 3, config invalid 2,
-  Ctrl-C 6, budget exceeded 7.
+- `cmd::run` maps outcomes to exit codes: node failure 4, no capacity 3, config invalid 2, Ctrl-C 6.
 - Ctrl-C during a run journals `RunFinished` and `killpg`s every live node. Assert no orphan
   process group survives.
 - `cmd::resume --plan` prints the `Recovery` plan and spawns nothing. Assert zero processes started.

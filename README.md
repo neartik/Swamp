@@ -74,7 +74,6 @@ writes a starter). Model ids live only here.
 version = 1
 
 [limits]
-max_parallel = 4
 worker_timeout = "25m"
 
 [dispatch]
@@ -175,8 +174,8 @@ pipes, CI and `swamp run` are unaffected.
 | `?` | Shortcut overlay, on an empty input. |
 | `ctrl+a`, `ctrl+e`, `ctrl+k`, `ctrl+u`, `ctrl+w`, `alt+←/→` | Readline editing. |
 
-Commands: `/help`, `/status`, `/accounts`, `/trace [node]`, `/cost`, `/tier [low|mid|high]`,
-`/workers [n]`, `/cancel <node|all>`, `/diff <node>`, `/thinking [on|off]`, `/clear`,
+Commands: `/help`, `/status`, `/accounts`, `/usage [--json]`, `/trace [node]`, `/cost`,
+`/tier [low|mid|high]`, `/cancel <node|all>`, `/diff <node>`, `/thinking [on|off]`, `/clear`,
 `/resume <run>`, `/quit`.
 
 `[ui]` settings: `chat_theme` (`auto`, `truecolor`, `ansi256`, `plain`), `collapse_lines`
@@ -187,18 +186,19 @@ Commands: `/help`, `/status`, `/accounts`, `/trace [node]`, `/cost`, `/tier [low
 
 | Command | What it does |
 |---|---|
-| `swamp run <TASK>` | One-shot. `--no-brain` sends the task straight to one worker. `--tier`, `--provider`, `--account`, `--workers`, `--budget`, `--detach`. |
+| `swamp run <TASK>` | One-shot. `--no-brain` sends the task straight to one worker. `--tier`, `--provider`, `--account`, `--isolation`, `--detach`. |
 | `swamp trace [RUN\|last\|-2]` | Render a run tree: nodes, attempts, accounts, failures, cost. `--events`, `--raw`, `--follow`, `--failed`, `--json`. |
 | `swamp watch [RUN\|last]` | Live read-only TUI. Attach from a second terminal while a run is going. |
 | `swamp doctor` | Health checks. `--probe` calls each account's CLI, `--schema` reports adapter drift, `--reap` removes stale worktrees and pidfiles, and sweeps `~/.swamp/sock` for sockets no process is listening on, `--fix` creates the directories and the git exclude. Exit 1 on any error, so CI can gate on it. |
 | `swamp chat` | Interactive brain session. |
 | `swamp runs`, `swamp resume`, `swamp cancel` | List runs, recover an interrupted one (`--plan` first, it spends nothing), stop one. |
-| `swamp accounts` | Health, in-flight count, quota windows, cooldowns, lifetime spend, including the brain's. Entries for ids no longer in the config are listed under `not in config`. Also `cooldown`, `clear`, `enable`, `disable`, `reset [ID]`. |
+| `swamp accounts` | Health, in-flight count, cooldowns, lifetime spend, including the brain's. Entries for ids no longer in the config are listed under `not in config`. Also `cooldown`, `clear`, `enable`, `disable`, `reset [ID]`. |
+| `swamp usage` | Per-account tokens and quota windows, the same table as `/usage` in chat. `--probe` forces a fresh out-of-band read first; `--json` for machine-readable output. |
 | `swamp diff`, `swamp adopt`, `swamp worktrees` | Inspect a worker's patch, land it, manage the worktrees. A node is named by its full id, either short id (the attempt's, printed by `swamp trace`, or the logical one in the branch name) or a prefix, searched across every run; `last` and `-2` name a run and resolve to its node. |
 | `swamp gc`, `swamp replay`, `swamp config`, `swamp completions` | Housekeeping, re-render or re-derive a recorded run, inspect config, shell completions. |
 
-Exit codes: `0` ok, `1` generic, `2` config invalid, `3` no capacity (all accounts cooling),
-`4` node failed, `5` conflict, `6` cancelled, `7` budget exceeded.
+Exit codes: `0` ok, `1` generic, `2` config invalid, `3` no capacity, `4` node failed, `5` conflict,
+`6` cancelled.
 
 ## Layout
 
@@ -239,9 +239,9 @@ accept both: a logical short id resolves to that node's last finished attempt.
 
 Worker isolation is a git worktree: a separate directory on the same filesystem, with the same
 user, the same network and the same credentials as your shell. A worker can read your whole
-machine and write outside its worktree. Swamp bounds concurrency, quota, budget and depth; it
-does not contain a process. Run workers on code you would run yourself, and use
-`--isolation readonly` or a container if you need more than that.
+machine and write outside its worktree. Swamp bounds depth and per-account concurrency, and
+dispatch backs off as quota runs out; none of that is a sandbox. Run workers on code you would run
+yourself, and use `--isolation readonly` or a container if you need more than that.
 
 A `--dangerously-*` flag in `providers.*.worker.args` makes the whole configuration invalid
 unless `limits.unsafe_ack = true` is set: every command, `swamp doctor` included, exits 2 until

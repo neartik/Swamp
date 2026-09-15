@@ -430,7 +430,7 @@ Mockups are 100 columns. The ruler is not printed.
 │   /help for commands, /status for the run tree                                                   │
 │   cwd: /Users/me/projects/example/repo-one                                                       │
 │   brain: anthropic/main · claude-opus-4-20250514 · tier high                                     │
-│   workers: 4 accounts · 3 ready, 1 cooling · max 4 parallel · budget $10.00                      │
+│   workers: 4 accounts · 3 ready, 1 cooling · 12% of the tightest window used                     │
 │   run: 4x4kj6                                                                                    │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 
@@ -443,9 +443,11 @@ Mockups are 100 columns. The ruler is not printed.
 Line 1 is `accent` with `Welcome to Swamp` bold; every following line is `meta`, with the account
 id, model and run id in `name`. Box width is `min(width, 100)`, rounded corners, committed once at
 startup so it scrolls away like any block. The `brain:` line reads `starting…` until
-`BrainEvent::Ready` lands, and is never rewritten. Worker counts come from `disp.pool().snapshot()`
-folded through `watch::health_word`; the budget cell appears only when `limits.run_budget_usd` is
-set.
+`BrainEvent::Ready` lands, and is never rewritten. The `workers:` line comes from
+`disp.pool().snapshot()`: the ready/cooling counts fold through `watch::health_word`, and the
+trailing percentage is the worst `RateLimitSnapshot::worst_utilization()` across every account,
+including estimated windows. There is no parallelism cap and no budget to show: an account with no
+`max_concurrency` is bounded by quota headroom alone (§6.3 in DESIGN.md's terms).
 
 The placeholder after the cursor is `meta`, truncated with `fmt::truncate` to `width - 4`, and
 disappears on the first keypress.
@@ -607,13 +609,25 @@ brain is actually in.
 
 ```
 ● swamp_dispatch(3 tasks)
-  ⎿  ✘ 0 done · 1 failed · ~$0.00 · 0s
-     ✘ a91002  [mid ]  rewrite the seed script                   -                    0s        -
-       └ NoCapacity: every anthropic account is cooling; next reset 14:20
+  ⎿  ⠹ 2 running · 0 done · ~$0.00 · 41m03s
+     · a91002  [mid ]  rewrite the seed script                   -                    -        -
 
 ✘ brain failed: rate_limited (five_hour, telemetry) resets 14:20
   ⎿  account `main` is cooling until 14:20 · /accounts for the pool · swamp chat --resume 4x4kj6
 ```
+
+A node that finds every account of its provider cooling, past its measured `quota_stop_at`, or
+hard-gated does **not** fail: `AccountPool::acquire_node` journals one `NodeBlocked { until, why }`
+for it and waits, so `NodeState::Blocked` renders exactly like `Queued` in the board above -
+dim `·` glyph, account and elapsed both `-` - for as long as the wait lasts, and counts toward
+`running` in the headline, never toward `failed`. The reason and the reset time are not spelled out
+in the row: they live in the journal line and in a `WARN`-level log, `every anthropic account is at
+its limit until 14:20: <why>`, printed once per blocked node rather than once per recheck. Two
+`esc` within `ARM` cancel every running and blocked node the same way (`Failure::Cancelled { by:
+User }`); `swamp run` responds to a single ctrl-c. `Failure::NoCapacity` is reserved for the two
+cases that are not a wait: the node's own `--timeout` expiring first
+(`dispatch::pool::NoCapacity::Saturated`), and no candidate account existing for the provider at
+all (`NoCapacity::Exhausted`, a config problem, not a quota one).
 
 `✘` and the headline are `err`, the `⎿` advice line is `meta`. The headline uses
 `trace::failure_summary` when the message parses as a `Failure`, otherwise
@@ -731,10 +745,10 @@ pub const COMMANDS: &[Cmd] = &[ /* … */ ];
 | `/help` | | the table below plus the shortcut block from §3.8 |
 | `/status` | | the run tree, `trace::render(&view, &TraceOpts::default())`, committed verbatim in `meta`. Identical bytes to `swamp trace`. |
 | `/accounts` | | one row per account from `pool().snapshot()`: `provider/id`, `watch::health_word`, `watch::gauge_bar(util)` + `NN%`, inflight, lifetime nodes, `~$spend`, cooldown `until 14:20`. Coloured by `watch::health_color`. |
+| `/usage` | `[--json]` | per-account tokens and quota windows, `ui::usage::render` shared byte-for-byte with `swamp usage`; `--json` commits the `ui::usage::json` shape as a code block instead |
 | `/trace` | `[node]` | `TraceOpts { node, events: true, ..default }`; no arg means the whole run. Collapsed at 3 lines with `ctrl+o`. |
 | `/cost` | | in / out / cache-read / cache-write tokens and `~$` from `view.totals()`, a per-account and per-tier breakdown, plus `(N nodes reported no cost data)` when `!cost_complete` |
 | `/tier` | `[low\|mid\|high]` | no arg: the current default dispatch tier and the tier-to-model map from `cfg.model_for`. With an arg: sets it for subsequent dispatches, echoes `dispatch tier: mid -> low`, updates the status marker. |
-| `/workers` | `[n]` | show or set `limits.max_parallel` for this session |
 | `/cancel` | `<node\|all>` | `disp.cancel(node)` / `cancel_all()`, echoes `⊘ cancelled N nodes` |
 | `/diff` | `<node>` | `--stat` for the node's captured patch, collapsed at 10 lines |
 | `/thinking` | `[on\|off]` | toggles `ui.show_thinking`; when on, thinking renders `meta` + `ITALIC` under a `✻ thinking` header and commits like assistant text |
