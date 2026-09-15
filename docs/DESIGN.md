@@ -2000,7 +2000,11 @@ errors when two accounts collide.
 yields `SessionStarted` + `Final` with non-zero usage. Run it after every CLI upgrade; it is the
 real defence against upstream format drift. `--schema` reports the `Detector::Pattern` fallback rate
 and the unparsed-line ratio across recent runs, which is the early warning that a vendor changed
-wording or shape. `--reap` removes stale worktrees, sockets and pidfiles and runs `git worktree prune`.
+wording or shape. `--reap` removes stale worktrees, sockets and pidfiles and runs `git worktree prune`. It then sweeps
+`~/.swamp/sock` on its own, because a session that was killed after its repository was deleted leaves
+a socket no run directory names any more: every `*.sock` there that refuses a connection is removed,
+one that accepts one belongs to a live run and is kept. The two counts are reported separately
+(`reap` and `reap/sockets`).
 
 ---
 

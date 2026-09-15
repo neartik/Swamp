@@ -301,8 +301,27 @@ async fn reap_removes_stale_sockets_and_pidfiles() {
     std::fs::write(&socket, "").expect("socket");
 
     let removed = swamp::doctor::reap(&f.paths).await.expect("reap");
-    assert!(removed >= 1, "the stale socket is removed");
+    assert!(removed.runs >= 1, "the stale socket is removed");
     assert!(!socket.exists());
+}
+
+/// A killed session whose repository is gone leaves nothing behind that names its run, so the
+/// socket directory is swept on its own. A socket that still answers belongs to a live run.
+#[tokio::test]
+async fn reap_sweeps_the_global_socket_directory_and_spares_live_sockets() {
+    let f = Fixture::new();
+    let sock_dir = f.paths.sock_dir();
+    std::fs::create_dir_all(&sock_dir).expect("sock dir");
+
+    let dead = sock_dir.join("deadaa.sock");
+    drop(std::os::unix::net::UnixListener::bind(&dead).expect("bind dead"));
+    let live = sock_dir.join("liveaa.sock");
+    let _listener = std::os::unix::net::UnixListener::bind(&live).expect("bind live");
+
+    let removed = swamp::doctor::reap(&f.paths).await.expect("reap");
+    assert_eq!(removed.sockets, 1, "only the unanswered socket is removed");
+    assert!(!dead.exists(), "the stale socket is gone");
+    assert!(live.exists(), "a socket that accepts a connection is kept");
 }
 
 /// Swamp launches workers with `--permission-prompts none`: under it these modes auto-deny

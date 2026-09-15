@@ -14,7 +14,19 @@ pub async fn run(ctx: &Ctx, args: &DoctorArgs) -> anyhow::Result<i32> {
         results.push(crate::doctor::Check {
             name: "reap".into(),
             level: Level::Ok,
-            detail: format!("removed {removed} stale sockets, pidfiles and worktrees"),
+            detail: format!(
+                "removed {} stale sockets, pidfiles and worktrees",
+                removed.runs
+            ),
+        });
+        results.push(crate::doctor::Check {
+            name: "reap/sockets".into(),
+            level: Level::Ok,
+            detail: format!(
+                "removed {} stale sockets in {}",
+                removed.sockets,
+                ctx.paths.sock_dir()
+            ),
         });
     }
 

@@ -49,8 +49,13 @@ impl Paths {
         RunPaths {
             run,
             dir: self.run_dir(run),
-            sock_dir: self.home_swamp.join("sock"),
+            sock_dir: self.sock_dir(),
         }
+    }
+
+    /// ~/.swamp/sock, shared by every repo on the machine.
+    pub fn sock_dir(&self) -> Utf8PathBuf {
+        self.home_swamp.join("sock")
     }
 
     /// ~/.swamp/worktrees/<repo>-<hash8>
