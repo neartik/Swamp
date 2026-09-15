@@ -102,6 +102,7 @@ fn final_of(subtype: &str, text: &str) -> FinalSummary {
         api_error_status: None,
         num_turns: 1,
         permission_denials: 0,
+        denied_tools: Vec::new(),
     }
 }
 
@@ -577,13 +578,17 @@ fn the_budget_subtype_is_our_own_guard_not_a_provider_failure() {
 fn denials_fail_a_node_that_reports_success() {
     let mut f = final_of("success", "all done");
     f.permission_denials = 1;
+    f.denied_tools = vec!["Bash".to_owned()];
     let st = ParseState {
         last_final: Some(f),
         ..ParseState::default()
     };
     assert_eq!(
         classify_with(&st, None, false),
-        Some(Failure::PermissionDenied { denials: 1 })
+        Some(Failure::PermissionDenied {
+            denials: 1,
+            tools: vec!["Bash".to_owned()],
+        })
     );
 }
 

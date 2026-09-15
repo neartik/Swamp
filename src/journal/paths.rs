@@ -134,10 +134,13 @@ impl Paths {
             .strip_prefix("run_")
             .unwrap_or(spec)
             .to_ascii_uppercase();
+        // The short id the UI prints is the ULID's LAST 6 chars, so a prefix match alone
+        // rejects the one spelling a user can actually see.
+        let short = needle.to_ascii_lowercase();
         let matches: Vec<RunId> = runs
             .iter()
             .copied()
-            .filter(|r| r.0.to_string().starts_with(&needle))
+            .filter(|r| r.0.to_string().starts_with(&needle) || r.short() == short)
             .collect();
         match matches.len() {
             1 => Ok(matches[0]),
@@ -251,5 +254,45 @@ impl RunPaths {
         let target = Utf8PathBuf::from("runs").join(self.run.to_string());
         std::os::unix::fs::symlink(target, &link)?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn paths_with(runs: &[&str]) -> (tempfile::TempDir, Paths) {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).expect("utf8 tempdir");
+        for r in runs {
+            std::fs::create_dir_all(root.join(".swamp").join("runs").join(r)).expect("run dir");
+        }
+        let paths = Paths {
+            repo: root.clone(),
+            dot_swamp: root.join(".swamp"),
+            home_swamp: root.join("home"),
+        };
+        (tmp, paths)
+    }
+
+    /// `swamp trace` prints `run bxfrkv`, so `swamp trace bxfrkv` has to work: the short id is
+    /// the ULID's last 6 chars, which no prefix match can reach.
+    #[test]
+    fn a_run_resolves_by_the_short_id_the_ui_prints() {
+        let id = "run_01M2HJPC5EMCD62141ZXBXFRKV";
+        let (_tmp, paths) = paths_with(&[id, "run_01ARZ3NDEKTSV4RRFFQ69G5FAV"]);
+        let want = RunId::from_str(id).expect("run id");
+        assert_eq!(want.short(), "bxfrkv");
+
+        for spec in [
+            "bxfrkv",
+            "BXFRKV",
+            id,
+            "01M2HJPC5EMCD62141ZXBXFRKV",
+            "01M2HJ",
+        ] {
+            assert_eq!(paths.resolve_run(spec).expect(spec), want, "{spec}");
+        }
+        assert!(paths.resolve_run("zzzzzz").is_err());
     }
 }

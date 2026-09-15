@@ -61,6 +61,7 @@ pub async fn checks(cfg: &Config, paths: &Paths, probe: bool, schema: bool) -> V
     accounts(cfg, paths, probe, &mut out).await;
     tiers(cfg, &mut out);
     unsafe_args(cfg, &mut out);
+    permission_modes(cfg, &mut out);
     workspace(cfg, paths, &mut out);
     config_sources(cfg, &mut out);
     if schema {
@@ -433,6 +434,32 @@ fn unsafe_args(cfg: &Config, out: &mut Vec<Check>) {
             ));
         }
     }
+}
+
+/// Swamp always launches with `--permission-prompts none`, and under it these modes deny
+/// every Bash call instead of asking: a worker cannot run the tests it was sent to run.
+const BASH_DENYING_MODES: [&str; 4] = ["acceptEdits", "plan", "manual", "dontAsk"];
+
+fn permission_modes(cfg: &Config, out: &mut Vec<Check>) {
+    let Some(provider) = cfg.providers.get(&Provider::Anthropic) else {
+        return;
+    };
+    let mode = provider.worker.permission_mode.as_deref().unwrap_or("");
+    if !BASH_DENYING_MODES
+        .iter()
+        .any(|m| m.eq_ignore_ascii_case(mode))
+    {
+        return;
+    }
+    out.push(Check::new(
+        "providers/anthropic/permission_mode",
+        Level::Warn,
+        format!(
+            "providers.anthropic.worker.permission_mode = \"{mode}\" denies every Bash call \
+             under --permission-prompts none, so workers cannot run tests or builds; \
+             permission_mode = \"auto\" is the recommended setting"
+        ),
+    ));
 }
 
 fn workspace(cfg: &Config, paths: &Paths, out: &mut Vec<Check>) {

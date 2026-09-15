@@ -24,7 +24,14 @@ provider  = "anthropic"
 account   = "main"
 tier      = "high"
 reserve_brain_slot = true          # keep this account out of the worker pool
-permission_mode    = "acceptEdits"
+# Swamp always launches with `--permission-prompts none`: nobody is at the terminal to answer
+# a prompt. Under it, "acceptEdits" (and "plan", "manual", "dontAsk") auto-denies every Bash
+# call, so a worker cannot run the tests or the build it was sent to run and returns a
+# confident summary of work it never did; "auto" is the recommended mode here and for the
+# workers below. The trade-off is real: "auto" lets the agent run commands without asking,
+# the same trust you extend to a CLI agent in your own shell, and a worktree is a directory,
+# not a sandbox. deny_tools below still keeps the brain from editing files.
+permission_mode    = "auto"
 include_partial_messages = true    # smooth chat streaming; workers keep this off
 # Every mcp__swamp__* tool is allowed automatically, from the registry: the brain answers no
 # permission prompt, so a missing name would be denied. These are the extras it also gets.
@@ -89,7 +96,8 @@ models  = { high = "opus", mid = "sonnet", low = "haiku" }
 tier_extra = { high = { effort = "high" }, mid = { effort = "medium" }, low = { effort = "low" } }
 
   [providers.anthropic.worker]
-  permission_mode = "acceptEdits"
+  # "auto" so the worker can actually run the tests; see the note under [brain].
+  permission_mode = "auto"
   args = []
   readonly_args = ["--permission-mode", "plan",
                    "--disallowed-tools", "Edit", "Write", "MultiEdit", "NotebookEdit"]

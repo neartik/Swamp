@@ -155,7 +155,10 @@ mod tests {
                 detected_by: Detector::Pattern,
             },
             Failure::Timeout { after_s: 10 },
-            Failure::PermissionDenied { denials: 3 },
+            Failure::PermissionDenied {
+                denials: 3,
+                tools: Vec::new(),
+            },
             Failure::BudgetExceeded {
                 limit_usd: 1.0,
                 spent_usd: 2.0,

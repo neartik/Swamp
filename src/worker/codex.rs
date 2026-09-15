@@ -176,6 +176,7 @@ fn terminal(
         api_error_status: None,
         num_turns: st.last_final.as_ref().map_or(0, |p| p.num_turns) + 1,
         permission_denials: 0,
+        denied_tools: Vec::new(),
     };
     st.last_final = Some(f.clone());
     WorkerEvent::Final(f)

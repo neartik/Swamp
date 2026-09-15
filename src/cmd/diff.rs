@@ -1,6 +1,7 @@
 use crate::cli::DiffArgs;
 use crate::cmd::Ctx;
-use crate::ui::fmt;
+use crate::model::core::FileChange;
+use camino::Utf8Path;
 use std::io::Write;
 
 /// Show one worker node's diff. Git is authoritative: this is the patch that was captured.
@@ -21,24 +22,14 @@ pub async fn run(ctx: &Ctx, args: &DiffArgs) -> anyhow::Result<i32> {
         return Ok(0);
     }
     if args.stat {
-        let mut text = String::new();
-        for f in &node.files {
-            text.push_str(&format!(
-                "{:<50} +{:<6} -{:<6} {:?}\n",
-                fmt::truncate(f.path.as_str(), 50),
-                f.added,
-                f.removed,
-                f.kind
-            ));
-        }
-        let w = node.work.as_ref();
-        text.push_str(&format!(
-            "{} files, +{} -{}\n",
-            node.files.len(),
-            w.map_or(0, |w| w.insertions),
-            w.map_or(0, |w| w.deletions),
-        ));
-        ctx.out(&text);
+        // The journal's file list is the record; the patch is the fallback when a node
+        // finished without one.
+        let files: Vec<(String, u32, u32)> = if node.files.is_empty() {
+            stat_of_patch(&patch)
+        } else {
+            node.files.iter().map(cell).collect()
+        };
+        ctx.out(&render_stat(&files));
         return Ok(0);
     }
 
@@ -48,4 +39,96 @@ pub async fn run(ctx: &Ctx, args: &DiffArgs) -> anyhow::Result<i32> {
     out.write_all(&bytes)?;
     out.flush()?;
     Ok(0)
+}
+
+fn cell(f: &FileChange) -> (String, u32, u32) {
+    (f.path.to_string(), f.added, f.removed)
+}
+
+/// `git diff --stat`: aligned paths, a scaled +/- bar, then the summary line.
+fn render_stat(files: &[(String, u32, u32)]) -> String {
+    const BAR_MAX: u32 = 40;
+    let width = files.iter().map(|(p, ..)| p.len()).max().unwrap_or(0);
+    let widest = files.iter().map(|(_, a, r)| a + r).max().unwrap_or(0);
+    let mut out = String::new();
+    let (mut ins, mut del) = (0u32, 0u32);
+    for (path, added, removed) in files {
+        ins += added;
+        del += removed;
+        let total = added + removed;
+        let (plus, minus) = if widest > BAR_MAX {
+            let scale = |n: u32| (n * BAR_MAX).div_ceil(widest).min(BAR_MAX);
+            (scale(*added), scale(*removed))
+        } else {
+            (*added, *removed)
+        };
+        out.push_str(&format!(
+            " {path:width$} | {total:>4} {}{}\n",
+            "+".repeat(plus as usize),
+            "-".repeat(minus as usize),
+        ));
+    }
+    out.push_str(&format!(
+        " {} changed, {} insertion{}(+), {} deletion{}(-)\n",
+        plural(files.len() as u32, "file"),
+        ins,
+        if ins == 1 { "" } else { "s" },
+        del,
+        if del == 1 { "" } else { "s" },
+    ));
+    out
+}
+
+fn plural(n: u32, word: &str) -> String {
+    let s = if n == 1 { "" } else { "s" };
+    format!("{n} {word}{s}")
+}
+
+/// Counts the +/- lines of a unified diff per file, so `--stat` works from the patch alone.
+fn stat_of_patch(patch: &Utf8Path) -> Vec<(String, u32, u32)> {
+    let Ok(text) = std::fs::read_to_string(patch) else {
+        return Vec::new();
+    };
+    let mut out: Vec<(String, u32, u32)> = Vec::new();
+    for line in text.lines() {
+        if let Some(rest) = line.strip_prefix("+++ b/") {
+            out.push((rest.trim().to_owned(), 0, 0));
+        } else if let Some(last) = out.last_mut() {
+            if line.starts_with("+++") || line.starts_with("---") {
+                continue;
+            }
+            if line.starts_with('+') {
+                last.1 += 1;
+            } else if line.starts_with('-') {
+                last.2 += 1;
+            }
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_patch_alone_is_enough_for_a_stat() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = camino::Utf8PathBuf::from_path_buf(dir.path().join("patch.diff"))
+            .expect("utf8 tempdir");
+        std::fs::write(
+            &path,
+            "diff --git a/src/lib.rs b/src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs\n\
+             @@ -1,2 +1,3 @@\n fn main() {}\n+// one\n+// two\n-// gone\n",
+        )
+        .expect("patch");
+        let files = stat_of_patch(&path);
+        assert_eq!(files, vec![("src/lib.rs".to_owned(), 2, 1)]);
+        let text = render_stat(&files);
+        assert!(text.contains("src/lib.rs |    3 ++-"), "{text}");
+        assert!(
+            text.contains("1 file changed, 2 insertions(+), 1 deletion(-)"),
+            "{text}"
+        );
+    }
 }

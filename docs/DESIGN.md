@@ -819,7 +819,7 @@ pub struct LaunchSpec {
     pub isolation: IsolationMode,
     pub session: SessionPlan,
     pub kind: NodeKind,                   // Worker or Brain; changes the argv
-    pub permission_mode: String,          // from config, e.g. "acceptEdits"
+    pub permission_mode: String,          // from config, e.g. "auto"
     pub sandbox: String,                  // codex, e.g. "workspace-write"
     pub budget_usd: Option<f64>,
     pub append_system_prompt: Option<String>,
@@ -900,9 +900,12 @@ Worker:
   --verbose                        # required alongside stream-json in print mode
   --model <models[tier]>           # from config; never hardcoded
   --session-id <uuid>              # pre-generated, journaled BEFORE spawn -> resume always possible
-  [--permission-mode acceptEdits]  # from config, and ONLY when it sets one: the flag has a
+  [--permission-mode auto]         # from config, and ONLY when it sets one: the flag has a
                                    # closed choice list, so an empty argument is an argv error
                                    # that kills the CLI before it emits one stream line.
+                                   # "auto" is the recommendation: under --permission-prompts
+                                   # none, acceptEdits/plan/manual/dontAsk deny every Bash call,
+                                   # so the worker cannot run tests.
                                    # Never bypassPermissions unless opted in.
   --permission-prompts none        # nobody is at the keyboard; prompts are denied, not hung
   --strict-mcp-config              # with no --mcp-config: workers get exactly zero MCP servers
@@ -1569,7 +1572,7 @@ absence is exactly why `QuotaAware` is not the v1 default.
     mcp.json                              # generated MCP config handed to the brain
     brain.md                              # the system prompt actually used, verbatim
     swamp.pid
-    nodes/<node_id>/
+    nodes/<node_short>/                     # the ATTEMPT id; the branch keeps the LOGICAL one
       prompt.md                           # the exact bytes fed to fd0
       stream.jsonl                        # RAW provider stdout, verbatim, never rewritten
       stderr.log
@@ -1582,7 +1585,7 @@ absence is exactly why `QuotaAware` is not the v1 default.
 
 ~/.swamp/
   accounts.json                           # cross-run, cross-repo quota state (fs4-locked)
-  worktrees/<repo-name>-<hash8>/<run_short>/<node_short>/
+  worktrees/<repo-name>-<hash8>/<run_short>/<node_short>-<attempt>/   # LOGICAL node short id
 ```
 
 Worktrees live **outside** the repo. Inside, every worker's `rg` / `find` / `cargo` walks its
@@ -1752,17 +1755,17 @@ Nothing auto-resumes, because relaunching workers spends quota.
 $ swamp trace last
 run_01JZQ8  ~/projects/api  base 9f3c1ad  started 14:02:11  4m12s  ~$1.84  1.2M tok
 
-* brain            anthropic/main  opus     4m12s  214k  ~$0.71  ok
+* a13f70  brain            anthropic/main  opus     4m12s  214k  ~$0.71  ok
   |
-  +- [mid ] migrate user model                            1m48s  118k  ~$0.42  ok
-  |    attempt 1  anthropic/main   sonnet   rate_limited (seven_day, telemetry) resets 21:55  12s
-  |    attempt 2  anthropic/alt    sonnet   ok
-  |    branch swamp/01jzq8/b73e10   +214 -37   6 files
+  +- e2qgr7  [mid ] migrate user model                    1m48s  118k  ~$0.42  ok
+  |    attempt 1  9c02d1  anthropic/main   sonnet   rate_limited (seven_day, telemetry) resets 21:55  12s
+  |    attempt 2  e2qgr7  anthropic/alt    sonnet   ok
+  |    branch swamp/01jzq8/b73e10-2   +214 -37   6 files
   |
-  +- [low ] update changelog        openai/main  astra     31s   14k       -  ok
-  |    branch swamp/01jzq8/c81e00   +12 -0     1 file
+  +- c81e00  [low ] update changelog   openai/main  astra     31s   14k       -  ok
+  |    branch swamp/01jzq8/c81e00-1   +12 -0     1 file
   |
-  +- [high] audit auth middleware   anthropic/main opus   2m04s  183k  ~$0.50  failed
+  +- f40a92  [high] audit auth middleware  anthropic/main opus  2m04s  183k  ~$0.50  failed
        WorkerError(error_during_execution): 2 tests still failing
        no failover (task-level failure)
 
@@ -1770,7 +1773,10 @@ usage  in 1.2M  out 84.1k  cache-read 9.4M  cache-write 220k
 cost   ~$1.84   (1 node reported no cost data)
 ```
 
-Glyphs and columns are in `ui/fmt.rs`. `-` in the cost column means the provider reported nothing;
+The leading column is the ATTEMPT node id: it names `nodes/<node_short>/` and is what `swamp
+diff` and `swamp adopt` are given, so what is on screen always resolves. The branch keeps the
+LOGICAL id, which is stable across attempts. Both spellings resolve; a logical short id resolves
+to the node's last finished attempt. Glyphs and columns are in `ui/fmt.rs`. `-` in the cost column means the provider reported nothing;
 never `$0.00`. `~` means list-price or estimated, never money billed.
 
 Flags: `--node <id>`, `--events`, `--raw` (verbatim `stream.jsonl`), `--stderr`, `--follow`,
@@ -1838,7 +1844,9 @@ swamp run <TASK...>                         One-shot, non-interactive
       --json | -q                           -q prints only the run id
       -                                     Read TASK from stdin; @file also accepted
 
-swamp trace [RUN|last]                      RUN accepts a full id, a unique prefix, `last`, or `-2`
+swamp trace [RUN|last]                      RUN accepts a full id, a unique prefix, the printed
+                                            short id (the ULID's last 6 chars, case-insensitive),
+                                            `last`, or `-2`
       --node <ID> --events --raw --stderr --follow --json --depth <N> --failed --since <DUR>
                                             With no RUN, --node searches every run, so a node of
                                             an older run renders that run
@@ -1857,8 +1865,12 @@ swamp accounts [list]                       Health, inflight, 5h/7d, cooldown, n
   cooldown <ID> <DUR> | clear <ID> | enable <ID> | disable <ID> | reset
 
 swamp diff <NODE> [--stat|--name-only|--patch]
+                                            --stat renders the captured patch git-style
 swamp adopt <NODE>...                       Land a worker's work in the user's tree
-                                            NODE is a full id, a short id or a prefix, searched
+                                            NODE is a full id, either short id (the ATTEMPT's,
+                                            which trace prints and which names the node dir, or
+                                            the LOGICAL one, which names the branch and resolves
+                                            to the last finished attempt) or a prefix, searched
                                             across every run newest first and refused when the
                                             prefix matches nodes in more than one; `last` and
                                             `-2` name a run and resolve to its only node, or to
@@ -1923,8 +1935,11 @@ config
   ok   ~/.config/swamp/config.toml         valid
   WARN [workspace] link is empty but ./target is 3.1 GiB
          fresh worktrees will rebuild from scratch; consider link = ["target"]
+  WARN providers.anthropic.worker.permission_mode = "acceptEdits"
+         denies every Bash call under --permission-prompts none: workers cannot run
+         tests or builds. permission_mode = "auto" is the recommended setting.
 
-2 warnings, 0 errors.
+3 warnings, 0 errors.
 ```
 
 The most valuable check is the third provider line. Two "accounts" that resolve to the same config
@@ -1973,7 +1988,14 @@ provider  = "anthropic"
 account   = "main"
 tier      = "high"
 reserve_brain_slot = true          # keep this account out of the worker pool
-permission_mode    = "acceptEdits"
+# Swamp always launches with `--permission-prompts none`: nobody is at the terminal to answer
+# a prompt. Under it, "acceptEdits" (and "plan", "manual", "dontAsk") auto-denies every Bash
+# call, so a worker cannot run the tests or the build it was sent to run and returns a
+# confident summary of work it never did; "auto" is the recommended mode here and for the
+# workers below. The trade-off is real: "auto" lets the agent run commands without asking,
+# the same trust you extend to a CLI agent in your own shell, and a worktree is a directory,
+# not a sandbox. deny_tools below still keeps the brain from editing files.
+permission_mode    = "auto"
 include_partial_messages = true    # smooth chat streaming; workers keep this off
 # The brain plans and reads; workers write. Keeps the brain from corrupting parallel worktrees.
 allow_tools = [
@@ -2039,7 +2061,8 @@ models  = { high = "opus", mid = "sonnet", low = "haiku" }
 tier_extra = { high = { effort = "high" }, mid = { effort = "medium" }, low = { effort = "low" } }
 
   [providers.anthropic.worker]
-  permission_mode = "acceptEdits"
+  # "auto" so the worker can actually run the tests; see the note under [brain].
+  permission_mode = "auto"
   args = []
   readonly_args = ["--permission-mode", "plan",
                    "--disallowed-tools", "Edit", "Write", "MultiEdit", "NotebookEdit"]

@@ -155,11 +155,15 @@ fn auto_denied_tool_calls_fail_the_node_and_show_up_in_the_trace() {
 
     let view = h.last_view();
     let node = view.nodes.values().next().expect("the node");
-    assert_eq!(
-        node.state,
-        NodeState::Failed {
-            failure: Failure::PermissionDenied { denials: 3 }
-        }
+    assert!(
+        matches!(
+            &node.state,
+            NodeState::Failed {
+                failure: Failure::PermissionDenied { denials: 3, .. }
+            }
+        ),
+        "{:?}",
+        node.state
     );
     assert_eq!(h.invocations("main").len(), 1, "denials do not rotate");
 
@@ -167,6 +171,38 @@ fn auto_denied_tool_calls_fail_the_node_and_show_up_in_the_trace() {
         .assert()
         .success()
         .stdout(predicates::str::contains("3 tool calls were auto-denied"));
+}
+
+/// A denial is only actionable if the trace names the tool that was refused: the cause of a
+/// worker that could not run its tests is one line, not a dig through stream.jsonl.
+#[test]
+fn the_trace_names_the_tools_that_were_auto_denied() {
+    let h = Harness::new().scenario(
+        "main",
+        Scenario::claude_denied_tools(&["Bash", "Bash", "Edit"]),
+    );
+
+    h.swamp(&["run", "--no-brain", TASK]).assert().code(4);
+
+    let view = h.last_view();
+    let node = view.nodes.values().next().expect("the node");
+    let NodeState::Failed {
+        failure: Failure::PermissionDenied { tools, .. },
+    } = &node.state
+    else {
+        panic!("{:?}", node.state)
+    };
+    assert_eq!(
+        tools,
+        &["Bash".to_owned(), "Bash".to_owned(), "Edit".to_owned()]
+    );
+
+    h.swamp(&["trace", "last"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(
+            "3 tool calls were auto-denied: Bash x2, Edit",
+        ));
 }
 
 /// WP8 acceptance 12: A worker that echoes a token must not put it in the journal.

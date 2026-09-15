@@ -339,6 +339,9 @@ pub struct FinalSummary {
     /// writes a confident summary of work it never did. Non-empty is a failure signal.
     #[serde(default)]
     pub permission_denials: u32,
+    /// The tool names behind those denials, so the cause is visible without stream.jsonl.
+    #[serde(default)]
+    pub denied_tools: Vec<String>,
 }
 
 #[cfg(test)]

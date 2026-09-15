@@ -72,7 +72,8 @@ expression: all
     },
     "api_error_status": null,
     "num_turns": 3,
-    "permission_denials": 0
+    "permission_denials": 0,
+    "denied_tools": []
   },
   {
     "e": "unknown",

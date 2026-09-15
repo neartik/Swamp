@@ -1,6 +1,5 @@
 ---
 source: src/model/failure.rs
-assertion_line: 202
 expression: all
 ---
 [
@@ -36,7 +35,11 @@ expression: all
   },
   {
     "kind": "permission_denied",
-    "denials": 4
+    "denials": 4,
+    "tools": [
+      "Bash",
+      "Bash"
+    ]
   },
   {
     "kind": "crashed",

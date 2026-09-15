@@ -57,8 +57,8 @@ impl Ctx {
             .with_context(|| format!("reading the journal of run {}", run.run))
     }
 
-    /// A node id, a short id or a prefix, searched across every run newest first; `last` and
-    /// `-N` name a run instead and resolve to that run's node.
+    /// An attempt id, the logical node id, a short id or a prefix, searched across every run
+    /// newest first; `last` and `-N` name a run instead and resolve to that run's node.
     pub fn find_node(&self, spec: &str) -> anyhow::Result<(RunPaths, NodeRecord)> {
         let spec = spec.trim();
         anyhow::ensure!(!spec.is_empty(), "empty node specifier");
@@ -75,12 +75,31 @@ impl Ctx {
             let Ok(view) = RunView::load(&rp.dir, false) else {
                 continue;
             };
-            for n in view.nodes.values().filter(|n| node_matches(n.id, spec)) {
-                // A full id is unique by construction; only a prefix can collide.
-                if exact {
-                    return Ok((rp, n.clone()));
+            // The worktree branch carries the LOGICAL short id and the node directory the
+            // attempt's, so both spellings are on screen and both have to resolve.
+            let mut logical: Vec<NodeId> = Vec::new();
+            for n in view.nodes.values() {
+                if node_matches(n.id, spec) {
+                    // A full id is unique by construction; only a prefix can collide.
+                    if exact {
+                        return Ok((rp, n.clone()));
+                    }
+                    hits.push((rp.clone(), n.clone()));
+                } else if node_matches(n.logical, spec) && !logical.contains(&n.logical) {
+                    logical.push(n.logical);
                 }
-                hits.push((rp.clone(), n.clone()));
+            }
+            for id in logical {
+                if hits.iter().any(|(r, n)| r.run == rp.run && n.logical == id) {
+                    continue;
+                }
+                let Some(node) = attempt_of(&view, id) else {
+                    continue;
+                };
+                if exact {
+                    return Ok((rp, node));
+                }
+                hits.push((rp.clone(), node));
             }
         }
         match hits.len() {
@@ -133,6 +152,22 @@ fn run_node(view: &RunView, rp: &RunPaths) -> anyhow::Result<NodeRecord> {
             candidates(&listed)
         )
     })
+}
+
+/// Which attempt a logical node id resolves to: the latest one that finished, else the latest.
+fn attempt_of(view: &RunView, logical: NodeId) -> Option<NodeRecord> {
+    let chain: Vec<&NodeRecord> = view
+        .by_logical
+        .get(&logical)?
+        .iter()
+        .filter_map(|a| view.nodes.get(a))
+        .collect();
+    chain
+        .iter()
+        .filter(|n| n.ended_at.is_some())
+        .max_by_key(|n| (n.ended_at, n.id))
+        .or_else(|| chain.last())
+        .map(|n| (*n).clone())
 }
 
 /// `short (run, title)` per hit, for an error the user can act on.

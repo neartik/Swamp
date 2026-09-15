@@ -304,3 +304,44 @@ async fn reap_removes_stale_sockets_and_pidfiles() {
     assert!(removed >= 1, "the stale socket is removed");
     assert!(!socket.exists());
 }
+
+/// Swamp launches workers with `--permission-prompts none`: under it these modes auto-deny
+/// every Bash call, so the worker cannot run the tests it was sent to run.
+#[tokio::test]
+async fn a_worker_permission_mode_that_denies_bash_is_one_warning() {
+    let f = Fixture::new();
+    let mut cfg = healthy(&f);
+    let anthropic = swamp::model::core::Provider::Anthropic;
+
+    for mode in ["acceptEdits", "plan", "manual", "dontAsk"] {
+        cfg.providers
+            .get_mut(&anthropic)
+            .expect("the anthropic provider")
+            .worker
+            .permission_mode = Some(mode.to_owned());
+        let out = checks(&cfg, &f.paths, false, false).await;
+        let warned: Vec<&Check> = warnings(&out)
+            .into_iter()
+            .filter(|c| c.name == "providers/anthropic/permission_mode")
+            .collect();
+        assert_eq!(warned.len(), 1, "{mode} was not flagged");
+        assert!(warned[0].detail.contains("Bash"), "{}", warned[0].detail);
+        assert!(
+            warned[0].detail.contains("\"auto\""),
+            "the warning names the fix: {}",
+            warned[0].detail
+        );
+    }
+
+    cfg.providers
+        .get_mut(&anthropic)
+        .expect("the anthropic provider")
+        .worker
+        .permission_mode = Some("auto".to_owned());
+    let out = checks(&cfg, &f.paths, false, false).await;
+    assert!(
+        !out.iter()
+            .any(|c| c.name == "providers/anthropic/permission_mode"),
+        "auto is the recommended mode and must not warn"
+    );
+}

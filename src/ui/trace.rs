@@ -136,8 +136,11 @@ fn block(view: &RunView, row: &TreeRow, siblings: bool, o: &TraceOpts) -> String
     } else {
         String::new()
     };
+    // The attempt id names the node directory and is what `diff`/`adopt` are given, so the
+    // row leads with the id the user will copy.
     let mut out = format!(
-        "{stem}{}{}  {}  {}  {}  {}\n",
+        "{stem}{}  {}{}  {}  {}  {}  {}\n",
+        rec.id.short(),
         tier,
         fmt::pad(&row.title, TITLE_WIDTH),
         fmt::pad(&account_cell(rec), ACCOUNT_WIDTH),
@@ -150,8 +153,9 @@ fn block(view: &RunView, row: &TreeRow, siblings: bool, o: &TraceOpts) -> String
         for id in &row.attempts {
             if let Some(a) = view.nodes.get(id) {
                 out.push_str(&format!(
-                    "{detail}attempt {}  {}  {}\n",
+                    "{detail}attempt {}  {}  {}  {}\n",
                     a.attempt,
+                    a.id.short(),
                     fmt::pad(&account_cell(a), ACCOUNT_WIDTH),
                     attempt_outcome(a),
                 ));
@@ -248,7 +252,7 @@ fn failure_summary(f: &Failure) -> String {
         Failure::BudgetExceeded { .. } => "budget_exceeded".to_owned(),
         Failure::Timeout { after_s } => format!("timeout ({after_s}s)"),
         Failure::WorkerError { subtype, .. } => format!("worker_error ({subtype})"),
-        Failure::PermissionDenied { denials } => format!("permission_denied ({denials})"),
+        Failure::PermissionDenied { denials, .. } => format!("permission_denied ({denials})"),
         Failure::Crashed { .. } => "crashed".to_owned(),
         Failure::Truncated { .. } => "truncated".to_owned(),
         Failure::NoCapacity { .. } => "no_capacity".to_owned(),
@@ -274,8 +278,9 @@ fn failure_detail(f: &Failure) -> String {
             limit_usd,
             spent_usd,
         } => format!("BudgetExceeded: spent ${spent_usd:.2} of ${limit_usd:.2}"),
-        Failure::PermissionDenied { denials } => {
-            format!("PermissionDenied: {denials} tool calls were auto-denied")
+        Failure::PermissionDenied { denials, tools } => {
+            let which = tool_tally(tools);
+            format!("PermissionDenied: {denials} tool calls were auto-denied{which}")
         }
         Failure::Crashed { signal } => match signal {
             Some(s) => format!("Crashed: killed by signal {s}"),
@@ -287,6 +292,31 @@ fn failure_detail(f: &Failure) -> String {
         Failure::Timeout { after_s } => format!("Timeout: no terminal event after {after_s}s"),
         Failure::Cancelled { by } => format!("Cancelled by {by:?}"),
     }
+}
+
+/// `: Bash x3, Edit`, empty when the provider named no tools.
+fn tool_tally(tools: &[String]) -> String {
+    let mut tally: Vec<(&str, u32)> = Vec::new();
+    for t in tools {
+        match tally.iter_mut().find(|(name, _)| *name == t.as_str()) {
+            Some((_, n)) => *n += 1,
+            None => tally.push((t.as_str(), 1)),
+        }
+    }
+    if tally.is_empty() {
+        return String::new();
+    }
+    let listed: Vec<String> = tally
+        .iter()
+        .map(|(name, n)| {
+            if *n > 1 {
+                format!("{name} x{n}")
+            } else {
+                (*name).to_owned()
+            }
+        })
+        .collect();
+    format!(": {}", listed.join(", "))
 }
 
 fn scope_word(s: &crate::model::core::LimitScope) -> &'static str {

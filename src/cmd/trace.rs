@@ -84,10 +84,18 @@ fn locate(ctx: &Ctx, args: &TraceArgs) -> anyhow::Result<(RunPaths, Option<NodeI
 
 fn resolve(ctx: &Ctx, paths: &RunPaths, spec: &str) -> anyhow::Result<NodeId> {
     let view = ctx.view(paths, false)?;
+    // A logical short id lands on its finished attempt: --raw and --stderr name a directory.
     let hit = view
         .nodes
-        .keys()
-        .find(|id| super::node_matches(**id, spec))
-        .copied();
+        .values()
+        .find(|n| super::node_matches(n.id, spec))
+        .map(|n| n.id)
+        .or_else(|| {
+            view.nodes
+                .values()
+                .find(|n| super::node_matches(n.logical, spec))
+                .and_then(|n| super::attempt_of(&view, n.logical))
+                .map(|n| n.id)
+        });
     hit.ok_or_else(|| anyhow::anyhow!("no node matches `{spec}` in run {}", paths.run))
 }

@@ -124,6 +124,7 @@ mod tests {
                 api_error_status: None,
                 num_turns: 3,
                 permission_denials: 0,
+                denied_tools: Vec::new(),
             }),
             WorkerEvent::Unknown {
                 raw: RawLine(RawValue::from_string(r#"{"type":"future_thing"}"#.into()).unwrap()),

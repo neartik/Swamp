@@ -40,6 +40,10 @@ pub enum Failure {
     /// Tools were auto-denied because nobody could answer a prompt.
     PermissionDenied {
         denials: u32,
+        /// Which tools were refused, in the order the CLI reported them. Additive: older
+        /// journals have none.
+        #[serde(default)]
+        tools: Vec<String>,
     },
     /// Process died abnormally (signal, OOM, supervisor kill).
     Crashed {
@@ -148,7 +152,10 @@ mod tests {
                 subtype: "error_during_execution".into(),
                 detail: "build failed".into(),
             },
-            Failure::PermissionDenied { denials: 4 },
+            Failure::PermissionDenied {
+                denials: 4,
+                tools: vec!["Bash".into(), "Bash".into()],
+            },
             Failure::Crashed { signal: Some(9) },
             Failure::Truncated { offset: 8192 },
             Failure::NoCapacity {

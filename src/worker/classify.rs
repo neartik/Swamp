@@ -52,6 +52,7 @@ pub fn classify(cx: &ExitContext<'_>) -> Option<Failure> {
         if f.permission_denials > 0 {
             return Some(Failure::PermissionDenied {
                 denials: f.permission_denials,
+                tools: f.denied_tools.clone(),
             });
         }
         let t = f.text.as_deref().unwrap_or("");

@@ -84,6 +84,9 @@ default_tier = "mid"
 [providers.anthropic]
 models = { high = "<model>", mid = "<model>", low = "<model>" }
 
+  [providers.anthropic.worker]
+  permission_mode = "auto"
+
 [[accounts]]
 id = "main"
 provider = "anthropic"
@@ -98,6 +101,17 @@ exec = "claude-alt"
 max_concurrency = 2
 env = { CLAUDE_CONFIG_DIR = "~/.claude-alt" }
 ```
+
+Workers and the brain are launched with `--permission-prompts none`, because nobody is at the
+terminal to answer a prompt. Under it, `permission_mode = "acceptEdits"` (and `plan`, `manual`,
+`dontAsk`) auto-denies every Bash call, so a worker cannot run the tests or the build it was sent
+to run and comes back with a confident summary of work it never did; `permission_mode = "auto"`
+is therefore the recommendation for anthropic workers and for `[brain]`. The trade-off is real:
+`auto` lets a worker run arbitrary commands in its worktree without asking, which is the same
+trust you extend to a CLI agent in your own shell, and a worktree is a directory, not a sandbox.
+The brain keeps `deny_tools = ["Edit", "Write", "MultiEdit", "NotebookEdit"]` either way, so it
+still cannot edit files, and `swamp doctor` warns when a worker is configured with a mode that
+denies Bash.
 
 Layers, lowest priority first: built-in defaults, `~/.config/swamp/config.toml`,
 `<repo>/.swamp/config.toml`, `SWAMP_*` environment, `--config <file>`, command-line flags.
@@ -129,7 +143,7 @@ edits files itself.
 | `swamp chat` | Interactive brain session. |
 | `swamp runs`, `swamp resume`, `swamp cancel` | List runs, recover an interrupted one (`--plan` first, it spends nothing), stop one. |
 | `swamp accounts` | Health, in-flight count, quota windows, cooldowns, lifetime spend. Also `cooldown`, `clear`, `enable`, `disable`, `reset`. |
-| `swamp diff`, `swamp adopt`, `swamp worktrees` | Inspect a worker's patch, land it, manage the worktrees. A node is named by its full id, its short id or a prefix, searched across every run; `last` and `-2` name a run and resolve to its node. |
+| `swamp diff`, `swamp adopt`, `swamp worktrees` | Inspect a worker's patch, land it, manage the worktrees. A node is named by its full id, either short id (the attempt's, printed by `swamp trace`, or the logical one in the branch name) or a prefix, searched across every run; `last` and `-2` name a run and resolve to its node. |
 | `swamp gc`, `swamp replay`, `swamp config`, `swamp completions` | Housekeeping, re-render or re-derive a recorded run, inspect config, shell completions. |
 
 Exit codes: `0` ok, `1` generic, `2` config invalid, `3` no capacity (all accounts cooling),
@@ -164,7 +178,11 @@ Swamp adds `/.swamp/` to `.git/info/exclude`, never to a tracked `.gitignore`.
   worktrees/<repo>-<hash8>/<run_short>/<node_short>-<attempt>/
 ```
 
-Worker branches are `swamp/<run_short>/<node_short>-<attempt>`.
+Worker branches are `swamp/<run_short>/<node_short>-<attempt>`, where `<node_short>` is the
+LOGICAL node id: it is stable across retries, so every attempt of one task lands on a branch of
+the same family. The node directory under `runs/<run_id>/nodes/` is named after the ATTEMPT id
+instead, which is what `swamp trace` prints in its leading column. `swamp diff` and `swamp adopt`
+accept both: a logical short id resolves to that node's last finished attempt.
 
 ## A worktree is a directory, not a sandbox
 

@@ -272,6 +272,7 @@ fn result_event(r: ResultLine, st: &mut ParseState) -> ParseOutput {
         api_error_status: r.api_error_status,
         num_turns: r.num_turns,
         permission_denials: r.permission_denials.len() as u32,
+        denied_tools: denied_tools(&r.permission_denials),
     };
     if let Some(s) = r.session_id {
         st.session = Some(s);
@@ -282,6 +283,15 @@ fn result_event(r: ResultLine, st: &mut ParseState) -> ParseOutput {
     }
     st.last_final = Some(final_summary.clone());
     ParseOutput::one(WorkerEvent::Final(final_summary))
+}
+
+/// `permission_denials[].tool_name`, in the order the CLI reported them.
+fn denied_tools(denials: &[serde_json::Value]) -> Vec<String> {
+    denials
+        .iter()
+        .filter_map(|d| d.get("tool_name")?.as_str())
+        .map(str::to_owned)
+        .collect()
 }
 
 fn usage_of(u: &ClaudeUsage) -> Usage {

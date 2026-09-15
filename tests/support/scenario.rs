@@ -129,10 +129,16 @@ impl Scenario {
 
     /// `subtype: "success"` with denials: the worker did not do the work it claims.
     pub fn claude_permission_denied(denials: u32) -> Scenario {
+        let tools = vec!["Edit"; denials as usize];
+        Scenario::claude_denied_tools(&tools)
+    }
+
+    /// The same, with the tool names the CLI reports in `permission_denials[].tool_name`.
+    pub fn claude_denied_tools(tools: &[&str]) -> Scenario {
         let mut s = Scenario::claude();
         s.emit.pop();
         s.emit
-            .push(result_line("success", false, "all done", denials));
+            .push(result_line_tools("success", false, "all done", tools));
         s
     }
 
@@ -187,8 +193,15 @@ pub fn assistant_text_line(text: &str) -> String {
 }
 
 pub fn result_line(subtype: &str, is_error: bool, text: &str, denials: u32) -> String {
-    let denials: Vec<serde_json::Value> = (0..denials)
-        .map(|i| serde_json::json!({ "tool_name": "Edit", "tool_use_id": format!("toolu_{i}") }))
+    let tools = vec!["Edit"; denials as usize];
+    result_line_tools(subtype, is_error, text, &tools)
+}
+
+pub fn result_line_tools(subtype: &str, is_error: bool, text: &str, tools: &[&str]) -> String {
+    let denials: Vec<serde_json::Value> = tools
+        .iter()
+        .enumerate()
+        .map(|(i, tool)| serde_json::json!({ "tool_name": tool, "tool_use_id": format!("toolu_{i}") }))
         .collect();
     serde_json::json!({
         "type": "result",
