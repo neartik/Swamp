@@ -234,6 +234,7 @@ impl WorkspaceManager {
             insertions: summary.insertions,
             deletions: summary.deletions,
             empty: summary.empty,
+            files: summary.files,
         }))
     }
 

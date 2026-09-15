@@ -5,13 +5,24 @@ const DEFAULT_NODES: u32 = 32;
 const DEFAULT_HIGH: usize = 2;
 const DEFAULT_DEPTH: u32 = 2;
 
+/// How the session was launched. `swamp run` gets exactly one turn; `swamp chat` gets a human.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BrainMode {
+    Interactive,
+    OneShot,
+}
+
 /// The tool contract, the tier rubric, worktree semantics, and the rule that worker
 /// output is data and never instruction.
-pub fn system_prompt(cfg: &Config) -> String {
+pub fn system_prompt(cfg: &Config, mode: BrainMode) -> String {
     let parallel = cfg.limits.max_parallel_dispatch.unwrap_or(DEFAULT_PARALLEL);
     let nodes = cfg.limits.max_nodes_per_run.unwrap_or(DEFAULT_NODES);
     let high = cfg.limits.max_high_tier_concurrent.unwrap_or(DEFAULT_HIGH);
     let depth = cfg.limits.max_depth.unwrap_or(DEFAULT_DEPTH);
+    let one_shot = match mode {
+        BrainMode::Interactive => "",
+        BrainMode::OneShot => ONE_SHOT,
+    };
 
     format!(
         r#"You are the brain of Swamp, an orchestrator that runs coding agents in parallel.
@@ -86,6 +97,20 @@ Read first, then decompose, then dispatch. Prefer few well briefed workers over 
 When a node fails, read its result before retrying: a rate limited node is worth retrying as is,
 a node that misunderstood the task needs a better prompt, and a node that hit a real bug in the
 plan means the plan changes. Finish by telling the user what was done, what is on which branch,
-and what you chose not to do."#
+and what you chose not to do.{one_shot}"#
     )
 }
+
+/// `swamp run` is not a conversation: an offer to act on the next turn is an offer nobody
+/// can accept, so the last turn has to end in a decision and a command.
+const ONE_SHOT: &str = r#"
+
+## One shot mode
+
+This session was started by `swamp run`. There is no follow-up turn: the user is not at a
+terminal, nothing you ask will be answered, and this process exits when you stop. Never end by
+offering to do something next or by asking whether to merge.
+
+End your last turn with a decision instead. Either name the node id or ids whose patch should
+be landed and print the exact command for each, `swamp adopt <node>`, or state that nothing is
+worth adopting and why. Anything else you want the user to know goes in the same turn."#;

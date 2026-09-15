@@ -85,7 +85,9 @@ default_tier = "mid"
 models = { high = "<model>", mid = "<model>", low = "<model>" }
 
   [providers.anthropic.worker]
-  permission_mode = "auto"
+  permission_mode = "acceptEdits"
+  allow_tools = ["Bash"]
+  deny_tools = ["Task", "Agent", "Workflow", "Team"]
 
 [[accounts]]
 id = "main"
@@ -103,15 +105,29 @@ env = { CLAUDE_CONFIG_DIR = "~/.claude-alt" }
 ```
 
 Workers and the brain are launched with `--permission-prompts none`, because nobody is at the
-terminal to answer a prompt. Under it, `permission_mode = "acceptEdits"` (and `plan`, `manual`,
-`dontAsk`) auto-denies every Bash call, so a worker cannot run the tests or the build it was sent
-to run and comes back with a confident summary of work it never did; `permission_mode = "auto"`
-is therefore the recommendation for anthropic workers and for `[brain]`. The trade-off is real:
-`auto` lets a worker run arbitrary commands in its worktree without asking, which is the same
-trust you extend to a CLI agent in your own shell, and a worktree is a directory, not a sandbox.
-The brain keeps `deny_tools = ["Edit", "Write", "MultiEdit", "NotebookEdit"]` either way, so it
-still cannot edit files, and `swamp doctor` warns when a worker is configured with a mode that
-denies Bash.
+terminal to answer a prompt. Under it the two halves of the job are gated separately, and
+measuring the real CLI is the only way to see it: `permission_mode = "auto"` denies file writes
+("the session currently doesn't have approval enabled for file writes"), so the worker produces
+no diff at all, while `acceptEdits` (like `plan`, `manual` and `dontAsk`) writes files but denies
+every Bash call, so the worker cannot run the tests it was sent to run and comes back with a
+confident summary of work it never verified. The pair that works is `permission_mode =
+"acceptEdits"` plus `Bash` in `allow_tools`, for anthropic workers and for `[brain]`. The
+trade-off is real: an allowed Bash runs commands in the worktree without asking, which is the
+same trust you extend to a CLI agent in your own shell, and a worktree is a directory, not a
+sandbox. The brain keeps `deny_tools = ["Edit", "Write", "MultiEdit", "NotebookEdit"]`, so it
+still cannot edit files, and `swamp doctor` warns when a worker or the brain runs in a
+Bash-denying mode without Bash allowed.
+
+`allow_tools` and `deny_tools` are tool names, not flags: Swamp merges each list into the single
+`--allowed-tools` / `--disallowed-tools` flag the CLI accepts, so a raw flag in `worker.args`
+would silently overwrite the other half. The suggested `deny_tools` above is about behaviour
+rather than safety: a worker that can still reach the delegation tools will, given a global
+CLAUDE.md that tells it to orchestrate, spawn a team of subagents and report on their work
+instead of doing it. Swamp also appends a built-in worker role prompt to every worker
+(`--append-system-prompt`, or the head of the prompt for codex, which has no such flag): you are
+one worker, in this worktree, unattended; do the task yourself; do not spawn subagents; never
+ask a question; finish with what you changed and how you verified it. Append your own text with
+`providers.<p>.worker.system_prompt_file`.
 
 Layers, lowest priority first: built-in defaults, `~/.config/swamp/config.toml`,
 `<repo>/.swamp/config.toml`, `SWAMP_*` environment, `--config <file>`, command-line flags.
@@ -130,7 +146,9 @@ swamp adopt last                                   # applies the patch to your c
 
 `swamp` with no arguments, or `swamp chat`, starts an interactive session with a brain: a CLI
 agent that plans, reads the repo, and dispatches workers through Swamp's own MCP tools. It never
-edits files itself.
+edits files itself. `swamp run <TASK>` uses the same brain for exactly one turn: there is nobody
+to answer a follow-up, so it is told to end by naming the nodes worth landing and the
+`swamp adopt <node>` command for each, or to say that nothing is.
 
 ## Commands
 

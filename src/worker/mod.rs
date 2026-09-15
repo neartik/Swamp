@@ -4,6 +4,7 @@ pub mod claude;
 pub mod codex;
 pub mod follow;
 pub mod liveness;
+pub mod prompt;
 pub mod spawn;
 
 pub use adapter::{

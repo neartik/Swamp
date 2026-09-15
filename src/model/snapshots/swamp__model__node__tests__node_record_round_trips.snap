@@ -70,7 +70,8 @@ expression: n
     "patch": "nodes/g5fav/patch.diff",
     "insertions": 12,
     "deletions": 3,
-    "empty": false
+    "empty": false,
+    "files": []
   },
   "summary": "done",
   "stream_offset": 4096,

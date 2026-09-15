@@ -2,12 +2,14 @@ use crate::config::Config;
 use crate::dispatch::pool::{AccountPool, Lease, NoCapacity, instant_of};
 use crate::ids::{NodeId, NodeIds};
 use crate::journal::{JournalEvent, JournalHandle};
-use crate::model::core::{AccountId, NodeState, Provider, SessionHandle, Tier, WorkspaceRef};
+use crate::model::core::{
+    AccountId, NodeKind, NodeState, Provider, SessionHandle, Tier, WorkspaceRef,
+};
 use crate::model::failure::Failure;
 use crate::model::node::NodeRecord;
-use crate::model::result::TaskRequest;
+use crate::model::result::{NodeResult, TaskRequest};
 use crate::worker::RunOutcome;
-use crate::worker::adapter::{LaunchSpec, SessionPlan};
+use crate::worker::adapter::{Capability, LaunchSpec, SessionPlan, adapter_for};
 use crate::workspace::NodeWorktree;
 use async_trait::async_trait;
 use camino::Utf8PathBuf;
@@ -199,8 +201,20 @@ pub async fn run_node(cx: &NodeCtx, mut spec: LaunchSpec, task: &TaskRequest) ->
         let dir = node_dir(cx, spec.node.id);
         spec.last_message_path = dir.join("last-message.txt");
 
+        // Without a role a worker inherits the operator's own CLAUDE.md and orchestrates.
+        let mut prompt_text = task.prompt.clone();
+        if spec.kind == NodeKind::Worker {
+            let role =
+                crate::worker::prompt::worker_role(provider, &cx.cfg, &repo_root(cx), &spec.cwd);
+            if adapter_for(provider).supports(Capability::SystemPromptFlag) {
+                spec.append_system_prompt = Some(role);
+            } else {
+                prompt_text = format!("{role}\n\n---\n\n{prompt_text}");
+            }
+        }
+
         let max_prompt = cx.cfg.limits.max_prompt_bytes.unwrap_or(usize::MAX);
-        let (prompt_path, prompt_sha256) = match write_prompt(&dir, &task.prompt, max_prompt) {
+        let (prompt_path, prompt_sha256) = match write_prompt(&dir, &prompt_text, max_prompt) {
             Ok(v) => v,
             Err(e) => {
                 return fail(logical, attempts, setup_failed(&e));
@@ -318,7 +332,14 @@ pub async fn run_node(cx: &NodeCtx, mut spec: LaunchSpec, task: &TaskRequest) ->
                 .finalize(&fwt, &task.title, spec.tier)
                 .await
                 .unwrap_or_default();
+            // Git is authoritative: a stream that reported no edit still has a patch behind it.
+            if record.files.is_empty()
+                && let Some(w) = &record.work
+            {
+                record.files = w.files.clone();
+            }
         }
+        crate::cmd::write_result(&cx.journal.paths, &attempt_result(&record, &out));
         emit_for(
             cx,
             record.id,
@@ -387,6 +408,46 @@ pub async fn run_node(cx: &NodeCtx, mut spec: LaunchSpec, task: &TaskRequest) ->
     out.logical = logical;
     out.attempts = attempts;
     out
+}
+
+/// `nodes/<attempt>/result.json`: the node's own copy of what it produced, per DESIGN 7.1.
+fn attempt_result(r: &NodeRecord, out: &RunOutcome) -> NodeResult {
+    NodeResult {
+        node: r.id,
+        title: r.title.clone(),
+        ok: out.failure.is_none(),
+        state: match &r.state {
+            NodeState::Succeeded => "succeeded",
+            NodeState::Cancelled { .. } => "cancelled",
+            _ => "failed",
+        },
+        tier: r.tier,
+        provider: r.provider,
+        account: r.account.clone(),
+        model: r.model.clone(),
+        attempts: r.attempt,
+        summary: r.summary.clone(),
+        files: r.files.clone(),
+        branch: r.work.as_ref().map(|w| w.branch.clone()),
+        patch: r.work.as_ref().map(|w| w.patch.clone()),
+        insertions: r.work.as_ref().map_or(0, |w| w.insertions),
+        deletions: r.work.as_ref().map_or(0, |w| w.deletions),
+        usage: r.usage,
+        cost: r.cost,
+        duration_ms: r.duration().map_or(0, |d| d.as_millis() as u64),
+        failure: out.failure.clone(),
+        permission_denials: out.permission_denials,
+    }
+}
+
+/// `<repo>/.swamp/runs/<run>` is the only shape `Paths` builds, so the repo is three up.
+fn repo_root(cx: &NodeCtx) -> Utf8PathBuf {
+    let dir = &cx.journal.paths.dir;
+    dir.parent()
+        .and_then(|p| p.parent())
+        .and_then(|p| p.parent())
+        .map(camino::Utf8Path::to_path_buf)
+        .unwrap_or_else(|| dir.clone())
 }
 
 fn settle(logical: NodeId, attempts: Vec<NodeRecord>, out: RunOutcome) -> NodeOutcome {

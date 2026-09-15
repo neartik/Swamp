@@ -136,6 +136,7 @@ fn work() -> WorkResultRef {
         insertions: 214,
         deletions: 37,
         empty: false,
+        files: Vec::new(),
     }
 }
 

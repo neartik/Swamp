@@ -25,20 +25,19 @@ account   = "main"
 tier      = "high"
 reserve_brain_slot = true          # keep this account out of the worker pool
 # Swamp always launches with `--permission-prompts none`: nobody is at the terminal to answer
-# a prompt. Under it, "acceptEdits" (and "plan", "manual", "dontAsk") auto-denies every Bash
-# call, so a worker cannot run the tests or the build it was sent to run and returns a
-# confident summary of work it never did; "auto" is the recommended mode here and for the
-# workers below. The trade-off is real: "auto" lets the agent run commands without asking,
-# the same trust you extend to a CLI agent in your own shell, and a worktree is a directory,
-# not a sandbox. deny_tools below still keeps the brain from editing files.
-permission_mode    = "auto"
+# a prompt. Measured against the real CLI: "auto" denies file writes ("the session currently
+# doesn't have approval enabled for file writes"), so a worker in that mode produces nothing;
+# "acceptEdits" writes files but denies Bash unless Bash is allowed by name. The pair that
+# works is "acceptEdits" plus "Bash" in allow_tools, here and for the workers below. The
+# trade-off is real: an allowed Bash runs commands without asking, the same trust you extend
+# to a CLI agent in your own shell, and a worktree is a directory, not a sandbox.
+# deny_tools below still keeps the brain from editing files.
+permission_mode    = "acceptEdits"
 include_partial_messages = true    # smooth chat streaming; workers keep this off
 # Every mcp__swamp__* tool is allowed automatically, from the registry: the brain answers no
 # permission prompt, so a missing name would be denied. These are the extras it also gets.
-allow_tools = [
-  "Read", "Grep", "Glob",
-  "Bash(git log:*)", "Bash(git diff:*)", "Bash(git status:*)",
-]
+# "Bash" unqualified: the brain runs git and the occasional test to verify a worker's claim.
+allow_tools = ["Read", "Grep", "Glob", "Bash"]
 deny_tools = ["Edit", "Write", "MultiEdit", "NotebookEdit"]
 # Swamp reads this file and passes its TEXT via --append-system-prompt.
 system_prompt_file = ".swamp/brain.md"
@@ -96,8 +95,19 @@ models  = { high = "opus", mid = "sonnet", low = "haiku" }
 tier_extra = { high = { effort = "high" }, mid = { effort = "medium" }, low = { effort = "low" } }
 
   [providers.anthropic.worker]
-  # "auto" so the worker can actually run the tests; see the note under [brain].
-  permission_mode = "auto"
+  # "acceptEdits" so edits land, plus Bash by name so the worker can run the tests it was
+  # sent to run. See the note under [brain]: "auto" denies the writes.
+  permission_mode = "acceptEdits"
+  # Rendered as one --allowed-tools / --disallowed-tools flag. Put tool names here, not raw
+  # flags in `args`.
+  allow_tools = ["Bash"]
+  # A worker does the work itself. Left alone it inherits your own CLAUDE.md, spawns a team of
+  # subagents and reports on their behalf, which is slower, more expensive and less honest.
+  # Swamp's built-in worker role prompt says so too; this makes it unavailable, not just
+  # discouraged.
+  deny_tools = ["Task", "Agent", "Workflow", "Team"]
+  # Optional: appended after Swamp's built-in worker role prompt.
+  # system_prompt_file = ".swamp/worker.md"
   args = []
   readonly_args = ["--permission-mode", "plan",
                    "--disallowed-tools", "Edit", "Write", "MultiEdit", "NotebookEdit"]
@@ -111,6 +121,9 @@ tier_extra = { high = { model_reasoning_effort = "high" },
 
   [providers.openai.worker]
   sandbox = "workspace-write"
+  # `codex exec` has no --append-system-prompt: the worker role, and this file if it is set,
+  # ride at the head of the prompt on stdin instead.
+  # system_prompt_file = ".swamp/worker.md"
   # `codex exec` has NO -a/--ask-for-approval; that is top-level only. Use the config override.
   args = ["-c", "approval_policy=\"never\""]
   readonly_args = ["-s", "read-only"]

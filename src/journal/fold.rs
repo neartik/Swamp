@@ -205,6 +205,7 @@ impl RunView {
                         insertions: *insertions,
                         deletions: *deletions,
                         empty: *files == 0,
+                        files: Vec::new(),
                     });
                 }
             }

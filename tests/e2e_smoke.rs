@@ -2,6 +2,7 @@
 
 mod support;
 
+use predicates::prelude::*;
 use support::{Harness, MID, Scenario};
 use swamp::model::core::NodeState;
 
@@ -72,6 +73,85 @@ fn a_no_brain_run_journals_one_node_and_captures_its_patch() {
         .stdout(predicates::str::contains(TASK));
 }
 
+/// A worker inherits the operator's own CLAUDE.md unless Swamp says otherwise, and then it
+/// orchestrates instead of working: it spawns subagents, asks questions nobody can answer and
+/// returns boilerplate. The role prompt and the tool policy both have to reach the argv.
+#[test]
+fn a_worker_is_launched_with_its_role_and_the_configured_tool_policy() {
+    let h = Harness::new()
+        .scenario("main", Scenario::claude().edits("fixed.txt", "patched\n"))
+        .with_toml(
+            r#"
+[providers.anthropic.worker]
+permission_mode = "acceptEdits"
+allow_tools = ["Bash"]
+deny_tools = ["Task", "Agent"]
+"#,
+        );
+
+    h.swamp(&["run", "--no-brain", TASK]).assert().success();
+
+    let call = h.invocations("main").pop().expect("one invocation");
+    assert_eq!(call.arg("--permission-mode"), Some("acceptEdits"));
+    assert_eq!(call.arg("--permission-prompts"), Some("none"));
+    assert_eq!(
+        call.arg("--allowed-tools"),
+        Some("Bash"),
+        "acceptEdits denies Bash unless it is allowed by name: {:?}",
+        call.argv
+    );
+    let denied = call.argv.iter().position(|a| a == "--disallowed-tools");
+    let denied = denied.expect("the deny list reaches the argv");
+    assert_eq!(&call.argv[denied + 1..denied + 3], ["Task", "Agent"]);
+
+    let role = call
+        .arg("--append-system-prompt")
+        .expect("the worker role prompt");
+    assert!(role.contains("Swamp worker"), "{role}");
+    assert!(role.contains(&call.cwd), "the role names the worktree: {role}");
+    assert!(role.contains("Do not spawn subagents"), "{role}");
+    assert!(role.contains("Never ask a question"), "{role}");
+
+    // The task itself stays on stdin, byte for byte: the role rides on the flag.
+    let run = h.last_run();
+    let node = h.last_view().nodes.values().next().expect("the node").id;
+    assert_eq!(
+        std::fs::read_to_string(run.prompt(node)).expect("prompt.md"),
+        TASK
+    );
+}
+
+/// DESIGN 7.1 lists `nodes/<short>/result.json`, and the brain's `swamp_result` reads the same
+/// NodeResult. Neither was written, and the file list was empty for a node with a patch.
+#[test]
+fn a_finished_node_writes_result_json_with_the_files_git_saw() {
+    // The recorded stream announces no edit at all, so files can only come from the diff.
+    let h = Harness::new().scenario("main", Scenario::claude().edits("fixed.txt", "patched\n"));
+
+    h.swamp(&["run", "--no-brain", TASK]).assert().success();
+
+    let run = h.last_run();
+    let node = h.last_view().nodes.values().next().expect("the node").id;
+    let body = std::fs::read_to_string(run.result(node)).expect("nodes/<short>/result.json");
+    let result: serde_json::Value = serde_json::from_str(&body).expect("valid json");
+
+    assert_eq!(result["state"], "succeeded");
+    assert_eq!(result["ok"], true);
+    assert_eq!(result["node"], node.0.to_string());
+    let files = result["files"].as_array().expect("a file list");
+    assert_eq!(files.len(), 1, "{body}");
+    assert_eq!(files[0]["path"], "fixed.txt");
+    assert_eq!(files[0]["source"], "git", "git is authoritative: {body}");
+    assert_eq!(result["insertions"], 1);
+
+    // The same list reaches the tree the brain and the user read.
+    let node = h.last_view().nodes.remove(&node).expect("the node");
+    assert_eq!(
+        node.files.iter().map(|f| f.path.as_str()).collect::<Vec<_>>(),
+        vec!["fixed.txt"]
+    );
+}
+
 /// WP8 acceptance 2: The same path on codex, including the banner line the CLI writes before its JSON.
 #[test]
 fn a_codex_run_succeeds_and_keeps_the_banner_line_out_of_the_stream() {
@@ -103,6 +183,9 @@ fn a_codex_run_succeeds_and_keeps_the_banner_line_out_of_the_stream() {
     let call = h.invocations("codex").pop().expect("one invocation");
     assert_eq!(call.argv.get(1).map(String::as_str), Some("exec"));
     assert_eq!(call.arg("-m"), Some(MID));
+    // `codex exec` has no --append-system-prompt, so the worker role rides in front of the task.
+    assert!(call.stdin.contains("Swamp worker"), "{}", call.stdin);
+    assert!(call.stdin.trim_end().ends_with(TASK), "{}", call.stdin);
 }
 
 /// WP8 acceptance 5: Three tasks at once: three worktrees, three branches, three patches, one clean checkout.
@@ -292,6 +375,43 @@ fn a_worker_that_dies_before_its_first_line_fails_fast_with_its_stderr() {
     let node = view.nodes.values().next().expect("one node");
     assert!(matches!(node.state, NodeState::Failed { .. }));
     assert_eq!(view.nodes.len(), 1, "an argv error is never retried");
+}
+
+/// `--stat` printed git's summary line with the clauses git omits, and a bare stat line for a
+/// node that changed nothing at all.
+#[test]
+fn diff_stat_matches_git_and_says_so_when_there_is_no_patch() {
+    // Two files, insertions only: git prints no "0 deletions(-)" clause and neither do we.
+    let h = Harness::new().scenario(
+        "main",
+        Scenario::claude()
+            .edits("one.txt", "added\n")
+            .edits("two.txt", "added\n"),
+    );
+    h.swamp(&["run", "--no-brain", TASK]).assert().success();
+    h.swamp(&["diff", "last", "--stat"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("2 files changed, 2 insertions(+)\n"))
+        .stdout(predicates::str::contains("deletion").not());
+
+    // A worker that changed nothing has no patch to stat.
+    let h = h.scenario("main", Scenario::claude());
+    h.swamp(&["run", "--no-brain", TASK]).assert().success();
+    let node = h
+        .last_view()
+        .nodes
+        .values()
+        .next()
+        .expect("the node")
+        .id
+        .short();
+    h.swamp(&["diff", "last", "--stat"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(format!(
+            "no patch recorded for {node}"
+        )));
 }
 
 /// `swamp diff <id>` and `swamp adopt <id>` used to see only the run `last` points at, so a

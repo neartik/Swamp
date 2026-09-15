@@ -35,10 +35,18 @@ fn the_brain_dispatches_two_workers_and_they_hang_off_its_node() {
         .filter(|n| n.kind == NodeKind::Worker)
         .collect();
     assert_eq!(workers.len(), 2, "two worker nodes");
+    let run = h.last_run();
     for w in &workers {
         assert_eq!(w.parent, Some(brain.id), "worker {} is not a child", w.id);
         assert_eq!(w.state, NodeState::Succeeded);
         assert!(w.work.as_ref().is_some_and(|work| !work.empty));
+        // What swamp_result hands back is this file, and its file list comes from the diff.
+        let body = std::fs::read_to_string(run.result(w.id)).expect("result.json");
+        let result: serde_json::Value = serde_json::from_str(&body).expect("valid json");
+        assert_eq!(result["state"], "succeeded", "{body}");
+        let files = result["files"].as_array().expect("a file list");
+        assert_eq!(files.len(), 1, "a node with a patch lists its files: {body}");
+        assert_eq!(files[0]["source"], "git");
     }
     let titles: std::collections::BTreeSet<&str> =
         workers.iter().map(|w| w.title.as_str()).collect();

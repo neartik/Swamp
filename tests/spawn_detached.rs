@@ -365,9 +365,11 @@ async fn a_worker_that_never_exits_is_timed_out_and_its_group_is_gone() {
 /// running forever, pinning the worktree the SIGKILL exists to free.
 #[tokio::test]
 async fn a_grandchild_that_ignores_sigterm_still_gets_sigkilled() {
+    // The parent writes the pid with $! before it writes anything else, so the file is on
+    // disk before the stream line is: under load the escalation used to win that race.
     let n = node(&format!(
-        "#!/bin/sh\nsh -c 'trap \"\" TERM; echo $$ > grandchild.pid; while true; do sleep 1; \
-         done' &\nprintf '%s\\n' '{}'\nexec sleep 300\n",
+        "#!/bin/sh\nsh -c 'trap \"\" TERM; while true; do sleep 1; done' &\n\
+         echo $! > grandchild.pid\nprintf '%s\\n' '{}'\nexec sleep 300\n",
         text_line("working")
     ));
     let s = spec(&n);
@@ -383,7 +385,7 @@ async fn a_grandchild_that_ignores_sigterm_still_gets_sigkilled() {
         sink: &mut sink,
         journal: None,
         resume: None,
-        timeout: Duration::from_secs(1),
+        timeout: Duration::from_secs(3),
         grace: Duration::from_millis(600),
         max_line: 8 * 1024 * 1024,
         cancel: CancellationToken::new(),
@@ -391,10 +393,10 @@ async fn a_grandchild_that_ignores_sigterm_still_gets_sigkilled() {
     .await
     .expect("execute");
 
-    assert_eq!(outcome.failure, Some(Failure::Timeout { after_s: 1 }));
+    assert_eq!(outcome.failure, Some(Failure::Timeout { after_s: 3 }));
     assert!(
-        wait_for(|| file_len(&gpid_file) > 0, Duration::from_secs(5)),
-        "the grandchild never started"
+        file_len(&gpid_file) > 0,
+        "the grandchild pid was written before the escalation"
     );
     let gpid: i32 = std::fs::read_to_string(&gpid_file)
         .expect("the grandchild wrote its pid")

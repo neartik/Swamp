@@ -2,7 +2,7 @@ pub mod claude;
 pub mod codex;
 pub mod prompt;
 
-pub use prompt::system_prompt;
+pub use prompt::{BrainMode, system_prompt};
 
 use crate::config::Config;
 use crate::dispatch::Lease;
@@ -64,6 +64,7 @@ pub fn build(
     socket: &Utf8Path,
     journal: JournalHandle,
     resume: Option<SessionHandle>,
+    mode: BrainMode,
 ) -> anyhow::Result<Box<dyn Brain>> {
     let transport = cfg.brain.transport.as_deref().unwrap_or(CLI_TRANSPORT);
     anyhow::ensure!(
@@ -111,7 +112,7 @@ pub fn build(
         permission_mode: cfg.brain.permission_mode.clone().unwrap_or_default(),
         sandbox: String::new(),
         budget_usd: cfg.node_budget_usd(tier),
-        append_system_prompt: Some(append_system_prompt(cfg, &cwd)),
+        append_system_prompt: Some(append_system_prompt(cfg, &cwd, mode)),
         allow_tools: cfg.brain.allow_tools.clone(),
         deny_tools: cfg.brain.deny_tools.clone(),
         mcp: Some(McpAttach {
@@ -472,8 +473,8 @@ fn repo_root(paths: &RunPaths) -> Utf8PathBuf {
 
 /// Swamp's own contract, plus the operator's brain file if there is one. DESIGN 10: Swamp
 /// reads the file and passes its text, because the `-file` flag spellings are not documented.
-fn append_system_prompt(cfg: &Config, repo: &Utf8Path) -> String {
-    let mut text = system_prompt(cfg);
+fn append_system_prompt(cfg: &Config, repo: &Utf8Path, mode: BrainMode) -> String {
+    let mut text = system_prompt(cfg, mode);
     let Some(file) = &cfg.brain.system_prompt_file else {
         return text;
     };

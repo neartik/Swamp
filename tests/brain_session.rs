@@ -118,6 +118,7 @@ impl Fixture {
             &self.paths.socket(),
             self.journal.clone(),
             None,
+            swamp::brain::BrainMode::Interactive,
         )
         .expect("a brain")
     }
@@ -374,7 +375,7 @@ async fn the_resume_per_turn_brain_resumes_the_thread_it_was_given() {
 #[test]
 fn the_system_prompt_states_the_contract() {
     let cfg = config(Provider::Anthropic, &Utf8PathBuf::from("/bin/true"));
-    let prompt = system_prompt(&cfg);
+    let prompt = system_prompt(&cfg, swamp::brain::BrainMode::Interactive);
 
     for tool in [
         "swamp_dispatch",
@@ -397,4 +398,29 @@ fn the_system_prompt_states_the_contract() {
     assert!(!prompt.contains('\u{2014}'), "no em dashes");
 
     insta::assert_snapshot!(prompt);
+}
+
+/// `swamp run` has no second turn: a brain that ends with "say the word and I'll merge" leaves
+/// the user with an offer nobody can accept.
+#[test]
+fn one_shot_mode_asks_for_a_decision_and_a_command() {
+    let cfg = config(Provider::Anthropic, &Utf8PathBuf::from("/bin/true"));
+    let one_shot = system_prompt(&cfg, swamp::brain::BrainMode::OneShot);
+    assert!(one_shot.contains("## One shot mode"), "{one_shot}");
+    assert!(one_shot.contains("There is no follow-up turn"), "{one_shot}");
+    assert!(one_shot.contains("swamp adopt <node>"), "{one_shot}");
+    assert!(!one_shot.contains('\u{2014}'), "no em dashes");
+
+    let interactive = system_prompt(&cfg, swamp::brain::BrainMode::Interactive);
+    assert!(
+        !interactive.contains("One shot mode"),
+        "swamp chat keeps its follow-up turn"
+    );
+    assert_eq!(
+        interactive,
+        one_shot
+            .strip_suffix(&one_shot[one_shot.find("\n\n## One shot mode").expect("the section")..])
+            .expect("the one shot text is appended, not woven in"),
+        "the interactive prompt is unchanged"
+    );
 }

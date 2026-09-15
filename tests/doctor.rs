@@ -306,9 +306,11 @@ async fn reap_removes_stale_sockets_and_pidfiles() {
 }
 
 /// Swamp launches workers with `--permission-prompts none`: under it these modes auto-deny
-/// every Bash call, so the worker cannot run the tests it was sent to run.
+/// every Bash call the configuration did not allow by name, so the worker cannot run the
+/// tests it was sent to run. Allowing Bash is the fix, not switching to `auto`, which denies
+/// the file writes instead.
 #[tokio::test]
-async fn a_worker_permission_mode_that_denies_bash_is_one_warning() {
+async fn a_permission_mode_that_denies_bash_warns_until_bash_is_allowed() {
     let f = Fixture::new();
     let mut cfg = healthy(&f);
     let anthropic = swamp::model::core::Provider::Anthropic;
@@ -327,21 +329,66 @@ async fn a_worker_permission_mode_that_denies_bash_is_one_warning() {
         assert_eq!(warned.len(), 1, "{mode} was not flagged");
         assert!(warned[0].detail.contains("Bash"), "{}", warned[0].detail);
         assert!(
-            warned[0].detail.contains("\"auto\""),
+            warned[0].detail.contains("allow_tools"),
             "the warning names the fix: {}",
             warned[0].detail
         );
     }
 
-    cfg.providers
+    // acceptEdits plus an allowed Bash is the recommendation: writes land and tests run.
+    let worker = &mut cfg
+        .providers
         .get_mut(&anthropic)
         .expect("the anthropic provider")
-        .worker
-        .permission_mode = Some("auto".to_owned());
+        .worker;
+    worker.permission_mode = Some("acceptEdits".to_owned());
+    worker.allow_tools = vec!["Bash".to_owned()];
     let out = checks(&cfg, &f.paths, false, false).await;
     assert!(
         !out.iter()
             .any(|c| c.name == "providers/anthropic/permission_mode"),
-        "auto is the recommended mode and must not warn"
+        "acceptEdits with Bash allowed must not warn"
+    );
+
+    // The same allowance spelled as a raw flag in worker.args counts too.
+    let worker = &mut cfg
+        .providers
+        .get_mut(&anthropic)
+        .expect("the anthropic provider")
+        .worker;
+    worker.allow_tools.clear();
+    worker.args = vec!["--allowedTools".to_owned(), "Bash".to_owned()];
+    let out = checks(&cfg, &f.paths, false, false).await;
+    assert!(
+        !out.iter()
+            .any(|c| c.name == "providers/anthropic/permission_mode"),
+        "--allowedTools Bash in worker.args must not warn"
+    );
+}
+
+/// The brain runs the same way, and needs Bash for git and for the tests it verifies with.
+#[tokio::test]
+async fn the_brain_is_checked_the_same_way_as_a_worker() {
+    let f = Fixture::new();
+    let mut cfg = healthy(&f);
+    cfg.brain.permission_mode = Some("acceptEdits".to_owned());
+    cfg.brain.allow_tools.clear();
+    let out = checks(&cfg, &f.paths, false, false).await;
+    let warned: Vec<&Check> = warnings(&out)
+        .into_iter()
+        .filter(|c| c.name == "brain/permission_mode")
+        .collect();
+    assert_eq!(warned.len(), 1, "the brain was not flagged");
+    assert!(
+        warned[0].detail.contains("brain.allow_tools"),
+        "{}",
+        warned[0].detail
+    );
+
+    cfg.brain.allow_tools = vec!["Bash".to_owned()];
+    let out = checks(&cfg, &f.paths, false, false).await;
+    assert!(
+        !out.iter().any(|c| c.name == "brain/permission_mode"),
+        "a brain that may run Bash must not warn"
     );
 }

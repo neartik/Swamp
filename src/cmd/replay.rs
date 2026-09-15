@@ -105,6 +105,7 @@ fn from_result(ctx: &Ctx, paths: &RunPaths, r: &serde_json::Value) -> Option<Nod
             insertions: count("insertions"),
             deletions: count("deletions"),
             empty: count("insertions") + count("deletions") == 0,
+            files: Vec::new(),
         });
     Some(NodeRecord {
         id,

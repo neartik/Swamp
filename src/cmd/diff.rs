@@ -29,6 +29,10 @@ pub async fn run(ctx: &Ctx, args: &DiffArgs) -> anyhow::Result<i32> {
         } else {
             node.files.iter().map(cell).collect()
         };
+        if files.is_empty() {
+            ctx.out(&format!("no patch recorded for {}\n", node.id.short()));
+            return Ok(0);
+        }
         ctx.out(&render_stat(&files));
         return Ok(0);
     }
@@ -68,14 +72,16 @@ fn render_stat(files: &[(String, u32, u32)]) -> String {
             "-".repeat(minus as usize),
         ));
     }
-    out.push_str(&format!(
-        " {} changed, {} insertion{}(+), {} deletion{}(-)\n",
-        plural(files.len() as u32, "file"),
-        ins,
-        if ins == 1 { "" } else { "s" },
-        del,
-        if del == 1 { "" } else { "s" },
-    ));
+    // git omits a zero clause entirely, and so does this.
+    let mut summary = format!(" {} changed", plural(files.len() as u32, "file"));
+    if ins > 0 {
+        summary.push_str(&format!(", {}(+)", plural(ins, "insertion")));
+    }
+    if del > 0 {
+        summary.push_str(&format!(", {}(-)", plural(del, "deletion")));
+    }
+    out.push_str(&summary);
+    out.push('\n');
     out
 }
 
@@ -130,5 +136,27 @@ mod tests {
             text.contains("1 file changed, 2 insertions(+), 1 deletion(-)"),
             "{text}"
         );
+    }
+
+    /// git prints no `0 deletions(-)` clause, and neither does this.
+    #[test]
+    fn a_zero_clause_is_omitted_the_way_git_omits_it() {
+        let only_added = render_stat(&[("a.rs".to_owned(), 28, 0), ("b.rs".to_owned(), 1, 0)]);
+        assert!(
+            only_added.contains("2 files changed, 29 insertions(+)\n"),
+            "{only_added}"
+        );
+        assert!(!only_added.contains("deletion"), "{only_added}");
+
+        let only_removed = render_stat(&[("a.rs".to_owned(), 0, 1)]);
+        assert!(
+            only_removed.contains("1 file changed, 1 deletion(-)\n"),
+            "{only_removed}"
+        );
+        assert!(!only_removed.contains("insertion"), "{only_removed}");
+
+        // A binary-only change counts neither, exactly like `git diff --stat`.
+        let binary = render_stat(&[("logo.png".to_owned(), 0, 0)]);
+        assert!(binary.contains("1 file changed\n"), "{binary}");
     }
 }

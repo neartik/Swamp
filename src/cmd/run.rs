@@ -181,6 +181,7 @@ async fn with_brain(
         &socket,
         session.journal.clone(),
         None,
+        crate::brain::BrainMode::OneShot,
     )?;
     brain.start().await?;
     brain.send(&task).await?;
@@ -366,8 +367,8 @@ fn launch_spec(
         sandbox: worker.sandbox.clone().unwrap_or_default(),
         budget_usd: cfg.node_budget_usd(tier),
         append_system_prompt: None,
-        allow_tools: Vec::new(),
-        deny_tools: Vec::new(),
+        allow_tools: worker.allow_tools.clone(),
+        deny_tools: worker.deny_tools.clone(),
         mcp: None,
         last_message_path: paths.dir.join("last-message.txt"),
         extra_args: worker.args_for(isolation),
@@ -400,7 +401,11 @@ fn node_result(
         model: last.and_then(|r| r.model.clone()),
         attempts: outcome.attempts.len() as u32,
         summary: run.and_then(|o| o.summary.clone()),
-        files: run.map(|o| o.files.clone()).unwrap_or_default(),
+        files: match run.map(|o| o.files.clone()).unwrap_or_default() {
+            // Git is authoritative when the event stream announced no edit at all.
+            files if files.is_empty() => last.map(|r| r.files.clone()).unwrap_or_default(),
+            files => files,
+        },
         branch: work.as_ref().map(|w| w.branch.clone()),
         patch: work.as_ref().map(|w| w.patch.clone()),
         insertions: work.as_ref().map_or(0, |w| w.insertions),

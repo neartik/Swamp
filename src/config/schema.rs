@@ -8,7 +8,9 @@ use std::time::Duration;
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Schema {
-    #[serde(default)]
+    /// Skipped when zero: a layer that never mentioned `version` must not clobber the one
+    /// that did when the layers are merged through TOML.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
     pub version: u32,
     #[serde(default)]
     pub limits: Limits,
@@ -150,6 +152,13 @@ pub struct ProviderCfg {
 pub struct WorkerCfg {
     pub permission_mode: Option<String>,
     pub sandbox: Option<String>,
+    /// Rendered as one `--allowed-tools` / `--disallowed-tools` flag, like the brain's.
+    #[serde(default)]
+    pub allow_tools: Vec<String>,
+    #[serde(default)]
+    pub deny_tools: Vec<String>,
+    /// Appended after Swamp's built-in worker role prompt.
+    pub system_prompt_file: Option<Utf8PathBuf>,
     #[serde(default)]
     pub args: Vec<String>,
     #[serde(default)]
@@ -207,12 +216,20 @@ pub struct FailureCfg {
 #[derive(Debug, Default, Clone, Copy, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PricingCfg {
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_zero_f64")]
     pub input: f64,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_zero_f64")]
     pub cached_input: f64,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_zero_f64")]
     pub output: f64,
+}
+
+fn is_zero_u32(n: &u32) -> bool {
+    *n == 0
+}
+
+fn is_zero_f64(n: &f64) -> bool {
+    *n == 0.0
 }
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]

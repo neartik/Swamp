@@ -214,6 +214,23 @@ fn layers_stack_repo_over_user_and_env_over_both() {
     assert_eq!(explicit_wins.sources.len(), 3);
 }
 
+/// `config show --effective` reported version = 0 for a file declaring version = 1: the empty
+/// env layer serialized a default Schema and its zero clobbered the value below it.
+#[test]
+fn a_layer_only_contributes_the_keys_it_sets() {
+    let sb = Sandbox::new();
+    sb.user_config("version = 1\n\n[limits]\nmax_parallel = 7\n");
+
+    let cfg = sb.load(None, None).expect("the user config loads");
+    assert_eq!(cfg.version, 1, "the declared version survives the merge");
+
+    let with_env = sb
+        .load_with(&[("SWAMP_LIMITS__MAX_PARALLEL", "9")], None, None)
+        .expect("the env layer loads");
+    assert_eq!(with_env.version, 1, "an env override sets one key, not all");
+    assert_eq!(with_env.limits.max_parallel, Some(9));
+}
+
 #[test]
 fn unrelated_swamp_env_vars_are_not_config() {
     let sb = Sandbox::new();
@@ -517,6 +534,9 @@ fn readonly_args_are_appended_only_for_read_only_isolation() {
     let worker = swamp::config::WorkerCfg {
         permission_mode: Some("acceptEdits".into()),
         sandbox: None,
+        allow_tools: Vec::new(),
+        deny_tools: Vec::new(),
+        system_prompt_file: None,
         args: vec!["--verbose".into()],
         readonly_args: vec!["--permission-mode".into(), "plan".into()],
     };

@@ -95,6 +95,8 @@ pub enum Capability {
     ReportedCost,
     QuotaTelemetry,
     ToolPolicyFlags,
+    /// A flag that appends to the system prompt. Without it the role text rides on stdin.
+    SystemPromptFlag,
 }
 
 /// Deliberately sync and object-safe: an adapter is a pure argv builder plus a line parser

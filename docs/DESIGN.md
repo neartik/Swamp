@@ -119,6 +119,12 @@ scheme and a listening port. Not worth it for v1.
   `codex exec resume <thread_id> --json` (turn 1 is plain `codex exec`). Continuity comes from
   Codex's own thread persistence. Slower per turn, functionally equivalent.
 
+`swamp run` drives the same brain for exactly one turn, and is told so: a one-shot paragraph in
+the system prompt (`BrainMode::OneShot`) requires the last turn to name the nodes worth landing
+and the exact `swamp adopt <node>` command, or to say that nothing is. Without it the brain ends
+a non-interactive run with an offer ("say the word and I'll merge") that nobody can accept.
+`swamp chat` keeps the interactive text unchanged.
+
 `BrainTransport { Persistent, ResumePerTurn }` absorbs the asymmetry as data rather than as two
 hand-written classes. `codex app-server` / `exec-server` are experimental long-lived transports and
 are the stated upgrade path for a third variant.
@@ -215,6 +221,7 @@ on `model/` and `config/` only, never on each other.
       claude.rs         ClaudeAdapter: argv + wire types + parse + classify
       codex.rs          CodexAdapter: argv + wire types + parse + classify
       classify.rs       shared layered classifier, pattern sets, Detector bookkeeping
+      prompt.rs         the built-in worker role, plus worker.system_prompt_file
 
     dispatch/
       mod.rs            Dispatcher: owns pool + semaphores; dispatch_batch/dispatch_one
@@ -819,7 +826,7 @@ pub struct LaunchSpec {
     pub isolation: IsolationMode,
     pub session: SessionPlan,
     pub kind: NodeKind,                   // Worker or Brain; changes the argv
-    pub permission_mode: String,          // from config, e.g. "auto"
+    pub permission_mode: String,          // from config, e.g. "acceptEdits"
     pub sandbox: String,                  // codex, e.g. "workspace-write"
     pub budget_usd: Option<f64>,
     pub append_system_prompt: Option<String>,
@@ -900,25 +907,34 @@ Worker:
   --verbose                        # required alongside stream-json in print mode
   --model <models[tier]>           # from config; never hardcoded
   --session-id <uuid>              # pre-generated, journaled BEFORE spawn -> resume always possible
-  [--permission-mode auto]         # from config, and ONLY when it sets one: the flag has a
+  [--permission-mode acceptEdits]  # from config, and ONLY when it sets one: the flag has a
                                    # closed choice list, so an empty argument is an argv error
                                    # that kills the CLI before it emits one stream line.
-                                   # "auto" is the recommendation: under --permission-prompts
-                                   # none, acceptEdits/plan/manual/dontAsk deny every Bash call,
-                                   # so the worker cannot run tests.
+                                   # Measured under --permission-prompts none: "auto" DENIES
+                                   # file writes, so the worker produces no diff at all;
+                                   # acceptEdits/plan/manual/dontAsk write files but deny every
+                                   # Bash call that is not allowed by name. acceptEdits plus
+                                   # Bash in worker.allow_tools is the recommendation.
                                    # Never bypassPermissions unless opted in.
   --permission-prompts none        # nobody is at the keyboard; prompts are denied, not hung
   --strict-mcp-config              # with no --mcp-config: workers get exactly zero MCP servers
   [--max-budget-usd <n>]           # when a per-node budget is set
-  [--append-system-prompt <text>]  # Swamp reads the file and passes the TEXT
-  [--disallowed-tools Edit Write MultiEdit NotebookEdit]   # IsolationMode::ReadOnly
+  --append-system-prompt <text>    # the worker role (worker/prompt.rs) plus, if set,
+                                   # providers.<p>.worker.system_prompt_file, read as TEXT
+  [--allowed-tools ...providers.<p>.worker.allow_tools]
+  [--disallowed-tools Edit Write MultiEdit NotebookEdit   # IsolationMode::ReadOnly
+                      ...providers.<p>.worker.deny_tools]
   [--resume <session-id>]          # same-account retry, keeps the cache warm
   [--effort <level>]               # optional per-tier knob from providers.*.tier_extra
   [...providers.anthropic.worker.args]
 ```
 
 No prompt argument. `--input-format` defaults to `text` and `-p` reads stdin, which is our
-prompt file. cwd is the worktree. Env is `account.env` merged over the inherited env (typically
+prompt file. The worker role prompt is not optional: without it a worker inherits the operator's
+own `CLAUDE.md`, and a worker told by it to orchestrate will spawn subagents, ask questions
+nobody can answer, and return boilerplate instead of a report. `worker.allow_tools` and
+`worker.deny_tools` are merged into one flag each exactly as the brain's lists are, so a raw
+`--allowedTools` in `worker.args` is never the right way to spell them. cwd is the worktree. Env is `account.env` merged over the inherited env (typically
 `CLAUDE_CONFIG_DIR`); Swamp never reads or writes a credential file.
 
 Brain adds, and removes `--strict-mcp-config`-without-config:
@@ -968,6 +984,11 @@ Worker:
 **`codex exec` has no `-a/--ask-for-approval`.** That flag exists only on the top-level `codex`
 command. Approval policy on `exec` must go through `-c approval_policy="never"`. Using `-a` here
 makes every OpenAI worker die at argv parsing.
+
+`codex exec` has no `--append-system-prompt`, so the worker role rides at the head of the
+prompt file instead, ahead of the task and separated from it by a rule. `Capability::SystemPromptFlag`
+is what the attempt loop asks, so a provider that grows the flag later moves without a code change
+elsewhere.
 
 Resume: `<exec> exec resume <thread_id> --json ... -`.
 
@@ -1269,7 +1290,13 @@ Git is the ground truth for "files touched", not the event stream. After the pro
 to `swamp/<run_short>/<node_short>` when `commit_on_success`, and writes `patches/<node>.patch`.
 This makes the result identical across providers and correct even when a worker edits files through
 a shell heredoc. Event-stream `FileChanged` entries are kept as a live-progress signal and are
-replaced at finalize by the git-sourced list.
+replaced at finalize by the git-sourced list, in the journal AND in the `NodeResult` the brain
+reads: a worker that announced no edit at all still has a patch, and `swamp_result` must not
+report an empty file list for it.
+
+The attempt loop writes that `NodeResult` to `nodes/<attempt>/result.json` as the node finishes,
+so the node directory is self-describing even if the journal is lost or the supervisor dies
+between the finish and the next fold.
 
 ---
 
@@ -1936,8 +1963,10 @@ config
   WARN [workspace] link is empty but ./target is 3.1 GiB
          fresh worktrees will rebuild from scratch; consider link = ["target"]
   WARN providers.anthropic.worker.permission_mode = "acceptEdits"
-         denies every Bash call under --permission-prompts none: workers cannot run
-         tests or builds. permission_mode = "auto" is the recommended setting.
+         denies every Bash call under --permission-prompts none and Bash is not
+         allowed, so workers cannot run tests, a build or git. Add "Bash" to
+         providers.anthropic.worker.allow_tools. ("auto" is not the fix: it denies
+         the file writes instead.) The same check covers [brain].
 
 3 warnings, 0 errors.
 ```
@@ -1989,20 +2018,22 @@ account   = "main"
 tier      = "high"
 reserve_brain_slot = true          # keep this account out of the worker pool
 # Swamp always launches with `--permission-prompts none`: nobody is at the terminal to answer
-# a prompt. Under it, "acceptEdits" (and "plan", "manual", "dontAsk") auto-denies every Bash
-# call, so a worker cannot run the tests or the build it was sent to run and returns a
-# confident summary of work it never did; "auto" is the recommended mode here and for the
-# workers below. The trade-off is real: "auto" lets the agent run commands without asking,
-# the same trust you extend to a CLI agent in your own shell, and a worktree is a directory,
-# not a sandbox. deny_tools below still keeps the brain from editing files.
-permission_mode    = "auto"
+# a prompt. Measured against the real CLI, the two halves are gated separately: "auto" denies
+# file writes ("the session currently doesn't have approval enabled for file writes"), so the
+# node produces no diff at all, while "acceptEdits" (and "plan", "manual", "dontAsk") writes
+# files but denies every Bash call that is not allowed by name. "acceptEdits" plus "Bash" in
+# allow_tools is the recommendation here and for the workers below. The trade-off is real: an
+# allowed Bash runs commands without asking, the same trust you extend to a CLI agent in your
+# own shell, and a worktree is a directory, not a sandbox. deny_tools below still keeps the
+# brain from editing files.
+permission_mode    = "acceptEdits"
 include_partial_messages = true    # smooth chat streaming; workers keep this off
 # The brain plans and reads; workers write. Keeps the brain from corrupting parallel worktrees.
+# Bash is unqualified so the brain can run git and verify a worker's claim with the test suite.
 allow_tools = [
   "mcp__swamp__swamp_dispatch", "mcp__swamp__swamp_await", "mcp__swamp__swamp_status",
   "mcp__swamp__swamp_result", "mcp__swamp__swamp_worker_diff", "mcp__swamp__swamp_note",
-  "Read", "Grep", "Glob",
-  "Bash(git log:*)", "Bash(git diff:*)", "Bash(git status:*)",
+  "Read", "Grep", "Glob", "Bash",
 ]
 deny_tools = ["Edit", "Write", "MultiEdit", "NotebookEdit"]
 # Swamp reads this file and passes its TEXT via --append-system-prompt.
@@ -2061,8 +2092,17 @@ models  = { high = "opus", mid = "sonnet", low = "haiku" }
 tier_extra = { high = { effort = "high" }, mid = { effort = "medium" }, low = { effort = "low" } }
 
   [providers.anthropic.worker]
-  # "auto" so the worker can actually run the tests; see the note under [brain].
-  permission_mode = "auto"
+  # "acceptEdits" so the edits land, plus Bash by name so the worker can run the tests it was
+  # sent to run. See the note under [brain]: "auto" denies the writes.
+  permission_mode = "acceptEdits"
+  # Tool NAMES, merged into the single --allowed-tools / --disallowed-tools flag, the way the
+  # brain's lists are. A raw flag in `args` would overwrite the other half instead.
+  allow_tools = ["Bash"]
+  # Behaviour, not safety: a worker that can reach the delegation tools and inherits a global
+  # CLAUDE.md telling it to orchestrate will spawn a team and report on its behalf.
+  deny_tools = ["Task", "Agent", "Workflow", "Team"]
+  # Optional, appended after Swamp's built-in worker role prompt.
+  # system_prompt_file = ".swamp/worker.md"
   args = []
   readonly_args = ["--permission-mode", "plan",
                    "--disallowed-tools", "Edit", "Write", "MultiEdit", "NotebookEdit"]

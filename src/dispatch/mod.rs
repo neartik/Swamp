@@ -355,8 +355,8 @@ impl Dispatcher {
             sandbox: worker.sandbox.clone().unwrap_or_default(),
             budget_usd: self.cfg.node_budget_usd(tier),
             append_system_prompt: None,
-            allow_tools: Vec::new(),
-            deny_tools: Vec::new(),
+            allow_tools: worker.allow_tools.clone(),
+            deny_tools: worker.deny_tools.clone(),
             mcp: None,
             last_message_path: self.journal.paths.dir.join("last-message.txt"),
             extra_args: worker.args_for(isolation),
@@ -451,6 +451,12 @@ fn from_outcome(
         out.cost = o.cost;
         out.files = o.files.clone();
         out.permission_denials = o.permission_denials;
+    }
+    // A worker that never announced an edit still left a patch; git is what the brain gets.
+    if out.files.is_empty()
+        && let Some(r) = last
+    {
+        out.files = r.files.clone();
     }
     out.duration_ms = last
         .and_then(|r| r.duration())

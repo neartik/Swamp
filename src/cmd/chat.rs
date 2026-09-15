@@ -47,6 +47,7 @@ pub async fn run(ctx: &Ctx, args: &ChatArgs) -> anyhow::Result<i32> {
         &socket,
         session.journal.clone(),
         handle,
+        crate::brain::BrainMode::Interactive,
     )?;
 
     let code = crate::ui::chat::repl(brain, dispatcher, ctx).await?;

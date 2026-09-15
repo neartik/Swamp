@@ -78,6 +78,9 @@ pub struct WorkResultRef {
     pub insertions: u32,
     pub deletions: u32,
     pub empty: bool,
+    /// What git says the attempt changed. Authoritative over the event stream.
+    #[serde(default)]
+    pub files: Vec<FileChange>,
 }
 
 #[cfg(test)]
@@ -148,6 +151,7 @@ mod tests {
                 insertions: 12,
                 deletions: 3,
                 empty: false,
+                files: Vec::new(),
             }),
             summary: Some("done".into()),
             stream_offset: 4096,
