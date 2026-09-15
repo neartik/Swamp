@@ -1,0 +1,9 @@
+---
+source: src/ui/chat/screens.rs
+expression: "committed(failed, 100)"
+---
+● Bash(cargo build --release)
+  ⎿  error[E0308]: mismatched types
+       --> src/worker/codex.rs:212:17
+     error: could not compile `swamp` (lib) due to 2 previous errors
+     … +2 lines (ctrl+o to expand)

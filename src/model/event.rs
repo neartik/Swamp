@@ -28,6 +28,9 @@ pub enum WorkerEvent {
         id: String,
         ok: bool,
         summary: String,
+        /// The result body, flattened to text and truncated. Additive: older journals have none.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        detail: Option<String>,
     },
     FileChanged {
         path: Utf8PathBuf,
@@ -91,6 +94,7 @@ mod tests {
                 id: "t1".into(),
                 ok: true,
                 summary: "applied".into(),
+                detail: None,
             },
             WorkerEvent::FileChanged {
                 path: "src/lib.rs".into(),

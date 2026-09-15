@@ -1,0 +1,8 @@
+---
+source: src/ui/chat/screens.rs
+expression: "live(&mut app, 100)"
+---
+────────────────────────────────────────────────────────────────────────────────────────────────────
+>  Try "dispatch two workers to split the pagination work"
+────────────────────────────────────────────────────────────────────────────────────────────────────
+  ? for shortcuts                    ⏵⏵ dispatch mid                    run 9g5fav · idle · ~$0.00

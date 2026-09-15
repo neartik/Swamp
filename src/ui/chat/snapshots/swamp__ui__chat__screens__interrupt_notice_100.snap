@@ -1,0 +1,5 @@
+---
+source: src/ui/chat/screens.rs
+expression: "committed(interrupt, 100)"
+---
+⊘ interrupted · 2 workers still running (esc again within 2s to cancel them)

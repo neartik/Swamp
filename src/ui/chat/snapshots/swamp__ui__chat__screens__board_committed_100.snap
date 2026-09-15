@@ -1,0 +1,11 @@
+---
+source: src/ui/chat/screens.rs
+expression: "committed(committed_lines, 100)"
+---
+● swamp_dispatch(2 tasks)
+  ⎿  ✔ 1 done · ✘ 1 failed · ~$0.23 · 2m10s
+     ✔ 9g5f01  [low ]  add pagination to /users                  main/sonnet-4        2m10s   ~$0.14
+       └ branch swamp/9g5fav/9g5f01-1   +21 -1   2 files
+     ✘ 9g5f02  [mid ]  backfill the users index                  alt/sonnet-4         2m06s   ~$0.09
+       └ PermissionDenied: 2 tool calls were auto-denied: Bash x2
+     2 nodes · 1 failed · 2m10s · ~$0.23   (swamp adopt 9g5f01)

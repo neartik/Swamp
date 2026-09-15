@@ -150,6 +150,39 @@ edits files itself. `swamp run <TASK>` uses the same brain for exactly one turn:
 to answer a follow-up, so it is told to end by naming the nodes worth landing and the
 `swamp adopt <node>` command for each, or to say that nothing is.
 
+## Chat UI
+
+`swamp chat` (and bare `swamp`) draws an inline terminal UI: finished blocks scroll into your
+terminal's own scrollback, where the mouse can still select them, and only the live tail is
+redrawn. Assistant text renders as markdown while it streams, and a `swamp_dispatch` call opens
+a live worker board, folded from the same journal `swamp watch` reads: one row per worker with
+its spinner, tier, account, model, elapsed time and cost, and, when it lands, its branch and
+`+N -M`. When stdout is not a terminal the whole thing falls back to the plain transcript, so
+pipes, CI and `swamp run` are unaffected.
+
+| Key | What it does |
+|---|---|
+| `enter` | Send. With the popup open, complete the selected command instead. |
+| `alt+enter`, `shift+enter`, trailing `\` | Newline. `shift+enter` needs the kitty keyboard protocol. |
+| `esc` | Close the popup, else interrupt the turn. |
+| `esc esc` | Cancel every running worker, within two seconds of the first `esc`. |
+| `ctrl+c` | Clear the input; again on an empty input to leave. |
+| `ctrl+d` | Leave. |
+| `ctrl+l` | Clear the screen; the scrollback above is untouched. |
+| `ctrl+o` | Expand the last collapsed tool result or worker board. |
+| `up` / `down` | History on an empty input, otherwise move between the input's lines. |
+| `/` | Open the command popup; `tab` completes, `↑↓` chooses. |
+| `?` | Shortcut overlay, on an empty input. |
+| `ctrl+a`, `ctrl+e`, `ctrl+k`, `ctrl+u`, `ctrl+w`, `alt+←/→` | Readline editing. |
+
+Commands: `/help`, `/status`, `/accounts`, `/trace [node]`, `/cost`, `/tier [low|mid|high]`,
+`/workers [n]`, `/cancel <node|all>`, `/diff <node>`, `/thinking [on|off]`, `/clear`,
+`/resume <run>`, `/quit`.
+
+`[ui]` settings: `chat_theme` (`auto`, `truecolor`, `ansi256`, `plain`), `collapse_lines`
+(default 3), `chat_history` (default 500 entries, kept in `.swamp/chat_history`), `refresh_hz`
+(default 12), `show_thinking`.
+
 ## Commands
 
 | Command | What it does |

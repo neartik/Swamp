@@ -370,8 +370,9 @@ impl TerminalGuard {
         }
     }
 
-    #[cfg(test)]
-    fn with(restore: Restore) -> Self {
+    /// The chat UI restores an inline viewport, which must not leave an alternate screen.
+    pub fn with(restore: Restore) -> Self {
+        install_panic_hook(restore);
         TerminalGuard { restore }
     }
 }

@@ -19,6 +19,8 @@ use time::OffsetDateTime;
 /// Tools whose inputs advertise a file write. Advisory only: git is authoritative at finalize.
 const EDIT_TOOLS: [&str; 4] = ["Edit", "Write", "MultiEdit", "NotebookEdit"];
 const SUMMARY_MAX: usize = 200;
+/// A tool result body the chat UI collapses; anything longer is noise in scrollback.
+const RESULT_MAX: usize = 4096;
 
 #[derive(Debug, Default, Clone, Copy)]
 pub struct ClaudeAdapter;
@@ -223,7 +225,8 @@ fn assistant_events(m: MsgEnvelope, st: &mut ParseState) -> ParseOutput {
             Block::ToolResult {
                 tool_use_id,
                 is_error,
-            } => out.push(tool_result(tool_use_id, is_error, st)),
+                content,
+            } => out.push(tool_result(tool_use_id, is_error, content, st)),
             Block::Other => {}
         }
     }
@@ -241,21 +244,46 @@ fn user_events(m: MsgEnvelope, st: &mut ParseState) -> ParseOutput {
         if let Block::ToolResult {
             tool_use_id,
             is_error,
+            content,
         } = b
         {
-            out.push(tool_result(tool_use_id, is_error, st));
+            out.push(tool_result(tool_use_id, is_error, content, st));
         }
     }
     ParseOutput::many(out)
 }
 
-fn tool_result(id: String, is_error: bool, st: &ParseState) -> WorkerEvent {
+fn tool_result(
+    id: String,
+    is_error: bool,
+    content: Option<ClaudeContent>,
+    st: &ParseState,
+) -> WorkerEvent {
     let summary = st.tool_names.get(&id).cloned().unwrap_or_default();
     WorkerEvent::ToolResult {
         id,
         ok: !is_error,
         summary,
+        detail: content.and_then(|c| flatten(&c)),
     }
+}
+
+/// A tool result body is a string or a list of blocks; the UI wants neither, only text.
+fn flatten(c: &ClaudeContent) -> Option<String> {
+    let text = match c {
+        ClaudeContent::Text(t) => t.clone(),
+        ClaudeContent::Blocks(blocks) => blocks
+            .iter()
+            .filter_map(|b| b.text.clone())
+            .collect::<Vec<_>>()
+            .join("\n"),
+        ClaudeContent::Other => String::new(),
+    };
+    let text = text.trim_end();
+    if text.is_empty() {
+        return None;
+    }
+    Some(crate::worker::classify::truncate(text, RESULT_MAX))
 }
 
 fn result_event(r: ResultLine, st: &mut ParseState) -> ParseOutput {
@@ -460,9 +488,26 @@ enum Block {
         tool_use_id: String,
         #[serde(default)]
         is_error: bool,
+        #[serde(default)]
+        content: Option<ClaudeContent>,
     },
     #[serde(other)]
     Other,
+}
+
+/// `content` is a bare string on some results and a block list on others.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum ClaudeContent {
+    Text(String),
+    Blocks(Vec<ContentBlock>),
+    Other,
+}
+
+#[derive(Deserialize)]
+struct ContentBlock {
+    #[serde(default)]
+    text: Option<String>,
 }
 
 #[derive(Deserialize, Default)]

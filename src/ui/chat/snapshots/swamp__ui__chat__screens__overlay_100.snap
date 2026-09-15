@@ -1,0 +1,13 @@
+---
+source: src/ui/chat/screens.rs
+expression: "live(&mut app, 100)"
+---
+  enter         send                           ctrl+o    expand the last result
+  alt+enter     newline (also shift+enter)     ctrl+l    clear the screen
+  esc           interrupt the turn             ctrl+c    clear input, twice to quit
+  esc esc       cancel running workers         ctrl+d    quit
+  ↑ ↓           history (empty input)          /         commands
+────────────────────────────────────────────────────────────────────────────────────────────────────
+>  Try "dispatch two workers to split the pagination work"
+────────────────────────────────────────────────────────────────────────────────────────────────────
+  ? for shortcuts                    ⏵⏵ dispatch mid                    run 9g5fav · idle · ~$0.00

@@ -41,8 +41,8 @@ pub enum BrainEvent {
     Ready { session: String, model: String },
     Text { delta: String },
     Thinking { delta: String },
-    ToolCall { name: String, preview: String },
-    ToolDone { name: String, ok: bool },
+    ToolCall { id: String, name: String, preview: String },
+    ToolDone { id: String, name: String, ok: bool, detail: Option<String> },
     TurnDone { usage: Usage, cost: Option<Cost> },
     Fatal { message: String },
 }
@@ -414,13 +414,22 @@ fn brain_event(launch: &Launch, event: &WorkerEvent) -> Option<BrainEvent> {
         WorkerEvent::Thinking { text } => Some(BrainEvent::Thinking {
             delta: text.clone(),
         }),
-        WorkerEvent::ToolCall { name, summary, .. } => Some(BrainEvent::ToolCall {
+        WorkerEvent::ToolCall { id, name, summary } => Some(BrainEvent::ToolCall {
+            id: id.clone(),
             name: name.clone(),
             preview: summary.clone(),
         }),
-        WorkerEvent::ToolResult { ok, summary, .. } => Some(BrainEvent::ToolDone {
+        // `summary` on a result is the name the parser looked up from the call's id.
+        WorkerEvent::ToolResult {
+            id,
+            ok,
+            summary,
+            detail,
+        } => Some(BrainEvent::ToolDone {
+            id: id.clone(),
             name: summary.clone(),
             ok: *ok,
+            detail: detail.clone(),
         }),
         WorkerEvent::Final(f) if f.ok => Some(BrainEvent::TurnDone {
             usage: f.usage,

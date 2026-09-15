@@ -1,0 +1,9 @@
+---
+source: src/ui/chat/screens.rs
+expression: "committed(done, 100)"
+---
+● Read(src/api/users.rs)
+  ⎿  running 3 tests
+     test parse_codex::final_event ... ok
+     test parse_codex::rate_limit ... ok
+     … +14 lines (ctrl+o to expand)

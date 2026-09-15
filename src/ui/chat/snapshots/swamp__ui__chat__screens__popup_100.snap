@@ -1,0 +1,17 @@
+---
+source: src/ui/chat/screens.rs
+expression: "live(&mut app, 100)"
+---
+▌ /trace      the run tree with its events
+  /tier       show or set the default dispatch tier
+  /thinking   show or hide the brain's thinking
+  /help       commands and keyboard shortcuts
+  /status     the run tree, same output as swamp trace
+  /accounts   the account pool, health and spend
+  /cost       tokens and spend for this run
+  /workers    show or set how many workers run at once
+  … +5 more
+────────────────────────────────────────────────────────────────────────────────────────────────────
+> /t
+────────────────────────────────────────────────────────────────────────────────────────────────────
+  tab completes · ↑↓ chooses · esc closes     ⏵⏵ dispatch mid           run 9g5fav · idle · ~$0.00

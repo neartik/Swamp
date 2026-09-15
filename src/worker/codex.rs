@@ -16,6 +16,7 @@ use std::ffi::OsString;
 const READ_ONLY_SANDBOX: &str = "read-only";
 const APPROVAL_NEVER: &str = "approval_policy=\"never\"";
 const SUMMARY_MAX: usize = 200;
+const RESULT_MAX: usize = 4096;
 
 #[derive(Debug, Default, Clone, Copy)]
 pub struct CodexAdapter;
@@ -196,6 +197,7 @@ fn item_events(item: CodexItem, st: &mut ParseState, completed: bool) -> ParseOu
             command,
             exit_code,
             status,
+            aggregated_output,
         } => {
             st.tool_names.insert(id.clone(), "shell".to_owned());
             out.push(WorkerEvent::ToolCall {
@@ -208,6 +210,9 @@ fn item_events(item: CodexItem, st: &mut ParseState, completed: bool) -> ParseOu
                     id,
                     ok: exit_code.unwrap_or(0) == 0,
                     summary: status.unwrap_or_default(),
+                    detail: aggregated_output
+                        .map(|o| truncate(o.trim_end(), RESULT_MAX))
+                        .filter(|o| !o.is_empty()),
                 });
             }
         }
@@ -346,6 +351,8 @@ enum CodexItem {
         exit_code: Option<i32>,
         #[serde(default)]
         status: Option<String>,
+        #[serde(default)]
+        aggregated_output: Option<String>,
     },
     FileChange {
         #[serde(default)]

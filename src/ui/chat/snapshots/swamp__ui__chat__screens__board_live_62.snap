@@ -1,0 +1,12 @@
+---
+source: src/ui/chat/screens.rs
+expression: "live(&mut app, 62)"
+---
+● swamp_dispatch(2 tasks)
+  ⎿  ⠋ 2 running · 0 done · ~$0.19 · 3m10s
+     ⠋ 9g5f01  [low ]  add paginat…   3m10s   ~$0.08
+     ⠙ 9g5f02  [mid ]  backfill th…   3m10s   ~$0.11
+──────────────────────────────────────────────────────────────
+>  Try "dispatch two workers to split the pagination work"
+──────────────────────────────────────────────────────────────
+  ? for shortcuts                     run 9g5fav · 2 running

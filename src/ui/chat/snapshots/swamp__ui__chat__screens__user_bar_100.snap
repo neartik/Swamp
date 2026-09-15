@@ -1,0 +1,5 @@
+---
+source: src/ui/chat/screens.rs
+expression: "committed(bar, 100)"
+---
+> split the pagination work across two workers

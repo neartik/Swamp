@@ -207,6 +207,11 @@ refresh_hz    = 20
 tree_width    = 46
 show_thinking = false
 tail_lines    = 200
+# `swamp chat`: auto | truecolor | ansi256 | plain, how many result lines survive a collapse,
+# and how many prompts .swamp/chat_history keeps.
+chat_theme     = "auto"
+collapse_lines = 3
+chat_history   = 500
 
 # ---------------------------------------------------------------- profiles
 # `swamp --profile cheap run "..."` layers this over everything above.

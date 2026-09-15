@@ -189,7 +189,7 @@ fn label(ev: &BrainEvent) -> String {
         BrainEvent::Text { delta } => format!("text {delta}"),
         BrainEvent::Thinking { delta } => format!("thinking {delta}"),
         BrainEvent::ToolCall { name, .. } => format!("tool_call {name}"),
-        BrainEvent::ToolDone { name, ok } => format!("tool_done {name} {ok}"),
+        BrainEvent::ToolDone { name, ok, .. } => format!("tool_done {name} {ok}"),
         BrainEvent::TurnDone { usage, cost } => format!(
             "turn_done in={} out={} cost={}",
             usage.input_tokens,

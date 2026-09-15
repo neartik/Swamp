@@ -239,4 +239,8 @@ pub struct UiCfg {
     pub tree_width: Option<u16>,
     pub show_thinking: Option<bool>,
     pub tail_lines: Option<usize>,
+    /// auto | truecolor | ansi256 | plain
+    pub chat_theme: Option<String>,
+    pub collapse_lines: Option<usize>,
+    pub chat_history: Option<usize>,
 }

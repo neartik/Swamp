@@ -1,0 +1,5 @@
+---
+source: src/ui/chat/screens.rs
+expression: "committed(cancelled, 100)"
+---
+⊘ cancelled 2 nodes

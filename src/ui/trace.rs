@@ -198,7 +198,7 @@ fn latest<'a>(view: &'a RunView, row: &TreeRow) -> Option<&'a NodeRecord> {
 
 /// Which account ran the node is the whole point of a multi-account trace, so the provider
 /// prefix is what gets dropped when the two together do not fit, never the account id.
-fn account_cell(rec: &NodeRecord) -> String {
+pub(crate) fn account_cell(rec: &NodeRecord) -> String {
     let account = rec.account.as_ref().map_or("-", |a| a.0.as_str());
     let full = format!("{}/{account}", rec.provider);
     if full.chars().count() <= ACCOUNT_WIDTH {
@@ -235,7 +235,7 @@ fn attempt_outcome(rec: &NodeRecord) -> String {
 }
 
 /// The one-line reason an attempt ended, with the evidence a misclassification needs.
-fn failure_summary(f: &Failure) -> String {
+pub(crate) fn failure_summary(f: &Failure) -> String {
     match f {
         Failure::RateLimited {
             resets_at,
@@ -267,7 +267,7 @@ fn failure_summary(f: &Failure) -> String {
     }
 }
 
-fn failure_detail(f: &Failure) -> String {
+pub(crate) fn failure_detail(f: &Failure) -> String {
     match f {
         Failure::RateLimited { evidence, .. } => {
             format!("{}: {}", failure_summary(f), fmt::truncate(evidence, 100))
