@@ -258,6 +258,20 @@ fn board() -> Vec<&'static str> {
     ]
 }
 
+/// The idle layout with rules that reach the last column, and a status row that does too.
+fn wide_idle(cols: u16) -> Vec<String> {
+    let rule = "-".repeat(cols as usize);
+    let status = format!("{:<pad$}{}", "status", "run 01ARZ3", pad = cols as usize - 10);
+    vec![rule.clone(), "> ".to_owned(), rule, status]
+}
+
+/// The slash popup over that layout: ten entries, each around half the width of a rule.
+fn popup(cols: u16) -> Vec<String> {
+    let mut rows: Vec<String> = (0..10).map(|i| format!("  /cmd{i}   what it does")).collect();
+    rows.extend(wide_idle(cols));
+    rows
+}
+
 /// `n` committed rows, enough of them to push the live area onto the last rows of the screen.
 fn filler(n: usize) -> Vec<String> {
     (0..n).map(|i| format!("row {i}")).collect()
@@ -490,4 +504,97 @@ fn a_width_shrink_that_splits_the_rules_leaves_no_stale_rows() {
     let seen = screen.iter().filter(|r| r.starts_with("---")).count();
     assert_eq!(seen, 2, "{seen} rule rows in:\n{}", screen.join("\n"));
     assert_in_order(&host.history(), &refs(&filler(19)));
+}
+
+#[test]
+fn a_width_shrink_under_a_popup_that_grew_the_area_keeps_committed_rows() {
+    let mut host = Host::new(&["$ swamp chat"]);
+    host.commit(&welcome(), &idle());
+    host.commit(&refs(&filler(19)), &idle());
+    // Full-width rules, then `/`: the area triples and the rows the rules held are popup entries
+    // half as wide. A row measured at the width it used to have is three screen rows too tall.
+    host.frame_at(&refs(&wide_idle(COLS)), (1, 2));
+    host.frame_at(&refs(&popup(COLS)), (11, 3));
+    let narrow = popup(24);
+    host.resize(24, ROWS, &refs(&narrow));
+
+    let mut wanted: Vec<String> = welcome().iter().map(|r| (*r).to_owned()).collect();
+    wanted.retain(|r| !r.is_empty());
+    wanted.extend(filler(19));
+    assert_in_order(&host.history(), &refs(&wanted));
+    let screen = host.screen();
+    assert_no_duplicate_live(&screen, &refs(&narrow));
+    let rules = screen.iter().filter(|r| r.starts_with("---")).count();
+    assert_eq!(rules, 2, "{rules} rule rows in:\n{}", screen.join("\n"));
+}
+
+#[test]
+fn a_width_shrink_too_small_to_wrap_anything_keeps_committed_rows() {
+    let mut host = Host::new(&["$ swamp chat"]);
+    host.commit(&welcome(), &idle());
+    host.commit(&refs(&filler(19)), &idle());
+    host.frame_at(&refs(&wide_idle(COLS)), (1, 2));
+    host.frame_at(&refs(&popup(COLS)), (11, 3));
+    // Four columns narrower: nothing committed is wide enough for the host to split.
+    let narrow = popup(36);
+    host.resize(36, ROWS, &refs(&narrow));
+
+    let mut wanted: Vec<String> = welcome().iter().map(|r| (*r).to_owned()).collect();
+    wanted.retain(|r| !r.is_empty());
+    wanted.extend(filler(19));
+    assert_in_order(&host.history(), &refs(&wanted));
+    assert_no_duplicate_live(&host.screen(), &refs(&narrow));
+}
+
+#[test]
+fn a_width_change_puts_the_area_back_on_the_last_row() {
+    let mut host = Host::new(&["$ swamp chat"]);
+    host.commit(&welcome(), &idle());
+    host.commit(&refs(&filler(19)), &idle());
+    host.frame_at(&refs(&wide_idle(COLS)), (1, 2));
+    let narrow = wide_idle(24);
+    host.resize(24, ROWS, &refs(&narrow));
+
+    let screen = host.screen();
+    assert_eq!(screen[ROWS as usize - 1], narrow[3]);
+    assert_no_duplicate_live(&screen, &refs(&narrow));
+}
+
+#[test]
+fn a_commit_fills_the_rows_a_re_anchored_area_left_behind() {
+    let mut host = Host::new(&["$ swamp chat"]);
+    host.commit(&welcome(), &idle());
+    host.commit(&refs(&filler(19)), &idle());
+    host.frame_at(&refs(&wide_idle(COLS)), (1, 2));
+    let narrow = wide_idle(24);
+    host.resize(24, ROWS, &refs(&narrow));
+    host.commit(&["* answer", "  first", "  second", "  third", ""], &refs(&narrow));
+
+    let history = host.history();
+    assert_in_order(&history, &["row 18", "* answer", "  third"]);
+    assert_no_blank_runs(&history, "row 18", "  third");
+    assert_no_hole(&host.screen(), &narrow[0]);
+}
+
+#[test]
+fn a_width_change_keeps_the_area_where_the_shrink_left_it() {
+    let mut host = Host::new(&["$ swamp chat"]);
+    host.commit(&welcome(), &idle());
+    host.commit(&refs(&filler(19)), &idle());
+    let mut spinner = vec!["* working".to_owned()];
+    spinner.extend(wide_idle(COLS));
+    host.frame_at(&refs(&spinner), (2, 2));
+    // The spinner row goes: the area hands a row back and stays one row off the bottom, and a
+    // narrower window may not move it any higher than that.
+    host.frame_at(&refs(&wide_idle(COLS)), (1, 2));
+    let narrow = wide_idle(24);
+    host.resize(24, ROWS, &refs(&narrow));
+
+    let screen = host.screen();
+    assert_eq!(screen[ROWS as usize - 2], narrow[3]);
+    assert!(
+        screen[ROWS as usize - 1].is_empty(),
+        "{}",
+        screen.join("\n")
+    );
 }

@@ -40,12 +40,17 @@ pub struct Inline<W: Write> {
     free: u16,
     width: u16,
     rows: u16,
+    /// Blank rows between the last committed block and the top of the area: left there by a width
+    /// change that put the area back on the last row of the screen, and the first rows
+    /// [`Inline::commit`] writes into.
+    gap: u16,
     /// Rows between the top of the area and the cursor the last write parked on it: what
     /// [`Inline::reflow`] measures the area's place from.
     cursor_off: u16,
     cursor_col: u16,
-    /// The display width of every row of the last frame: a host splits the rows it can no longer
-    /// hold, so this is what says how many screen rows the area really has above its cursor.
+    /// The display width of every row of the last frame, read back from it: a host splits the
+    /// rows it can no longer hold, so this is what says how many screen rows the area really has
+    /// above its cursor.
     widths: Vec<u16>,
 }
 
@@ -79,6 +84,7 @@ impl<W: Write> Inline<W> {
             free,
             width,
             rows,
+            gap: 0,
             cursor_off: 0,
             cursor_col: 0,
             widths: Vec::new(),
@@ -120,6 +126,17 @@ impl<W: Write> Inline<W> {
             Some(y) => (y.min(bottom), y.saturating_sub(bottom)),
             None => (bottom, 0),
         };
+        // A new width splits the area's own rows and the host scrolls to fit them, so the blank
+        // rows left under the cleared area are the area's own: it keeps the distance from the
+        // bottom of the screen it had before instead of floating higher, and the rows it leaves
+        // behind are the next commit's.
+        let want = bottom.saturating_sub(self.free);
+        let (top, gap) = if width != self.width && top < want {
+            (want, want - top)
+        } else {
+            (top, 0)
+        };
+        self.gap = gap;
         self.width = width;
         self.rows = rows;
         self.height = height;
@@ -157,10 +174,7 @@ impl<W: Write> Inline<W> {
 
     pub fn draw(&mut self, lines: Vec<Line<'static>>, cursor: (u16, u16)) -> io::Result<()> {
         let (row, col) = cursor;
-        let widths: Vec<u16> = lines
-            .iter()
-            .map(|l| u16::try_from(l.width()).unwrap_or(u16::MAX).min(self.width))
-            .collect();
+        let mut widths = Vec::new();
         self.term.draw(|f| {
             let area = f.area();
             f.render_widget(Paragraph::new(lines), area);
@@ -170,14 +184,11 @@ impl<W: Write> Inline<W> {
                     area.y + row,
                 ));
             }
+            widths = row_widths(f.buffer_mut());
         })?;
-        // ratatui only paints what changed, so a row is as wide on screen as the widest thing
-        // ever drawn on it since the last clear: that is the width a host would split.
-        self.widths.resize(widths.len().max(self.widths.len()), 0);
-        for (seen, now) in self.widths.iter_mut().zip(widths) {
-            *seen = (*seen).max(now);
-        }
-        self.widths.truncate(self.height as usize);
+        // The frame is what the screen holds: `Terminal::resize` blanks the whole area, and every
+        // draw after it writes every cell that changed, the ones that went empty included.
+        self.widths = widths;
         self.cursor_off = row.min(self.height.saturating_sub(1));
         self.cursor_col = if row < self.height {
             col.min(self.width.saturating_sub(1))
@@ -217,6 +228,14 @@ impl<W: Write> Inline<W> {
         }
         let width = self.width;
         for line in lines {
+            // The rows a re-anchor left blank above the area are filled first: the area does not
+            // move, so nothing blank is ever pushed into scrollback ahead of the block.
+            if self.gap > 0 {
+                let y = self.top() - self.gap;
+                write_row(&mut self.term, line, y, width)?;
+                self.gap -= 1;
+                continue;
+            }
             let y = self.top();
             write_row(&mut self.term, line, y, width)?;
             // The area slid down a row: every row of it is one nearer its top than it was.
@@ -237,6 +256,7 @@ impl<W: Write> Inline<W> {
         use crossterm::cursor::MoveTo;
         use crossterm::terminal::{Clear, ClearType};
         self.free = self.rows - self.height;
+        self.gap = 0;
         self.widths.clear();
         queue!(self.term.backend_mut(), Clear(ClearType::All), MoveTo(0, 0))?;
         Backend::flush(self.term.backend_mut())?;
@@ -319,6 +339,24 @@ fn blank_below<W: Write>(term: &mut Terminal<CrosstermBackend<W>>, y: u16) -> io
         Clear(ClearType::FromCursorDown)
     )?;
     Backend::flush(term.backend_mut())
+}
+
+/// The columns each row of a frame really uses: its last cell with something in it, the same
+/// measure [`write_row`] takes of a committed row. A wide character owns two cells, so a count of
+/// cells is a display width.
+fn row_widths(buf: &Buffer) -> Vec<u16> {
+    let width = buf.area.width as usize;
+    if width == 0 {
+        return Vec::new();
+    }
+    buf.content
+        .chunks(width)
+        .map(|row| {
+            row.iter()
+                .rposition(|cell| cell != &Cell::EMPTY)
+                .map_or(0, |i| i as u16 + 1)
+        })
+        .collect()
 }
 
 /// The row is erased and then written up to its last cell with something in it, never padded to

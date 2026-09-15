@@ -177,7 +177,13 @@ both destroyed committed rows. `Inline::reflow` works **relative to the cursor**
 Every write leaves the hardware cursor on a known row of the live area: `park` puts it on the
 area's first row, and `draw` - the only one that has to put it somewhere the user can see - leaves
 it on the caret and remembers the caret's row and column, plus the display width of every row it
-drew. On `Event::Resize`, in order:
+drew. Those widths are read back from the frame's own buffer - the last cell in the row with
+something in it, the measure `write_row` already takes of a committed row - and replace the ones
+before them: they are the frame's, never a running maximum over earlier frames. `Terminal::resize`
+blanks the whole area, so what the last draw put there is exactly what the screen holds, and a
+maximum was wrong the moment the area grew: a slash popup drawn over the rows two full-width rules
+had just been on still measured a full width, and `rows_above` counted three screen rows for three
+rows that were one. On `Event::Resize`, in order:
 
 1. **stop reading stdin.** The `EventStream` is dropped and its reader thread given ~20ms to let
    go of crossterm's internal reader: the async reader answers the cursor report itself otherwise,
@@ -189,6 +195,11 @@ drew. On `Event::Resize`, in order:
    written to.
 3. **read where that is.** `cursor::position()` now answers, and the row it reports is the area's
    top. It is clamped so the area fits under it, scrolling on the last row only if it does not.
+   A new width also splits the area's *own* rows, and the host scrolls to fit them: the blank rows
+   that leaves under the cleared area are the area's, not the host's, so a width change may not
+   move the input bar up the screen. The area keeps the distance from the bottom it had before the
+   resize, and the rows it leaves behind it are remembered as a gap that the next `commit` writes
+   into first, ahead of the area and without scrolling, so no blank row is pushed into scrollback.
 4. **rebuild.** The ratatui viewport is resized to the new rect, which resets both buffers, so the
    next frame repaints every live row at the new width: no stale rule or prompt can survive.
 5. **start reading stdin again.** A fresh `EventStream`.
@@ -211,7 +222,11 @@ one blank row appears between committed blocks, a shrink with no commit behind i
 one blank row between the last committed block and the live area, and shrinking, growing or
 re-widening the window keeps the committed rows the emulator still holds and leaves exactly one
 live area on screen. The `render::live` and `Block::render` snapshots (§3) cover the drawing;
-these cover the scrolling. `Host::resize` models a real host rather than the emulator: it rebuilds
+these cover the scrolling; three more cover the widths and the anchoring: a full-width idle layout
+followed by a taller popup one whose rows are half as wide, reflowed narrower, keeps every
+committed row, and a width change leaves the area exactly as far off the last row of the screen as
+it was, with the rows it left behind filled by the next commit. `Host::resize` models a real host
+rather than the emulator: it rebuilds
 the screen bottom-anchored, so a grow pulls rows back out of scrollback and a shrink pushes them
 into it, and it splits the rows a narrower window cannot hold. A probe handed to `reflow` reads
 the emulator's cursor the way `cursor::position()` reads the terminal's, and one test hands it
