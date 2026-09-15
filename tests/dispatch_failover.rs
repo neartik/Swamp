@@ -190,6 +190,7 @@ fn success() -> RunOutcome {
         exit: None,
         session: None,
         usage: Default::default(),
+        account_usage: Default::default(),
         cost: None,
         summary: Some("done".into()),
         files: Vec::new(),
@@ -865,4 +866,44 @@ async fn a_rate_limit_snapshot_from_the_worker_reaches_the_pool() {
         "the snapshot the worker reported was dropped"
     );
     assert_eq!(state.health, Health::Degraded);
+}
+
+const TWO_PROVIDERS: &str = r#"
+[brain]
+reserve_brain_slot = false
+[dispatch]
+max_attempts = 1
+cross_provider_failover = true
+[providers.anthropic]
+models = { low = "tier-low", mid = "tier-mid", high = "tier-high" }
+[providers.openai]
+models = { low = "tier-low", mid = "codex-mid", high = "tier-high" }
+[[accounts]]
+id = "main"
+provider = "anthropic"
+exec = "claude-main"
+[[accounts]]
+id = "codex"
+provider = "openai"
+exec = "codex-main"
+"#;
+
+/// Switching providers launches no worker, so it must not spend one of the node's attempts:
+/// with `max_attempts = 1` the failover would otherwise end the loop before anything ran.
+#[tokio::test]
+async fn a_provider_switch_does_not_burn_an_attempt() {
+    let f = fixture(TWO_PROVIDERS).await;
+    f.pool.set_enabled(&AccountId("main".into()), false);
+    let runner = Scripted::new(&f.root, vec![success()]);
+    let mut cx = f.ctx(runner.clone(), Duration::from_secs(30));
+    cx.provider_order = vec![Provider::Anthropic, Provider::Openai];
+    cx.cross_provider = true;
+    cx.max_attempts = 1;
+
+    let out = run_node(&cx, spec(), &task("port the parser")).await;
+    let calls = runner.calls();
+    assert_eq!(calls.len(), 1, "the idle provider still gets its attempt");
+    assert_eq!(calls[0].provider, Provider::Openai);
+    assert_eq!(calls[0].attempt, 1);
+    assert!(out.failure.is_none(), "{:?}", out.failure);
 }

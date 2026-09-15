@@ -59,6 +59,8 @@ pub async fn repl(brain: Box<dyn Brain>, disp: Arc<Dispatcher>, ctx: &Ctx) -> an
 async fn plain(mut brain: Box<dyn Brain>, disp: Arc<Dispatcher>, ctx: &Ctx) -> anyhow::Result<i32> {
     use tokio::io::AsyncBufReadExt;
     println!("swamp {} - /help for commands", crate::VERSION);
+    // No live view here: the blocked notice has to reach stderr or nothing explains the wait.
+    disp.pool().notices_to_stderr();
     let mut lines = tokio::io::BufReader::new(tokio::io::stdin()).lines();
     let mut code = 0;
     while let Some(line) = lines.next_line().await? {
@@ -67,18 +69,8 @@ async fn plain(mut brain: Box<dyn Brain>, disp: Arc<Dispatcher>, ctx: &Ctx) -> a
             continue;
         }
         if let Some(command) = text.strip_prefix('/') {
-            match command.split_whitespace().next().unwrap_or_default() {
-                "quit" | "exit" | "q" => break,
-                "status" => {
-                    let view = RunView::load(&disp.journal.paths().dir, false)?;
-                    print!("{}", render(&view, &TraceOpts::default()));
-                }
-                "help" | "?" => {
-                    for c in slash::COMMANDS {
-                        println!("{:<12}{}", c.name, c.help);
-                    }
-                }
-                other => println!("unknown command /{other}; try /help"),
+            if plain_slash(command, &disp, ctx).await? {
+                break;
             }
             continue;
         }
@@ -102,6 +94,53 @@ async fn plain(mut brain: Box<dyn Brain>, disp: Arc<Dispatcher>, ctx: &Ctx) -> a
     }
     brain.shutdown().await?;
     Ok(code)
+}
+
+/// One slash table for both surfaces: `/help` here lists what the viewport lists, so it
+/// cannot advertise a command the pipe then refuses. True means the session is over.
+async fn plain_slash(command: &str, disp: &Arc<Dispatcher>, ctx: &Ctx) -> anyhow::Result<bool> {
+    let paths = disp.journal.paths().clone();
+    let mut app = App::new(
+        paths.run,
+        Theme::detect(ctx.color, None),
+        WelcomeInfo::default(),
+        History::load(None, 0),
+        &disp.cfg,
+    );
+    app.disable_quota_probe();
+    app.view = RunView::load(&paths.dir, true)?;
+    app.pool = disp.pool().snapshot();
+    app.set_stale_accounts(disp.pool().unconfigured());
+    app.now = OffsetDateTime::now_utc();
+
+    let mut quit = false;
+    let mut effects: std::collections::VecDeque<Effect> = app.command(command).into();
+    while let Some(effect) = effects.pop_front() {
+        match effect {
+            Effect::Commit(body) => {
+                println!("{}", blocks::text_of(&body).join("\n"));
+            }
+            Effect::Trace(node) => {
+                let text = render(
+                    &app.view,
+                    &TraceOpts {
+                        node,
+                        events: true,
+                        ..TraceOpts::default()
+                    },
+                );
+                effects.extend(app.trace_output(&text));
+            }
+            Effect::CancelAll => {
+                let n = disp.cancel_all();
+                effects.extend(app.note_cancelled(n));
+            }
+            Effect::Cancel(id) => disp.cancel(id).await?,
+            Effect::Quit(_) => quit = true,
+            _ => {}
+        }
+    }
+    Ok(quit)
 }
 
 async fn interactive(
@@ -270,8 +309,9 @@ fn probe_quota(
             if let Ok(Ok(read)) = read
                 && let Some(snap) = read.select(limit_id.as_deref(), None)
             {
-                pool.observe_quota_from(
+                pool.observe_quota_read(
                     &id,
+                    &read.buckets,
                     snap,
                     crate::dispatch::account::QuotaSource::AppServer,
                 );

@@ -101,8 +101,9 @@ only spawn stdio children, so Swamp passes itself as that child:
 ```
 
 `swamp mcp-bridge` is a hidden subcommand: a byte pump between stdin/stdout and the socket. No
-protocol logic, no state. One source of truth, identical for both providers. The generated
-`mcp.json` uses `std::env::current_exe()`, never the bare name `swamp`.
+protocol logic, no state. One source of truth, identical for both providers. The generated MCP
+config is serialized inline onto the brain's argv, never written to disk, and it uses
+`std::env::current_exe()`, never the bare name `swamp`.
 
 An HTTP/SSE MCP server on loopback would remove the bridge but adds an HTTP stack, a bearer-token
 scheme and a listening port. Not worth it for v1.
@@ -1626,9 +1627,7 @@ with `swamp accounts reset <id>`. Nothing deletes them silently.
   runs/<run_id>/
     run.json                              # header: cwd, git HEAD, config hash, swamp version, argv
     journal.jsonl                         # THE tree: append-only JournalLine stream
-    mcp.json                              # generated MCP config handed to the brain
-    brain.md                              # the system prompt actually used, verbatim
-    swamp.pid
+    tools/                                # one file per brain tool call: arguments and result
     nodes/<node_short>/                     # the ATTEMPT id; the branch keeps the LOGICAL one
       prompt.md                           # the exact bytes fed to fd0
       stream.jsonl                        # RAW provider stdout, verbatim, never rewritten
@@ -2153,8 +2152,9 @@ tier_extra = { high = { effort = "high" }, mid = { effort = "medium" }, low = { 
   # Optional: appended after Swamp's built-in worker role prompt.
   # system_prompt_file = ".swamp/worker.md"
   args = []
-  readonly_args = ["--permission-mode", "plan",
-                   "--disallowed-tools", "Edit", "Write", "MultiEdit", "NotebookEdit"]
+  # Read-only isolation already forces plan mode and denies every edit tool, and a raw
+  # `--disallowed-tools` here would overwrite the merged list `deny_tools` feeds.
+  readonly_args = []
 
 [providers.openai]
 adapter = "codex-cli"

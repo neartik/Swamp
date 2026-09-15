@@ -19,7 +19,7 @@ use crate::ids::NodeId;
 use crate::journal::raw::{RawSink, Redactor};
 use crate::journal::{JournalEvent, JournalHandle};
 use crate::model::core::{
-    AccountId, Cost, FileChange, Provider, RateLimitSnapshot, SessionHandle, Usage,
+    AccountId, Cost, FileChange, FinalSummary, Provider, RateLimitSnapshot, SessionHandle, Usage,
 };
 use crate::model::event::WorkerEvent;
 use crate::model::failure::Failure;
@@ -76,6 +76,9 @@ pub struct RunOutcome {
     pub exit: Option<ExitInfo>,
     pub session: Option<SessionHandle>,
     pub usage: Usage,
+    /// What the ACCOUNT spent: `usage` is the main model alone, and a side-call is billed to
+    /// the same subscription.
+    pub account_usage: Usage,
     pub cost: Option<Cost>,
     pub summary: Option<String>,
     pub files: Vec<FileChange>,
@@ -83,6 +86,14 @@ pub struct RunOutcome {
     pub stream_offset: u64,
     pub unparsed_lines: u32,
     pub permission_denials: u32,
+}
+
+/// What the ACCOUNT spent over a finished run. `usage` is the main model alone; every
+/// side-call `modelUsage` reports was billed to the same subscription.
+pub fn account_total(st: &ParseState) -> Usage {
+    st.last_final
+        .as_ref()
+        .map_or(st.usage, FinalSummary::account_usage)
 }
 
 pub struct Executor {
@@ -331,6 +342,7 @@ pub async fn execute(req: ExecReq<'_>) -> anyhow::Result<RunOutcome> {
         exit,
         session: st.session.clone().map(|id| session_handle(spec, id)),
         usage: st.usage,
+        account_usage: account_total(&st),
         cost: st.last_final.as_ref().and_then(|f| f.cost),
         summary,
         files: st.files.clone(),

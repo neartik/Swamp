@@ -199,8 +199,12 @@ fn edit(
         id.0
     );
     let mut state = persist::load_state(path)?;
-    f(state.entry(id).or_default());
-    persist::save_state(path, &state)
+    let entry = state.entry(id).or_default();
+    f(entry);
+    // Every cross-process hand-off is keyed on `updated_at`: without the bump a running
+    // supervisor neither adopts the edit nor yields to it, and overwrites it on its next flush.
+    entry.updated_at = Some(OffsetDateTime::now_utc());
+    persist::merge_state(path, &state).map(|_| ())
 }
 
 /// Blank, never zero: `codex exec --json` reports no quota telemetry at all.

@@ -748,7 +748,7 @@ pub const COMMANDS: &[Cmd] = &[ /* … */ ];
 | `/usage` | `[--json]` | per-account tokens and quota windows, `ui::usage::render` shared byte-for-byte with `swamp usage`; `--json` commits the `ui::usage::json` shape as a code block instead |
 | `/trace` | `[node]` | `TraceOpts { node, events: true, ..default }`; no arg means the whole run. Collapsed at 3 lines with `ctrl+o`. |
 | `/cost` | | in / out / cache-read / cache-write tokens and `~$` from `view.totals()`, a per-account and per-tier breakdown, plus `(N nodes reported no cost data)` when `!cost_complete` |
-| `/tier` | `[low\|mid\|high]` | no arg: the current default dispatch tier and the tier-to-model map from `cfg.model_for`. With an arg: sets it for subsequent dispatches, echoes `dispatch tier: mid -> low`, updates the status marker. |
+| `/tier` | `[low\|mid\|high]` | no arg: the current default dispatch tier, one line, `dispatch tier: mid`. With an arg: sets it for subsequent dispatches, echoes `dispatch tier: mid -> low`, updates the status marker. |
 | `/cancel` | `<node\|all>` | `disp.cancel(node)` / `cancel_all()`, echoes `⊘ cancelled N nodes` |
 | `/diff` | `<node>` | `--stat` for the node's captured patch, collapsed at 10 lines |
 | `/thinking` | `[on\|off]` | toggles `ui.show_thinking`; when on, thinking renders `meta` + `ITALIC` under a `✻ thinking` header and commits like assistant text |

@@ -5,6 +5,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 use swamp::config::{Config, load, resolve, validate};
+use swamp::dispatch::persist::load_state;
 use swamp::dispatch::{AccountPool, Health, NoCapacity, SelectionPolicy};
 use swamp::journal::JournalHandle;
 use swamp::journal::paths::RunPaths;
@@ -627,4 +628,127 @@ async fn the_brain_never_reserves_the_last_usable_account() {
     );
     let lease = acquire(&h.pool).await.expect("a worker lease");
     assert_eq!(lease.account, id("main"));
+}
+
+const ONE_ACCOUNT: &str = r#"
+[brain]
+reserve_brain_slot = false
+[cooldown]
+quota_warn_at = 0.90
+quota_stop_at = 0.98
+[providers.anthropic]
+models = { mid = "tier-mid" }
+[[accounts]]
+id = "main"
+provider = "anthropic"
+exec = "claude-main"
+max_concurrency = 2
+"#;
+
+fn window(
+    scope: LimitScope,
+    utilization: f64,
+    resets_at: time::OffsetDateTime,
+) -> swamp::model::core::LimitWindow {
+    LimitWindow {
+        scope,
+        utilization,
+        resets_at: Some(resets_at),
+        window_minutes: Some(if scope == LimitScope::SevenDay {
+            10_080
+        } else {
+            300
+        }),
+        measured: true,
+    }
+}
+
+/// A window whose reset has passed cannot be waited for. Taking it as the pool's retry time
+/// drops the wait entirely and turns a blocked node into an immediate failure.
+#[tokio::test]
+async fn a_stale_window_does_not_turn_a_wait_into_a_hard_failure() {
+    let h = harness(ONE_ACCOUNT).await;
+    let now = time::OffsetDateTime::now_utc();
+    h.pool.observe_quota(
+        &id("main"),
+        RateLimitSnapshot {
+            status: LimitStatus::Allowed,
+            windows: vec![
+                window(
+                    LimitScope::FiveHour,
+                    0.10,
+                    now - time::Duration::minutes(10),
+                ),
+                window(
+                    LimitScope::SevenDay,
+                    0.985,
+                    now + time::Duration::minutes(40),
+                ),
+            ],
+            ..Default::default()
+        },
+    );
+    let Some(NoCapacity::AllExhausted { retry_at, why }) =
+        h.pool.all_exhausted(Provider::Anthropic, &HashSet::new())
+    else {
+        panic!("the seven_day reset is 40 minutes away and is a wait, not a failure");
+    };
+    assert!(retry_at > now, "{why}");
+    assert!(retry_at < now + time::Duration::hours(1), "{why}");
+}
+
+/// Nodes share an account. One finishing must not undo the cooldown a sibling just earned,
+/// nor re-enable an account a human took out of rotation mid-run.
+#[tokio::test]
+async fn a_successful_node_keeps_a_cooldown_that_landed_while_it_ran() {
+    let h = harness(ONE_ACCOUNT).await;
+    let resets = time::OffsetDateTime::now_utc() + time::Duration::hours(5);
+    h.pool
+        .report(&id("main"), Some(&rate_limited(Some(resets))), None);
+    assert_eq!(health_of(&h.pool, "main"), Health::Cooling);
+
+    h.pool.report(&id("main"), None, None);
+    assert_eq!(
+        health_of(&h.pool, "main"),
+        Health::Cooling,
+        "the sibling's limit outlives this node"
+    );
+    assert!(matches!(
+        h.pool.all_exhausted(Provider::Anthropic, &HashSet::new()),
+        Some(NoCapacity::AllExhausted { .. })
+    ));
+
+    h.pool.clear(&id("main"));
+    h.pool.set_enabled(&id("main"), false);
+    h.pool.report(&id("main"), None, None);
+    assert_eq!(
+        health_of(&h.pool, "main"),
+        Health::Disabled,
+        "a finished node must not re-enable a disabled account"
+    );
+}
+
+/// `block_reason` gates on health first, exactly as `score` does: a disabled account carrying
+/// a cooldown is a human problem, and advertising its reset makes a node sleep for nothing.
+#[tokio::test]
+async fn a_disabled_account_is_hard_blocked_even_while_it_cools() {
+    let h = harness(ONE_ACCOUNT).await;
+    h.pool.report(&id("main"), Some(&rate_limited(None)), None);
+    h.pool.set_enabled(&id("main"), false);
+    match h.pool.all_exhausted(Provider::Anthropic, &HashSet::new()) {
+        Some(NoCapacity::Exhausted { reason }) => assert!(reason.contains("disabled"), "{reason}"),
+        other => panic!("expected a hard block, got {other:?}"),
+    }
+}
+
+/// The state file is locked, parsed and fsynced on every telemetry event. Doing that inline
+/// on a multi-threaded runtime parks a worker thread, so the write steps off it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn persisting_from_a_runtime_thread_does_not_park_it() {
+    let h = harness(ONE_ACCOUNT).await;
+    for _ in 0..4 {
+        h.pool.observe_quota(&id("main"), quota(0.10));
+    }
+    let state = load_state(&h.state_path).expect("state file");
+    assert!(state[&id("main")].quota.is_some());
 }

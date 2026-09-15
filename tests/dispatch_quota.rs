@@ -891,3 +891,35 @@ fn an_estimate_never_replaces_a_measurement_that_has_not_rolled() {
     let merged = estimate.merged_over(&measured, now);
     assert_eq!(merged.measured_utilization_at(now), Some(0.99));
 }
+
+/// USAGE 2.3: the app-server poll runs at most one in flight per account. Five nodes
+/// terminating together must not spawn five subprocesses and five network calls.
+#[tokio::test]
+async fn the_app_server_probe_is_single_flight_per_account() {
+    let account = AccountId("codex-main".into());
+    let gate = swamp::dispatch::retry::probe_gate(&account);
+    assert!(
+        Arc::ptr_eq(&gate, &swamp::dispatch::retry::probe_gate(&account)),
+        "one gate per account"
+    );
+    assert!(
+        !Arc::ptr_eq(
+            &gate,
+            &swamp::dispatch::retry::probe_gate(&AccountId("other".into()))
+        ),
+        "and never shared between accounts"
+    );
+
+    let mut held = gate.lock().await;
+    assert!(
+        gate.try_lock().is_err(),
+        "a second terminating node waits for the answer instead of probing too"
+    );
+    *held = Some(Instant::now());
+    drop(held);
+    let last = gate.lock().await;
+    assert!(
+        last.is_some_and(|t: Instant| t.elapsed() < Duration::from_secs(5)),
+        "the late arrival can see how fresh the last probe was"
+    );
+}

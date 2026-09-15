@@ -182,3 +182,22 @@ fn the_brain_credits_its_node_cost_and_quota_to_its_account() {
         .success()
         .stdout(predicates::str::contains("0.06"));
 }
+
+/// UI 5: a piped chat prints what its own `/help` lists. Answering `unknown command /usage`
+/// to a command the same session just advertised is the one thing it must not do.
+#[test]
+fn a_piped_chat_runs_the_commands_its_help_lists() {
+    let h = Harness::new().scenario("main", Scenario::claude());
+    let out = h
+        .swamp(&["chat"])
+        .write_stdin("/help\n/usage\n/accounts\n/quit\n")
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&out.get_output().stdout).into_owned();
+    assert!(stdout.contains("/usage"), "{stdout}");
+    assert!(!stdout.contains("unknown command"), "{stdout}");
+    assert!(
+        stdout.contains("ACCOUNT"),
+        "the usage table is missing: {stdout}"
+    );
+}

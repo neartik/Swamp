@@ -248,7 +248,7 @@ async fn attach(
         session.pool.report(account, out.failure.as_ref(), out.cost);
         // A recovered node spent real tokens: without this the account's window and lifetime
         // counters under-report it and every share-based score is skewed in its favour.
-        session.pool.commit_usage(account, node, out.usage);
+        session.pool.commit_usage(account, node, out.account_usage);
         if let Some(snap) = out.rate_limit.clone() {
             session.pool.observe_quota(account, snap);
         }
@@ -368,6 +368,7 @@ fn finalize_offline(
         exit: record.exit,
         session: record.session.clone(),
         usage: st.usage,
+        account_usage: crate::worker::account_total(&st),
         cost,
         summary: st.last_final.as_ref().and_then(|f| f.text.clone()),
         files: st.files.clone(),

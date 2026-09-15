@@ -44,6 +44,14 @@ pub struct AccountPool {
     cursor: AtomicU64,
     /// `swamp run` has no live view of its own; chat renders the same notice from the journal.
     stderr_notices: AtomicBool,
+    /// Coalesces the cross-process state file writes: one flush in flight at a time.
+    persisting: Mutex<PersistGate>,
+}
+
+#[derive(Default)]
+struct PersistGate {
+    in_flight: bool,
+    dirty: bool,
 }
 
 /// Drop decrements inflight and notifies waiters, so a panicking node cannot leak a slot.
@@ -180,6 +188,7 @@ impl AccountPool {
             wakeups: AtomicU64::new(0),
             cursor: AtomicU64::new(0),
             stderr_notices: AtomicBool::new(false),
+            persisting: Mutex::new(PersistGate::default()),
         }))
     }
 
@@ -358,8 +367,14 @@ impl AccountPool {
             match failure {
                 None => {
                     entry.consecutive_infra_failures = 0;
-                    entry.cooldown_until = None;
-                    entry.health = health_from_quota(entry, self.quota_warn_at());
+                    // A sibling node's cooldown, or `swamp accounts disable`, may have landed
+                    // while this node was running: finishing must not undo either.
+                    let gated = matches!(entry.health, Health::AuthBroken | Health::Disabled)
+                        || entry.cooldown_until.is_some_and(|t| t > now);
+                    if !gated {
+                        entry.cooldown_until = None;
+                        entry.health = health_from_quota(entry, self.quota_warn_at());
+                    }
                 }
                 Some(f) => {
                     // Only infrastructure failures count against the account; a failing task
@@ -402,6 +417,22 @@ impl AccountPool {
     /// source is inferred; a caller that knows better says so through `observe_quota_from`.
     pub fn observe_quota(&self, id: &AccountId, snap: RateLimitSnapshot) {
         let source = self.infer_source(id, &snap);
+        self.observe_quota_from(id, snap, source);
+    }
+
+    /// A whole provider reading: every bucket it reported is kept for display, and the one
+    /// bucket this account bills against is what dispatch scores.
+    pub fn observe_quota_read(
+        &self,
+        id: &AccountId,
+        buckets: &BTreeMap<String, RateLimitSnapshot>,
+        snap: RateLimitSnapshot,
+        source: QuotaSource,
+    ) {
+        {
+            let mut state = self.state.lock();
+            state.entry(id.clone()).or_default().apply_buckets(buckets);
+        }
         self.observe_quota_from(id, snap, source);
     }
 
@@ -455,16 +486,22 @@ impl AccountPool {
         if owed == Usage::default() {
             return;
         }
-        let (window, lifetime, window_key, source) = {
+        let estimated_window = self.estimated_window(id);
+        let (window, lifetime, window_key, source, rolled) = {
+            let now = OffsetDateTime::now_utc();
             let mut state = self.state.lock();
             let entry = state.entry(id.clone()).or_default();
+            // No snapshot ever reaches some accounts; without this their window counter is a
+            // lifetime counter and every `share` term is scored against the wrong number.
+            let rolled = entry.roll_elapsed_window(estimated_window, now);
             entry.credit_tokens(&owed);
-            entry.updated_at = Some(OffsetDateTime::now_utc());
+            entry.updated_at = Some(now);
             (
                 entry.window_tokens,
                 entry.lifetime_tokens,
                 entry.window_key.clone(),
                 entry.quota_source,
+                rolled,
             )
         };
         crate::dispatch::emit(
@@ -475,7 +512,7 @@ impl AccountPool {
                 window,
                 lifetime,
                 window_key,
-                rolled: false,
+                rolled,
                 source,
             },
         );
@@ -683,12 +720,8 @@ impl AccountPool {
     /// Why one ineligible candidate is ineligible, in the order `score` gates it.
     fn block_reason(&self, a: &Account, s: &AccountState, now: OffsetDateTime) -> Block {
         let who = &a.id.0;
-        if let Some(t) = s.cooldown_until.filter(|t| *t > now) {
-            return Block::Wait {
-                at: t,
-                why: format!("{who} cooling until {}", crate::ui::fmt::clock_hm(t)),
-            };
-        }
+        // Health first, exactly as `score` gates it: a human-gated account carrying a
+        // cooldown must not advertise a retry time that cannot help.
         match s.health {
             Health::Disabled => {
                 return Block::Hard {
@@ -701,6 +734,12 @@ impl AccountPool {
                 };
             }
             _ => {}
+        }
+        if let Some(t) = s.cooldown_until.filter(|t| *t > now) {
+            return Block::Wait {
+                at: t,
+                why: format!("{who} cooling until {}", crate::ui::fmt::clock_hm(t)),
+            };
         }
         if s.quota.as_ref().and_then(|q| q.ordinary_usage_allowed) == Some(false) {
             return Block::Hard {
@@ -734,11 +773,7 @@ impl AccountPool {
                 .as_ref()
                 .map_or(LimitScope::Unknown, |q| q.worst_scope()),
         );
-        let reset = s
-            .quota
-            .as_ref()
-            .and_then(|q| q.soonest_reset())
-            .filter(|t| *t > now);
+        let reset = s.quota.as_ref().and_then(|q| q.soonest_reset_at(now));
         // Truncated, not rounded: 98.5% of a window is not 99% of it yet.
         let pct = (util * 100.0) as i64;
         match reset {
@@ -873,15 +908,46 @@ impl AccountPool {
         self.returned.notify_waiters();
     }
 
+    /// The state file is machine-wide, locked and fsynced: doing that inline on a runtime
+    /// thread parks it, and every telemetry event asks for one. Bursts coalesce into the
+    /// flush that is already running, and the blocking work is handed off the worker thread.
     fn persist(&self) {
-        let snapshot = self.state.lock().clone();
-        match persist::merge_state(&self.state_path, &snapshot) {
-            Ok(merged) => self.adopt(merged),
-            Err(e) => tracing::warn!(
-                "could not persist account state to {}: {e}",
-                self.state_path
-            ),
+        {
+            let mut gate = self.persisting.lock();
+            gate.dirty = true;
+            if gate.in_flight {
+                return;
+            }
+            gate.in_flight = true;
         }
+        loop {
+            {
+                let mut gate = self.persisting.lock();
+                if !gate.dirty {
+                    gate.in_flight = false;
+                    return;
+                }
+                gate.dirty = false;
+            }
+            let snapshot = self.state.lock().clone();
+            match blocking(|| persist::merge_state(&self.state_path, &snapshot)) {
+                Ok(merged) => self.adopt(merged),
+                Err(e) => tracing::warn!(
+                    "could not persist account state to {}: {e}",
+                    self.state_path
+                ),
+            }
+        }
+    }
+
+    /// The window an account with no quota source at all counts against.
+    fn estimated_window(&self, id: &AccountId) -> Duration {
+        const DEFAULT_WINDOW: Duration = Duration::from_secs(7 * 24 * 3600);
+        self.accounts
+            .get(id)
+            .and_then(|a| self.cfg.providers.get(&a.provider))
+            .and_then(|p| p.estimated_window)
+            .unwrap_or(DEFAULT_WINDOW)
     }
 
     /// Another process's newer entry wins, so a cooldown or a `swamp accounts disable` learned
@@ -896,6 +962,14 @@ impl AccountPool {
                 entry.inflight = inflight;
             }
         }
+    }
+}
+
+/// Blocking file I/O, off the runtime's worker thread when there is one to step off.
+fn blocking<T>(f: impl FnOnce() -> T) -> T {
+    match tokio::runtime::Handle::try_current().map(|h| h.runtime_flavor()) {
+        Ok(tokio::runtime::RuntimeFlavor::MultiThread) => tokio::task::block_in_place(f),
+        _ => f(),
     }
 }
 

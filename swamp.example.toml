@@ -113,8 +113,9 @@ tier_extra = { high = { effort = "high" }, mid = { effort = "medium" }, low = { 
   # Optional: appended after Swamp's built-in worker role prompt.
   # system_prompt_file = ".swamp/worker.md"
   args = []
-  readonly_args = ["--permission-mode", "plan",
-                   "--disallowed-tools", "Edit", "Write", "MultiEdit", "NotebookEdit"]
+  # Read-only isolation already forces plan mode and denies every edit tool, and a raw
+  # `--disallowed-tools` here would overwrite the merged list `deny_tools` feeds.
+  readonly_args = []
 
 [providers.openai]
 adapter = "codex-cli"

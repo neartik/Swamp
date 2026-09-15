@@ -61,6 +61,10 @@ pub struct WindowKey {
     pub scope: LimitScope,
     #[serde(with = "time::serde::rfc3339")]
     pub resets_at: OffsetDateTime,
+    /// The provider's own window length, kept so two reads of one window can be recognised
+    /// as one window even when their derived reset instants differ.
+    #[serde(default)]
+    pub window_minutes: Option<u32>,
 }
 
 impl WindowKey {
@@ -76,7 +80,33 @@ impl WindowKey {
         Some(Self {
             scope: w.scope,
             resets_at: w.resets_at.or(snap.resets_at)?,
+            window_minutes: w.window_minutes,
         })
+    }
+
+    /// Whether two keys name the SAME provider window. codex reports its reset as a countdown,
+    /// so the absolute instant Swamp derives drifts forward by the age of the reading; only a
+    /// move of about a whole window length is a roll.
+    pub fn same_window(&self, other: &Self) -> bool {
+        if self.scope != other.scope {
+            return false;
+        }
+        let Some(slack) = self.slack().or_else(|| other.slack()) else {
+            return self.resets_at == other.resets_at;
+        };
+        (self.resets_at - other.resets_at).abs() < slack
+    }
+
+    /// Half a window: a drifted reading moves by the age of the reading, a rolled one by the
+    /// window length. An unlabelled window gets no tolerance at all.
+    fn slack(&self) -> Option<time::Duration> {
+        let minutes = self.window_minutes.or(match self.scope {
+            LimitScope::Minute => Some(60),
+            LimitScope::FiveHour => Some(300),
+            LimitScope::SevenDay => Some(10_080),
+            LimitScope::Unknown => None,
+        })?;
+        Some(time::Duration::minutes(i64::from(minutes) / 2))
     }
 }
 
@@ -109,7 +139,11 @@ impl AccountState {
     /// window looks like on the wire, for both providers.
     pub fn roll_window(&mut self, key: Option<WindowKey>, now: OffsetDateTime) -> bool {
         let Some(key) = key else { return false };
-        if self.window_key.as_ref() == Some(&key) {
+        if self
+            .window_key
+            .as_ref()
+            .is_some_and(|k| k.same_window(&key))
+        {
             return false;
         }
         self.window_tokens = Usage::default();
@@ -141,6 +175,45 @@ impl AccountState {
         self.quota_observed_at = Some(now);
         self.quota_source = Some(source);
         rolled
+    }
+
+    /// The wall-time roll of USAGE.md 2.1, for an account no snapshot ever reaches: the
+    /// window is keyed to an epoch-quantised boundary, the grid `codex_quota::estimated`
+    /// already uses, so `window_tokens` means "this window" and not "all time". A live
+    /// measured window is left alone: its own reset is what rolls it.
+    pub fn roll_elapsed_window(
+        &mut self,
+        window: std::time::Duration,
+        now: OffsetDateTime,
+    ) -> bool {
+        if self.window_key.as_ref().is_some_and(|k| k.resets_at > now) {
+            return false;
+        }
+        let secs = window.as_secs() as i64;
+        if secs <= 0 {
+            return false;
+        }
+        let ends = now.unix_timestamp() - now.unix_timestamp().rem_euclid(secs) + secs;
+        let Ok(resets_at) = OffsetDateTime::from_unix_timestamp(ends) else {
+            return false;
+        };
+        let minutes = (secs / 60) as u32;
+        self.roll_window(
+            Some(WindowKey {
+                scope: crate::worker::codex_quota::scope_of(Some(minutes)),
+                resets_at,
+                window_minutes: Some(minutes),
+            }),
+            now,
+        )
+    }
+
+    /// Every bucket the provider reported, for display. The selected one is overwritten by
+    /// `apply_quota` with the merged snapshot dispatch actually scores against.
+    pub fn apply_buckets(&mut self, buckets: &BTreeMap<String, RateLimitSnapshot>) {
+        for (id, snap) in buckets {
+            self.quota_buckets.insert(id.clone(), snap.clone());
+        }
     }
 
     /// Fold a node's committed tokens into both counters.

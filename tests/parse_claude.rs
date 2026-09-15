@@ -896,3 +896,17 @@ fn a_process_that_dies_before_its_first_line_is_a_terminal_launch_failure() {
     }
     assert!(f.is_terminal(), "an argv error must never be retried");
 }
+
+/// `swamp resume` re-attaches to a worker and credits its account from the stream alone. The
+/// main model's line is not what the subscription paid: the side-calls are billed to it too.
+#[test]
+fn a_recovered_run_credits_the_account_total_and_not_the_main_model() {
+    let (_events, st) = parse_sample();
+    let credited = swamp::worker::account_total(&st);
+    let f = st.last_final.as_ref().expect("a final summary");
+    assert_eq!(credited, f.account_usage());
+    assert!(
+        credited.billable() > st.usage.billable(),
+        "the side-call is missing from what resume would credit"
+    );
+}

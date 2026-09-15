@@ -118,6 +118,7 @@ fn account_usage_folds_into_the_run_view() {
     let key = WindowKey {
         scope: LimitScope::SevenDay,
         resets_at: at + time::Duration::days(7),
+        window_minutes: Some(10_080),
     };
     let mut view = RunView::default();
     view.apply(&JournalLine {
@@ -164,10 +165,12 @@ fn a_merge_keeps_the_larger_lifetime_and_never_resurrects_a_rolled_window() {
     let old_key = WindowKey {
         scope: LimitScope::SevenDay,
         resets_at: now,
+        window_minutes: Some(10_080),
     };
     let new_key = WindowKey {
         scope: LimitScope::SevenDay,
         resets_at: now + time::Duration::days(7),
+        window_minutes: Some(10_080),
     };
 
     let mut theirs = StateMap::new();
@@ -323,4 +326,136 @@ fn applying_a_snapshot_records_its_provenance_and_rolls_once() {
     assert_eq!(state.window_tokens.billable(), 900);
     assert_eq!(state.quota_observed_at, Some(later));
     assert_eq!(state.quota_source, Some(QuotaSource::AppServer));
+}
+
+/// codex reports its reset as a countdown, so the absolute instant Swamp derives moves
+/// forward with every read of the same unchanged window. Re-keying on that would zero
+/// `window_tokens` after every single node.
+#[test]
+fn re_reading_one_codex_window_is_not_a_roll() {
+    let root = Utf8PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let text = std::fs::read_to_string(root.join("docs/ref/codex-ratelimits-sample.json"))
+        .expect("sample");
+    let value: serde_json::Value = serde_json::from_str(&text).expect("sample parses");
+    let now = OffsetDateTime::from_unix_timestamp(1_789_400_000).expect("now");
+    let later = now + time::Duration::minutes(5);
+
+    let first = swamp::worker::codex_quota::parse_rate_limits(&value, now);
+    let second = swamp::worker::codex_quota::parse_rate_limits(&value, later);
+    let (a, b) = (
+        first.select(None, None).expect("a bucket"),
+        second.select(None, None).expect("a bucket"),
+    );
+    assert_ne!(
+        a.windows[0].resets_at, b.windows[0].resets_at,
+        "the derived reset drifts with the age of the reading"
+    );
+
+    let mut state = AccountState::default();
+    assert!(state.apply_quota(a, QuotaSource::AppServer, now));
+    state.credit_tokens(&tokens(900_000));
+    assert!(
+        !state.apply_quota(b, QuotaSource::AppServer, later),
+        "the same provider window is not a new window"
+    );
+    assert_eq!(state.window_tokens.billable(), 900_000);
+}
+
+/// USAGE 2.1 and 2.3: every bucket the provider reported is kept for display, not just the
+/// one this account bills against.
+#[test]
+fn every_reported_bucket_is_kept_for_display() {
+    let root = Utf8PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let text = std::fs::read_to_string(root.join("docs/ref/codex-ratelimits-sample.json"))
+        .expect("sample");
+    let value: serde_json::Value = serde_json::from_str(&text).expect("sample parses");
+    let now = OffsetDateTime::from_unix_timestamp(1_789_400_000).expect("now");
+    let read = swamp::worker::codex_quota::parse_rate_limits(&value, now);
+    assert!(read.buckets.len() > 1, "the sample carries several buckets");
+
+    let mut state = AccountState::default();
+    state.apply_buckets(&read.buckets);
+    state.apply_quota(
+        read.select(None, None).expect("a bucket"),
+        QuotaSource::AppServer,
+        now,
+    );
+    let kept: Vec<&str> = state.quota_buckets.keys().map(String::as_str).collect();
+    let reported: Vec<&str> = read.buckets.keys().map(String::as_str).collect();
+    assert_eq!(kept, reported);
+    assert_eq!(
+        state.quota.as_ref().and_then(|q| q.limit_id.clone()),
+        Some("codex".to_owned()),
+        "the selected bucket is still the one dispatch scores"
+    );
+}
+
+/// USAGE 2.1: an account no snapshot ever reaches still rolls its window on wall time, or
+/// `window_tokens` is a lifetime counter and the `share` term compares the wrong numbers.
+#[test]
+fn an_account_with_no_quota_source_rolls_on_wall_time() {
+    let window = std::time::Duration::from_secs(7 * 24 * 3600);
+    let now = OffsetDateTime::from_unix_timestamp(1_789_400_000).expect("now");
+    let mut state = AccountState::default();
+
+    assert!(state.roll_elapsed_window(window, now), "the first window");
+    state.credit_tokens(&tokens(1_000));
+    let key = state.window_key.clone().expect("a key");
+    assert!(key.resets_at > now);
+
+    // Still inside it an hour later: the counter keeps counting.
+    let hour = now + time::Duration::hours(1);
+    assert!(!state.roll_elapsed_window(window, hour));
+    assert_eq!(state.window_tokens.billable(), 1_000);
+    assert_eq!(state.window_key, Some(key.clone()));
+
+    // Past the boundary: a new window, zeroed, with lifetime untouched.
+    let after = key.resets_at + time::Duration::minutes(1);
+    assert!(state.roll_elapsed_window(window, after));
+    assert_eq!(state.window_tokens, Usage::default());
+    assert_eq!(state.lifetime_tokens.billable(), 1_000);
+
+    // A live measured window owns the roll: wall time must not touch it.
+    let mut measured = AccountState::default();
+    measured.apply_quota(
+        snapshot(now + time::Duration::days(3)),
+        QuotaSource::Telemetry,
+        now,
+    );
+    measured.credit_tokens(&tokens(500));
+    assert!(!measured.roll_elapsed_window(window, now));
+    assert_eq!(measured.window_tokens.billable(), 500);
+}
+
+/// Cost accumulates per process from what the file held at startup, so the merge has to take
+/// the larger of the two totals like every other lifetime counter.
+#[test]
+fn a_concurrent_run_cannot_erase_another_processes_cost() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = Utf8PathBuf::from_path_buf(dir.path().join("accounts.json")).expect("utf8");
+    let account = AccountId("claude-main".into());
+    let now = OffsetDateTime::now_utc();
+
+    let mut theirs = StateMap::new();
+    theirs.insert(
+        account.clone(),
+        AccountState {
+            lifetime_cost_usd: 12.40,
+            updated_at: Some(now - time::Duration::minutes(5)),
+            ..AccountState::default()
+        },
+    );
+    merge_state(&path, &theirs).expect("their write");
+
+    let mut ours = StateMap::new();
+    ours.insert(
+        account.clone(),
+        AccountState {
+            lifetime_cost_usd: 0.30,
+            updated_at: Some(now),
+            ..AccountState::default()
+        },
+    );
+    let merged = merge_state(&path, &ours).expect("our write");
+    assert_eq!(merged[&account].lifetime_cost_usd, 12.40);
 }

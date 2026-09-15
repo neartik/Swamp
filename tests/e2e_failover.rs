@@ -334,3 +334,31 @@ fn every_account_at_its_limit_prints_one_notice_on_stderr() {
         .count();
     assert_eq!(blocked, 1, "one NodeBlocked journal line");
 }
+
+/// USAGE 2.1: every cross-process hand-off is keyed on `updated_at`. A disable that does not
+/// stamp it is invisible to a running supervisor, which then writes its own entry over it.
+#[test]
+fn disabling_an_account_stamps_it_for_a_running_supervisor() {
+    let h = Harness::new();
+    let before = time::OffsetDateTime::now_utc() - time::Duration::seconds(1);
+
+    h.swamp(&["accounts", "disable", "main"]).assert().success();
+    let state = h.accounts_state();
+    let main = state.get(&AccountId("main".into())).expect("main");
+    assert_eq!(main.health, Health::Disabled);
+    let stamped = main.updated_at.expect("disable stamps the entry");
+    assert!(stamped > before, "{stamped} is not the moment of the edit");
+
+    // A supervisor that loaded the file earlier yields to it, instead of erasing it.
+    let path = h.paths().accounts_state();
+    let mut stale = swamp::dispatch::persist::StateMap::new();
+    stale.insert(
+        AccountId("main".into()),
+        swamp::dispatch::AccountState {
+            updated_at: Some(before),
+            ..Default::default()
+        },
+    );
+    let merged = swamp::dispatch::persist::merge_state(&path, &stale).expect("merge");
+    assert_eq!(merged[&AccountId("main".into())].health, Health::Disabled);
+}

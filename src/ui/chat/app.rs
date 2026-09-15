@@ -74,6 +74,8 @@ pub struct App {
     /// Accounts `accounts.json` remembers that this repo's config no longer names.
     stale_accounts: Vec<(AccountId, AccountState)>,
     quota_max_age: Duration,
+    /// `providers.openai.quota_source`: "none" and "rollout" forbid the app-server probe.
+    probe_openai: bool,
     pub blocks: Vec<Block>,
     pub editor: Editor,
     pub history: History,
@@ -122,6 +124,7 @@ impl App {
             account_cfg: cfg.accounts.clone(),
             stale_accounts: Vec::new(),
             quota_max_age: cfg.quota_max_age(),
+            probe_openai: cfg.probes_app_server(Provider::Openai),
             blocks: Vec::new(),
             editor: Editor::default(),
             history,
@@ -962,6 +965,18 @@ impl App {
         }
     }
 
+    /// The slash table, for a surface that has no key events: the plain transcript runs the
+    /// same commands `/help` advertises.
+    pub fn command(&mut self, command: &str) -> Vec<Effect> {
+        self.slash(command)
+    }
+
+    /// A transcript with no live block cannot wait for a probe to land, so it renders the
+    /// numbers it already has instead of asking for new ones.
+    pub fn disable_quota_probe(&mut self) {
+        self.probe_openai = false;
+    }
+
     /// `/trace` renders from a second fold, the only slash output the reducer cannot build.
     pub fn trace_output(&mut self, text: &str) -> Vec<Effect> {
         let body = lines_of(text);
@@ -1084,7 +1099,8 @@ impl App {
             .pool
             .iter()
             .filter(|(p, _, s)| {
-                *p == Provider::Openai
+                self.probe_openai
+                    && *p == Provider::Openai
                     && s.quota_observed_at
                         .is_none_or(|at| (self.now - at) > self.quota_max_age)
             })

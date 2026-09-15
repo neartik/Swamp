@@ -16,12 +16,18 @@ pub fn duration(d: Duration) -> String {
     }
 }
 
-/// "6d21h", then "3h02m": a span the RESETS column has nine columns for.
+/// "6d21h", then "23h", then "3h02m": a span the RESETS column has nine columns for, with
+/// room for the `~` an estimated window prefixes it with.
 pub fn until(d: Duration) -> String {
     let secs = d.as_secs();
     if secs >= 86_400 {
         let (days, hours) = (secs / 86_400, (secs % 86_400) / 3600);
         return format!("{days}d{hours:02}h");
+    }
+    // "23h59m" plus "in " plus the tilde is one column too many; the minutes are the part
+    // nobody reads half a day out.
+    if secs >= 36_000 {
+        return format!("{}h", secs / 3600);
     }
     duration(d)
 }

@@ -48,16 +48,21 @@ pub struct AccountRow {
 }
 
 /// Builds rows the same way `AccountPool::snapshot()` would: one row per configured account,
-/// in that order, plus one per account the state file remembers but the config no longer names.
+/// ordered by account id like the pool's own map, plus one per account the state file
+/// remembers but the config no longer names. The ordering lives here so the chat block and
+/// the CLI cannot diverge on it.
 pub fn rows_from(
     accounts: &[AccountCfg],
     pool: &[(Provider, AccountId, AccountState)],
     stale: &[(AccountId, AccountState)],
 ) -> Vec<AccountRow> {
-    let mut out: Vec<AccountRow> = pool
+    let mut sorted: Vec<&(Provider, AccountId, AccountState)> = pool.iter().collect();
+    sorted.sort_by(|a, b| a.1.cmp(&b.1));
+    let mut out: Vec<AccountRow> = sorted
         .iter()
         .map(|(provider, id, s)| {
             let cfg = accounts.iter().find(|a| &a.id == id);
+
             row_of(
                 Some(*provider),
                 id.clone(),
@@ -268,6 +273,9 @@ fn account_lines(
 
 fn status_continuation(r: &AccountRow, now: OffsetDateTime) -> Option<String> {
     match r.health {
+        Health::AuthBroken if r.exec.is_empty() => {
+            Some("auth broken \u{b7} drop with swamp accounts reset <id>".to_owned())
+        }
         Health::AuthBroken => Some(format!(
             "auth broken \u{b7} re-auth {}",
             fmt::sanitize(&r.exec)

@@ -440,6 +440,15 @@ impl RateLimitSnapshot {
             .min()
             .or(self.resets_at)
     }
+    /// The earliest reset still ahead of us. A window that has already rolled cannot be
+    /// waited for, and taking it would turn a timed wait into a hard failure.
+    pub fn soonest_reset_at(&self, now: OffsetDateTime) -> Option<OffsetDateTime> {
+        self.current(now)
+            .filter_map(|w| w.resets_at)
+            .min()
+            .or(self.resets_at)
+            .filter(|t| *t > now)
+    }
     pub fn worst_scope(&self) -> LimitScope {
         self.tightest().map_or(LimitScope::Unknown, |w| w.scope)
     }

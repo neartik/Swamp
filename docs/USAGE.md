@@ -204,7 +204,12 @@ pub struct AccountState {
 }
 
 #[derive(PartialEq, Eq, Clone, Serialize, Deserialize)]
-pub struct WindowKey { pub scope: LimitScope, pub resets_at: OffsetDateTime }
+pub struct WindowKey {
+    pub scope: LimitScope,
+    pub resets_at: OffsetDateTime,
+    /// The provider's own window length, so two readings of one window are recognised as one.
+    pub window_minutes: Option<u32>,
+}
 
 #[derive(Copy, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -225,13 +230,16 @@ Window roll rule, the only place `window_tokens` resets:
 ```
 on a new snapshot S for account A:
     key = WindowKey { scope: S.tightest_scope(), resets_at: S.tightest_resets_at() }
-    if state.window_key != Some(key):
+    if not state.window_key.same_window(key):
         state.window_tokens = Usage::default()
         state.window_started_at = now
         state.window_key = Some(key)
 ```
 
-`resets_at` moving forward is what a rolled window looks like on the wire, for both providers. An
+`resets_at` moving forward is what a rolled window looks like on the wire, for both providers.
+codex reports its reset as a countdown, so the absolute instant Swamp derives from it moves forward
+with the age of the reading: `same_window` compares two keys with half a window of tolerance, so
+only a move of about a whole window counts as a roll. An
 account with no quota source at all keys its window to
 `WindowKey { scope: estimated_scope, resets_at: window_started_at + estimated_window }` and rolls on
 wall time.
@@ -453,7 +461,7 @@ Columns, left to right, with widths:
 | ACCOUNT | 13 | left | `AccountId` | never |
 | HEALTH | 9 | left | `watch::health_word` | never |
 | 5H | 5 | right | `LimitScope::FiveHour` window, `NN%` | `-` |
-| RESETS | 9 | right | `in 3h02m` from that window's `resets_at` | `-` |
+| RESETS | 9 | right | `in 3h02m`, `in 23h`, `in 6d21h` from that window's `resets_at` | `-` |
 | 7D | 5 | right | `LimitScope::SevenDay` window | `-` |
 | RESETS | 9 | right | same | `-` |
 | WINDOW | 10 | right | `fmt::tokens(window_tokens.billable())` | `0` |

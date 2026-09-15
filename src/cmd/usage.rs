@@ -64,6 +64,11 @@ fn terminal_width() -> u16 {
 /// error. Anthropic has no out-of-band source: its telemetry only arrives inside a worker
 /// stream, so it is not probed here.
 async fn probe_all(ctx: &Ctx, state: &mut StateMap) {
+    // `providers.openai.quota_source` is not a dispatch-only setting: "none" and "rollout"
+    // both mean "do not spawn an app-server", whoever is asking.
+    if !ctx.cfg.probes_app_server(Provider::Openai) {
+        return;
+    }
     for a in ctx
         .cfg
         .accounts
@@ -81,6 +86,7 @@ async fn probe_all(ctx: &Ctx, state: &mut StateMap) {
                 if let Some(snap) = read.select(a.limit_id.as_deref(), None) {
                     let now = OffsetDateTime::now_utc();
                     let entry = state.entry(a.id.clone()).or_default();
+                    entry.apply_buckets(&read.buckets);
                     entry.apply_quota(snap, QuotaSource::AppServer, now);
                     entry.updated_at = Some(now);
                 }

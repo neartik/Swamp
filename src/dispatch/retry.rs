@@ -123,7 +123,10 @@ pub async fn run_node(cx: &NodeCtx, mut spec: LaunchSpec, task: &TaskRequest) ->
     // Carried across a same-account retry so the backoff cannot lose the slot to a sibling.
     let mut held: Option<Lease> = None;
 
-    for attempt in 1..=cx.max_attempts {
+    // Counted by hand: a cross-provider failover launches no worker, so it must not spend
+    // one of the node's attempts.
+    let mut attempt = 0;
+    while attempt < cx.max_attempts {
         if cx.cancel.is_cancelled() {
             return cancelled(logical, attempts);
         }
@@ -166,6 +169,8 @@ pub async fn run_node(cx: &NodeCtx, mut spec: LaunchSpec, task: &TaskRequest) ->
                 }
             }
         };
+
+        attempt += 1;
 
         // A session handle is only valid for the account that minted it.
         spec.session = match &spec.session {
@@ -476,10 +481,7 @@ impl NodeTelemetry {
 /// stale, and Swamp's own counters when neither answers.
 async fn observe_codex_quota(cx: &NodeCtx, lease: &Lease, model: &str, thread: Option<String>) {
     let pc = cx.cfg.providers.get(&Provider::Openai);
-    let source = pc
-        .and_then(|p| p.quota_source.as_deref())
-        .unwrap_or("auto")
-        .to_owned();
+    let source = cx.cfg.quota_source(Provider::Openai).to_owned();
     if source == "none" {
         return;
     }
@@ -493,23 +495,35 @@ async fn observe_codex_quota(cx: &NodeCtx, lease: &Lease, model: &str, thread: O
     }
     let state = account_state(cx, &lease.account);
     if source != "rollout" && is_stale(cx, state.as_ref()) {
-        match codex_quota::read_rate_limits(&lease.exec, &lease.env).await {
-            Ok(read) => {
-                let pinned = cx
-                    .cfg
-                    .account(&lease.account)
-                    .and_then(|a| a.limit_id.clone());
-                if let Some(quota) = read.select(pinned.as_deref(), Some(model)) {
-                    // Only this call site can tell the app-server from the rollout.
-                    cx.pool.observe_quota_from(
-                        &lease.account,
-                        quota,
-                        crate::dispatch::account::QuotaSource::AppServer,
-                    );
-                    return;
+        // One app-server in flight per account: five nodes finishing together must not spawn
+        // five subprocesses and five network calls for one answer.
+        let gate = probe_gate(&lease.account);
+        let mut last = gate.lock().await;
+        let recent = last.is_some_and(|t: Instant| t.elapsed() < cx.cfg.quota_max_age());
+        if !recent && is_stale(cx, account_state(cx, &lease.account).as_ref()) {
+            let read = codex_quota::read_rate_limits(&lease.exec, &lease.env).await;
+            *last = Some(Instant::now());
+            match read {
+                Ok(read) => {
+                    let pinned = cx
+                        .cfg
+                        .account(&lease.account)
+                        .and_then(|a| a.limit_id.clone());
+                    if let Some(quota) = read.select(pinned.as_deref(), Some(model)) {
+                        // Only this call site can tell the app-server from the rollout.
+                        cx.pool.observe_quota_read(
+                            &lease.account,
+                            &read.buckets,
+                            quota,
+                            crate::dispatch::account::QuotaSource::AppServer,
+                        );
+                        return;
+                    }
                 }
+                Err(e) => tracing::debug!("no app-server quota for {}: {e:#}", lease.account.0),
             }
-            Err(e) => tracing::debug!("no app-server quota for {}: {e:#}", lease.account.0),
+        } else if !is_stale(cx, account_state(cx, &lease.account).as_ref()) {
+            return;
         }
     }
     // Neither source: an estimate, which can only deprioritise the account, never park it.
@@ -534,6 +548,21 @@ async fn observe_codex_quota(cx: &NodeCtx, lease: &Lease, model: &str, thread: O
     if let Some(quota) = codex_quota::estimated(&state.window_tokens, window, limit, now) {
         cx.pool.observe_quota(&lease.account, quota);
     }
+}
+
+/// When an account was last probed, held under the lock that serialises its probes.
+pub type ProbeGate = Arc<tokio::sync::Mutex<Option<Instant>>>;
+
+/// The per-account app-server single flight.
+pub fn probe_gate(id: &AccountId) -> ProbeGate {
+    static GATES: std::sync::OnceLock<Mutex<std::collections::HashMap<AccountId, ProbeGate>>> =
+        std::sync::OnceLock::new();
+    GATES
+        .get_or_init(Default::default)
+        .lock()
+        .entry(id.clone())
+        .or_default()
+        .clone()
 }
 
 fn account_state(cx: &NodeCtx, id: &AccountId) -> Option<AccountState> {
@@ -658,6 +687,7 @@ fn crashed_outcome(e: anyhow::Error) -> RunOutcome {
         exit: None,
         session: None,
         usage: Default::default(),
+        account_usage: Default::default(),
         cost: None,
         summary: Some(e.to_string()),
         files: Vec::new(),

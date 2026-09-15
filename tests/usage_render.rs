@@ -569,3 +569,169 @@ exec = "codex-main"
     swamp::config::validate::validate(&mut cfg).expect("fixture config is valid");
     cfg
 }
+
+/// The chat block iterates the pool's `BTreeMap` and the CLI its config declaration order.
+/// One renderer means one row order, so the ordering lives in `rows_from`.
+#[test]
+fn both_surfaces_order_the_rows_the_same_way() {
+    let cfg = two_account_config();
+    // Declaration order, as `swamp usage` builds it.
+    let declared = vec![
+        (
+            Provider::Anthropic,
+            AccountId("zeta".into()),
+            AccountState::default(),
+        ),
+        (
+            Provider::Anthropic,
+            AccountId("alpha".into()),
+            AccountState::default(),
+        ),
+    ];
+    let mut by_id = declared.clone();
+    by_id.reverse();
+    let names = |pool: &[(Provider, AccountId, AccountState)]| -> Vec<String> {
+        usage::rows_from(&cfg.accounts, pool, &[])
+            .iter()
+            .map(|r| r.account.0.clone())
+            .collect()
+    };
+    assert_eq!(
+        names(&declared),
+        vec!["alpha".to_owned(), "zeta".to_owned()]
+    );
+    assert_eq!(names(&declared), names(&by_id));
+}
+
+/// An estimated reset between ten hours and a day out is `~in 23h59m` on the old format: one
+/// column too many for RESETS, which then truncates it to an ellipsis.
+#[test]
+fn an_estimated_reset_under_a_day_fits_the_column() {
+    let mut r = row("claude-main", Provider::Anthropic, Health::Healthy);
+    r.quota = Some(RateLimitSnapshot {
+        status: LimitStatus::Allowed,
+        windows: vec![LimitWindow {
+            scope: LimitScope::SevenDay,
+            utilization: 0.4,
+            resets_at: Some(
+                OffsetDateTime::now_utc() + time::Duration::hours(23) + time::Duration::minutes(59),
+            ),
+            window_minutes: Some(10080),
+            measured: false,
+        }],
+        ..RateLimitSnapshot::default()
+    });
+    let body = screen(
+        &usage::render(std::slice::from_ref(&r), 100, &Theme::plain(), MAX_AGE),
+        100,
+    );
+    assert!(!body.contains('\u{2026}'), "{body}");
+    assert!(body.contains("~in 23h"), "{body}");
+}
+
+/// A `not in config` row has no executable to name, so the re-auth instruction would name
+/// nothing at all.
+#[test]
+fn an_auth_broken_row_with_no_executable_names_something_else() {
+    let stale = vec![(
+        AccountId("codex-old".into()),
+        AccountState {
+            health: Health::AuthBroken,
+            ..AccountState::default()
+        },
+    )];
+    let rows = usage::rows_from(&[], &[], &stale);
+    let body = screen(&usage::render(&rows, 100, &Theme::plain(), MAX_AGE), 100);
+    assert!(!body.contains("re-auth"), "{body}");
+    assert!(body.contains("auth broken"), "{body}");
+}
+
+/// USAGE 4.8: `providers.openai.quota_source = "none"` forbids the app-server, and `/usage`
+/// is not exempt from it.
+#[test]
+fn quota_source_none_kicks_no_probe_from_chat() {
+    let cfg = no_probe_config();
+    let mut app = chat_app(&cfg, 100);
+    app.pool = vec![(
+        Provider::Openai,
+        AccountId("codex-main".into()),
+        AccountState::default(),
+    )];
+    let effects = usage_effects(&mut app);
+    assert!(
+        !effects
+            .iter()
+            .any(|e| matches!(e, swamp::ui::chat::app::Effect::ProbeQuota(_))),
+        "the user asked Swamp not to spawn an app-server"
+    );
+    assert!(
+        effects
+            .iter()
+            .any(|e| matches!(e, swamp::ui::chat::app::Effect::Commit(_))),
+        "the table commits with what it already has"
+    );
+    assert!(!cfg.probes_app_server(Provider::Openai));
+    assert!(!no_probe_config_rollout().probes_app_server(Provider::Openai));
+}
+
+fn from_toml(text: &str) -> swamp::config::Config {
+    let schema: swamp::config::Schema = toml::from_str(text).expect("fixture config parses");
+    let layers = vec![
+        swamp::config::load::default_layer(),
+        swamp::config::load::Layer {
+            origin: "test".into(),
+            schema,
+        },
+    ];
+    let mut cfg = swamp::config::resolve::from_schema(swamp::config::load::merge(layers));
+    swamp::config::validate::validate(&mut cfg).expect("fixture config is valid");
+    cfg
+}
+
+fn two_account_config() -> swamp::config::Config {
+    from_toml(
+        r#"
+version = 1
+[providers.anthropic]
+models = { high = "opus", mid = "sonnet", low = "haiku" }
+[[accounts]]
+id = "zeta"
+provider = "anthropic"
+exec = "claude-zeta"
+[[accounts]]
+id = "alpha"
+provider = "anthropic"
+exec = "claude-alpha"
+"#,
+    )
+}
+
+fn no_probe_config() -> swamp::config::Config {
+    from_toml(
+        r#"
+version = 1
+[providers.openai]
+quota_source = "none"
+models = { high = "gpt-5-codex", mid = "gpt-5-codex", low = "gpt-5-codex" }
+[[accounts]]
+id = "codex-main"
+provider = "openai"
+exec = "codex-main"
+"#,
+    )
+}
+
+fn no_probe_config_rollout() -> swamp::config::Config {
+    from_toml(
+        r#"
+version = 1
+[providers.openai]
+quota_source = "rollout"
+models = { high = "gpt-5-codex", mid = "gpt-5-codex", low = "gpt-5-codex" }
+[[accounts]]
+id = "codex-main"
+provider = "openai"
+exec = "codex-main"
+"#,
+    )
+}

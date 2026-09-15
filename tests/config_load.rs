@@ -686,3 +686,32 @@ quota_source = "app_server"
     assert!(text.contains("providers.openai.quota_source"), "{text}");
     assert!(text.contains("app-server"), "{text}");
 }
+
+/// README and the adapter both say it: a repeated `--disallowed-tools` overwrites the merged
+/// list, so the shipped example must not put one in `readonly_args`. Read-only would
+/// otherwise be the one isolation mode where `deny_tools` stops applying.
+#[test]
+fn the_example_readonly_args_do_not_overwrite_the_denied_tool_list() {
+    let sb = Sandbox::new();
+    let cfg = sb
+        .load(Some(&example_config()), None)
+        .expect("example config loads");
+    let worker = &cfg
+        .providers
+        .get(&Provider::Anthropic)
+        .expect("anthropic")
+        .worker;
+    assert!(
+        !worker.deny_tools.is_empty(),
+        "the example denies the delegation tools"
+    );
+    for args in [
+        worker.args_for(IsolationMode::ReadOnly),
+        worker.args_for(IsolationMode::Worktree),
+    ] {
+        assert!(
+            !args.iter().any(|a| a == "--disallowed-tools"),
+            "a raw variadic flag overwrites the merged list: {args:?}"
+        );
+    }
+}

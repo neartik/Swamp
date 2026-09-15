@@ -184,6 +184,20 @@ impl Config {
             .unwrap_or(crate::dispatch::policy::DEFAULT_QUOTA_MAX_AGE)
     }
 
+    /// `providers.<p>.quota_source`: "auto | rollout | app-server | none". Every out-of-band
+    /// probe honours it, not just the one dispatch runs.
+    pub fn quota_source(&self, p: crate::model::core::Provider) -> &str {
+        self.providers
+            .get(&p)
+            .and_then(|c| c.quota_source.as_deref())
+            .unwrap_or("auto")
+    }
+
+    /// Whether `account/rateLimits/read` may be spawned at all for this provider.
+    pub fn probes_app_server(&self, p: crate::model::core::Provider) -> bool {
+        matches!(self.quota_source(p), "auto" | "app-server")
+    }
+
     /// basis = Estimated. `None` when no `[pricing]` row exists, never `Some(0.0)`.
     pub fn estimate_cost(&self, model: &str, u: &Usage) -> Option<Cost> {
         let row = self.pricing.get(model)?;

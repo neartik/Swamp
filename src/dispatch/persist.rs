@@ -1,4 +1,4 @@
-use crate::dispatch::account::AccountState;
+use crate::dispatch::account::{AccountState, WindowKey};
 use crate::model::core::AccountId;
 use anyhow::Context;
 use camino::Utf8Path;
@@ -40,9 +40,12 @@ pub fn merge_state(path: &Utf8Path, mine: &StateMap) -> anyhow::Result<StateMap>
         if let Some(theirs) = &theirs {
             entry.lifetime_nodes = theirs.lifetime_nodes.max(ours.lifetime_nodes);
             entry.lifetime_tokens.take_max(&theirs.lifetime_tokens);
+            // Cost accumulates per process from whatever the file held at startup, so our
+            // own total does not include what the other process has spent since.
+            entry.lifetime_cost_usd = entry.lifetime_cost_usd.max(theirs.lifetime_cost_usd);
             // A rolled window starts at zero: only the SAME window may keep the other
             // process's count, or a reset window comes straight back from the file.
-            if theirs.window_key == ours.window_key {
+            if same_window(theirs.window_key.as_ref(), ours.window_key.as_ref()) {
                 entry.window_tokens.take_max(&theirs.window_tokens);
             }
         }
@@ -52,6 +55,16 @@ pub fn merge_state(path: &Utf8Path, mine: &StateMap) -> anyhow::Result<StateMap>
     }
     write_locked(path, dir, &merged)?;
     Ok(merged)
+}
+
+/// Two processes reading one codex window derive reset instants that differ by the age of
+/// each reading, so the keys are compared by window and not byte for byte.
+fn same_window(a: Option<&WindowKey>, b: Option<&WindowKey>) -> bool {
+    match (a, b) {
+        (Some(a), Some(b)) => a.same_window(b),
+        (None, None) => true,
+        _ => false,
+    }
 }
 
 pub fn save_state(path: &Utf8Path, s: &StateMap) -> anyhow::Result<()> {
