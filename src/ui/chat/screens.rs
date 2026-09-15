@@ -241,6 +241,20 @@ fn errors_and_interrupts() {
     insta::assert_snapshot!("cancelled_notice_100", committed(cancelled, 100));
 }
 
+/// USAGE 4.7: a blocked node is a wait, not a failure, and the wait is visible.
+#[test]
+fn every_account_at_its_limit_commits_a_notice() {
+    let mut app = dispatched(100);
+    let blocked = app.reduce(Msg::Journal(fx::blocked()));
+    insta::assert_snapshot!("blocked_notice_100", committed(blocked, 100));
+    assert!(
+        app.blocks
+            .iter()
+            .all(|b| !matches!(b, crate::ui::chat::blocks::Block::Notice { .. })),
+        "the notice commits to scrollback, it does not hold the live area"
+    );
+}
+
 // ---------------------------------------------------------------- 3.7 and 3.8
 
 #[test]

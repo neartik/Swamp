@@ -267,6 +267,18 @@ pub fn third() -> Vec<JournalLine> {
     )]
 }
 
+/// Every anthropic account at its limit: the one line the pool journals per blocked node.
+pub fn blocked() -> Vec<JournalLine> {
+    vec![line(
+        8,
+        Some(id(4)),
+        JournalEvent::NodeBlocked {
+            until: at(2_660),
+            why: "main cooling until 22:57".into(),
+        },
+    )]
+}
+
 pub fn config() -> crate::config::Config {
     let schema: crate::config::Schema = toml::from_str(
         r#"

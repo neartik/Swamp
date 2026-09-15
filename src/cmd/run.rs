@@ -31,6 +31,7 @@ pub async fn run(ctx: &Ctx, args: &RunArgs) -> anyhow::Result<i32> {
     }
     preflight(ctx, &cfg).await?;
     let session = RunSession::start(ctx, cfg, RunId::new(), Some(&task)).await?;
+    session.pool.notices_to_stderr();
     if !ctx.json {
         println!("run {}", session.paths.run);
     }

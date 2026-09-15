@@ -3,7 +3,7 @@ use crate::config::schema::AccountCfg;
 use crate::dispatch::account::AccountState;
 use crate::ids::{NodeId, RunId};
 use crate::journal::fold::RunView;
-use crate::journal::record::JournalLine;
+use crate::journal::record::{JournalEvent, JournalLine};
 use crate::model::core::{AccountId, NodeState, Provider, Tier};
 use crate::ui::chat::blocks::{Block, Ctx, ToolState, WelcomeInfo, bullet_first, tool_args};
 use crate::ui::chat::input::{Editor, History};
@@ -404,11 +404,41 @@ impl App {
     // ------------------------------------------------------------ journal
 
     fn on_journal(&mut self, lines: &[JournalLine]) -> Vec<Effect> {
+        let mut out = Vec::new();
         for l in lines {
             self.view.apply(l);
+            if let JournalEvent::NodeBlocked { until, why } = &l.event {
+                out.push(self.blocked(*until, why));
+            }
         }
         self.admit();
-        Vec::new()
+        out
+    }
+
+    /// The pool journals one of these per blocked node, so this commits one notice per node.
+    fn blocked(&mut self, until: OffsetDateTime, why: &str) -> Effect {
+        let head = fmt::blocked_notice(
+            self.blocked_provider(why),
+            until,
+            self.now,
+            "esc esc to cancel",
+        );
+        self.commit(Block::Notice {
+            glyph: self.theme.g(Glyph::Blocked).to_owned(),
+            role: Role::Meta,
+            head,
+            body: Vec::new(),
+        })
+    }
+
+    /// `why` names accounts, never a provider; the configured pool maps the first one back.
+    fn blocked_provider(&self, why: &str) -> Provider {
+        let first = why.split_whitespace().next().unwrap_or_default();
+        self.account_cfg
+            .iter()
+            .find(|a| a.id.0 == first)
+            .or_else(|| self.account_cfg.first())
+            .map_or(Provider::Anthropic, |a| a.provider)
     }
 
     /// Any brain child in the fold joins the open batch; a node with no call behind it joins

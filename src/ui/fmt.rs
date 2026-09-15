@@ -1,5 +1,6 @@
-use crate::model::core::{Cost, NodeState};
+use crate::model::core::{Cost, NodeState, Provider};
 use std::time::Duration;
+use time::OffsetDateTime;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 /// "4m12s"
@@ -133,6 +134,34 @@ pub fn clock_hm(at: time::OffsetDateTime) -> String {
 
 pub fn short_sha(s: &str) -> String {
     s.chars().take(7).collect()
+}
+
+/// "41m", "2h05m": a window rolls minutes from now at best, so the seconds are noise.
+fn away(from: OffsetDateTime, to: OffsetDateTime) -> String {
+    let secs = (to - from).whole_seconds().max(0);
+    let (h, m) = (secs / 3600, (secs % 3600) / 60);
+    if h > 0 {
+        format!("{h}h{m:02}m")
+    } else if m > 0 {
+        format!("{m}m")
+    } else {
+        format!("{secs}s")
+    }
+}
+
+/// The one line a node blocked on an exhausted pool gets. `cancel` is the only part chat and
+/// `swamp run` disagree on, so the wording cannot drift between them.
+pub fn blocked_notice(
+    provider: Provider,
+    until: OffsetDateTime,
+    now: OffsetDateTime,
+    cancel: &str,
+) -> String {
+    format!(
+        "every {provider} account is at its limit \u{b7} earliest reset {} (in {}) \u{b7} {cancel}",
+        clock_hm(until),
+        away(now, until)
+    )
 }
 
 #[cfg(test)]

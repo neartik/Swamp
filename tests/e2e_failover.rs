@@ -288,3 +288,49 @@ fn state_for_an_account_that_left_the_config_is_listed_and_droppable() {
         .failure()
         .stderr(predicates::str::contains("no recorded state"));
 }
+
+/// USAGE 4.7: a pool with nothing left is a wait, not a silent stall. The node blocks until
+/// its own `--timeout`, and `swamp run` says so on stderr before it starts waiting.
+#[test]
+fn every_account_at_its_limit_prints_one_notice_on_stderr() {
+    let resets_at = epoch_in(3600);
+    let h = Harness::new()
+        .with_accounts(2, 0)
+        .scenario("main", Scenario::claude_rate_limited(resets_at))
+        .scenario("alt", Scenario::claude_rate_limited(resets_at));
+
+    // Burns both subscriptions. The cooldown is machine-wide, so the next run starts blocked.
+    h.swamp(&["run", "--no-brain", TASK]).assert().code(3);
+
+    let out = h
+        .swamp(&["run", "--no-brain", "--timeout", "3s", TASK])
+        .assert()
+        .code(3)
+        .stderr(predicates::str::contains(
+            "every anthropic account is at its limit",
+        ))
+        .stderr(predicates::str::contains("earliest reset"))
+        .stderr(predicates::str::contains("ctrl-c to cancel"))
+        .get_output()
+        .clone();
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        stderr
+            .lines()
+            .filter(|l| l.contains("is at its limit"))
+            .count(),
+        1,
+        "one notice per blocked node, not one per recheck: {stderr}"
+    );
+
+    // Nothing ran: the wait ended at the node deadline, and no wrapper was invoked again.
+    assert_eq!(h.invocations("main").len(), 1);
+    assert_eq!(h.invocations("alt").len(), 1);
+    let blocked = h
+        .journal_text(*h.runs().first().expect("the blocked run"))
+        .lines()
+        .filter(|l| l.contains("node_blocked"))
+        .count();
+    assert_eq!(blocked, 1, "one NodeBlocked journal line");
+}

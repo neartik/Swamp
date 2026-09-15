@@ -14,7 +14,7 @@ use camino::Utf8PathBuf;
 use parking_lot::Mutex;
 use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 use time::OffsetDateTime;
 use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore};
@@ -42,6 +42,8 @@ pub struct AccountPool {
     wakeups: AtomicU64,
     /// Rotates the candidate order, so accounts tied on every counter still alternate.
     cursor: AtomicU64,
+    /// `swamp run` has no live view of its own; chat renders the same notice from the journal.
+    stderr_notices: AtomicBool,
 }
 
 /// Drop decrements inflight and notifies waiters, so a panicking node cannot leak a slot.
@@ -177,7 +179,13 @@ impl AccountPool {
             reserved: Mutex::new(None),
             wakeups: AtomicU64::new(0),
             cursor: AtomicU64::new(0),
+            stderr_notices: AtomicBool::new(false),
         }))
+    }
+
+    /// `swamp run` prints the blocked notice itself: it has no live view to render one in.
+    pub fn notices_to_stderr(&self) {
+        self.stderr_notices.store(true, Ordering::Relaxed);
     }
 
     /// Never busy-spins: waits on a Notify or sleeps until the earliest journaled reset.
@@ -231,6 +239,17 @@ impl AccountPool {
                             "every {provider} account is at its limit until {}: {why}",
                             crate::ui::fmt::clock_hm(retry_at)
                         );
+                        if self.stderr_notices.load(Ordering::Relaxed) {
+                            eprintln!(
+                                "swamp: {}",
+                                crate::ui::fmt::blocked_notice(
+                                    provider,
+                                    retry_at,
+                                    OffsetDateTime::now_utc(),
+                                    "ctrl-c to cancel",
+                                )
+                            );
+                        }
                         crate::dispatch::emit(
                             &self.journal,
                             node,
