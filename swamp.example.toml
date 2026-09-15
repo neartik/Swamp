@@ -3,16 +3,11 @@ version = 1
 
 # ---------------------------------------------------------------- limits
 [limits]
-max_parallel          = 4          # machine-wide concurrent worker processes
 max_nodes_per_run     = 32
-max_parallel_dispatch = 6          # per single swamp_dispatch call
-max_high_tier_concurrent = 2       # `high` is expensive and the brain will over-reach
 max_depth             = 2          # brain -> worker -> refused (also via SWAMP_DEPTH)
 worker_timeout        = "25m"
 brain_turn_timeout    = "15m"
 grace_period          = "5s"       # SIGTERM -> SIGKILL window
-run_budget_usd        = 25.0
-node_budget_usd       = 3.0        # -> claude --max-budget-usd; codex has no equivalent
 max_prompt_bytes      = 200000
 max_result_bytes      = 8000       # cap on worker output fed back to the brain
 unsafe_ack            = false      # required before any --dangerously-* flag is accepted
@@ -49,6 +44,15 @@ max_attempts            = 3
 cross_provider_failover = false
 default_provider        = "anthropic"
 default_tier            = "mid"
+quota_max_age           = "60s"    # out-of-band probe threshold for /usage and dispatch
+near_exhaustion_penalty = 2.0
+
+  [dispatch.weights]
+  util   = 0.50
+  load   = 0.30
+  share  = 0.15
+  weight = 0.05
+  idle   = 0.02
 
 [cooldown]
 min = "60s"
@@ -118,6 +122,9 @@ models  = { high = "gpt-6-astra", mid = "gpt-5.6-sol", low = "gpt-5.6-terra" }
 tier_extra = { high = { model_reasoning_effort = "high" },
                mid  = { model_reasoning_effort = "medium" },
                low  = { model_reasoning_effort = "low" } }
+quota_source            = "auto"   # auto | rollout | app-server | none
+estimated_window        = "7d"
+estimated_window_tokens = 0        # 0 = no estimate, render "-"
 
   [providers.openai.worker]
   sandbox = "workspace-write"
@@ -158,13 +165,13 @@ id = "codex-main"
 provider = "openai"
 exec = "codex-main"
 max_concurrency = 2
+limit_id = "codex"                # optional: which quota bucket this account routes against
 
 # ---------------------------------------------------------------- tiers
 # Cross-provider order, consulted ONLY when every account of the current provider is cooling
 # and dispatch.cross_provider_failover = true.
 [tiers.high]
 provider_order = ["anthropic", "openai"]
-node_budget_usd = 8.0
 timeout = "45m"
 
 [tiers.mid]
@@ -172,7 +179,6 @@ provider_order = ["anthropic", "openai"]
 
 [tiers.low]
 provider_order = ["anthropic"]
-node_budget_usd = 0.75
 timeout = "10m"
 
 # ---------------------------------------------------------------- failure patterns
@@ -217,5 +223,4 @@ chat_history   = 500
 # `swamp --profile cheap run "..."` layers this over everything above.
 [profiles.cheap]
 "dispatch.default_tier" = "low"
-"limits.max_parallel"   = 2
 "brain.tier"            = "mid"

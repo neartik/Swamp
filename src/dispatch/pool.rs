@@ -17,7 +17,6 @@ use time::OffsetDateTime;
 use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore};
 use tokio::time::Instant;
 
-const DEFAULT_MAX_PARALLEL: usize = 4;
 const DEFAULT_ACCOUNT_CONCURRENCY: usize = 2;
 const DEFAULT_QUOTA_WARN: f64 = 0.90;
 const DEFAULT_QUOTA_STOP: f64 = 0.98;
@@ -31,8 +30,6 @@ pub struct AccountPool {
     pub journal: JournalHandle,
     accounts: BTreeMap<AccountId, Account>,
     state: Mutex<StateMap>,
-    /// limits.max_parallel, minus the brain's permit when it is reserved.
-    global: Arc<Semaphore>,
     /// The brain's own slot. Taking a worker permit for it would charge the reservation twice.
     brain: Arc<Semaphore>,
     returned: Notify,
@@ -47,7 +44,7 @@ pub struct Lease {
     pub account: AccountId,
     pub exec: String,
     pub env: BTreeMap<String, String>,
-    _permit: OwnedSemaphorePermit,
+    _permit: Option<OwnedSemaphorePermit>,
     pool: Arc<AccountPool>,
 }
 
@@ -142,15 +139,6 @@ impl AccountPool {
             state.entry(id.clone()).or_default();
         }
 
-        let mut permits = cfg
-            .limits
-            .max_parallel
-            .unwrap_or(DEFAULT_MAX_PARALLEL)
-            .max(1);
-        if cfg.brain.reserve_brain_slot == Some(true) {
-            permits = permits.saturating_sub(1).max(1);
-        }
-
         Ok(Arc::new(Self {
             policy: cfg.dispatch.policy.unwrap_or_default(),
             cfg,
@@ -158,7 +146,6 @@ impl AccountPool {
             journal,
             accounts,
             state: Mutex::new(state),
-            global: Arc::new(Semaphore::new(permits)),
             brain: Arc::new(Semaphore::new(1)),
             returned: Notify::new(),
             reserved: Mutex::new(None),
@@ -182,30 +169,14 @@ impl AccountPool {
             tokio::pin!(notified);
             notified.as_mut().enable();
             let wake_at = match self.capacity(provider, exclude) {
-                Capacity::Ready => {
-                    let permit = match tokio::time::timeout_at(
-                        deadline,
-                        Arc::clone(&self.global).acquire_owned(),
-                    )
-                    .await
-                    {
-                        Ok(Ok(p)) => p,
-                        Ok(Err(_)) => {
-                            return Err(NoCapacity::Exhausted {
-                                reason: "dispatch pool is shutting down".into(),
-                            });
-                        }
-                        Err(_) => return Err(NoCapacity::Saturated),
-                    };
-                    match self.take(provider, exclude, permit) {
-                        Some(lease) => return Ok(lease),
-                        // Someone else won the race; the permit is already back.
-                        None => {
-                            self.returned.notify_waiters();
-                            None
-                        }
+                Capacity::Ready => match self.take(provider, exclude) {
+                    Some(lease) => return Ok(lease),
+                    // Someone else won the race.
+                    None => {
+                        self.returned.notify_waiters();
+                        None
                     }
-                }
+                },
                 Capacity::Busy { next_reset } => next_reset,
                 Capacity::AllCooling { retry_at } => {
                     return Err(NoCapacity::AllCooling { retry_at });
@@ -268,7 +239,7 @@ impl AccountPool {
             Err(_) => return Err(NoCapacity::Saturated),
         };
         let exclude = HashSet::new();
-        self.take_from(provider, &exclude, chosen.as_ref(), permit)
+        self.take_from(provider, &exclude, chosen.as_ref(), Some(permit))
             .ok_or_else(|| NoCapacity::Exhausted {
                 reason: match &chosen {
                     Some(id) => format!("the brain's account `{}` is cooling or disabled", id.0),
@@ -497,13 +468,8 @@ impl AccountPool {
         }
     }
 
-    fn take(
-        self: &Arc<Self>,
-        provider: Provider,
-        exclude: &HashSet<AccountId>,
-        permit: OwnedSemaphorePermit,
-    ) -> Option<Lease> {
-        self.take_from(provider, exclude, None, permit)
+    fn take(self: &Arc<Self>, provider: Provider, exclude: &HashSet<AccountId>) -> Option<Lease> {
+        self.take_from(provider, exclude, None, None)
     }
 
     fn take_from(
@@ -511,7 +477,7 @@ impl AccountPool {
         provider: Provider,
         exclude: &HashSet<AccountId>,
         pin: Option<&AccountId>,
-        permit: OwnedSemaphorePermit,
+        permit: Option<OwnedSemaphorePermit>,
     ) -> Option<Lease> {
         let now = OffsetDateTime::now_utc();
         let candidates: Vec<&Account> = match pin {
