@@ -51,6 +51,8 @@ pub enum Command {
     Resume(ResumeArgs),
     /// Account health and rotation state
     Accounts(AccountsArgs),
+    /// Per-account tokens and quota windows
+    Usage(UsageArgs),
     /// Show a worker's diff
     Diff(DiffArgs),
     /// Land a worker's work in the user's tree
@@ -218,6 +220,16 @@ pub enum AccountsCmd {
         #[arg(value_name = "ID")]
         id: Option<String>,
     },
+}
+
+#[derive(Debug, Default, Args)]
+pub struct UsageArgs {
+    /// Force one out-of-band probe per account first, waiting up to 10s each
+    #[arg(long)]
+    pub probe: bool,
+    /// Machine-readable output; same as the global --json
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Debug, Args)]

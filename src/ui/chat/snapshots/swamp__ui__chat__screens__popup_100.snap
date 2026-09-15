@@ -1,5 +1,6 @@
 ---
 source: src/ui/chat/screens.rs
+assertion_line: 251
 expression: "live(&mut app, 100)"
 ---
 ▌ /trace      the run tree with its events
@@ -8,9 +9,9 @@ expression: "live(&mut app, 100)"
   /help       commands and keyboard shortcuts
   /status     the run tree, same output as swamp trace
   /accounts   the account pool, health and spend
+  /usage      per-account tokens and quota windows
   /cost       tokens and spend for this run
-  /cancel     stop one worker or all of them
-  … +4 more
+  … +5 more
 ────────────────────────────────────────────────────────────────────────────────────────────────────
 > /t
 ────────────────────────────────────────────────────────────────────────────────────────────────────

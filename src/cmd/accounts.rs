@@ -93,13 +93,17 @@ fn list(ctx: &Ctx) -> anyhow::Result<i32> {
     );
     for a in &ctx.cfg.accounts {
         let s = state.get(&a.id).cloned().unwrap_or_default();
+        let cap = a
+            .max_concurrency
+            .map(|c| c.to_string())
+            .unwrap_or_else(|| "-".to_owned());
         text.push_str(&format!(
             "{:<10} {:<8} {:<14} {:<10} {:<9} {:<6} {:<6} {:<10} {:<6} ~{:.2}{}\n",
             a.provider,
             a.id.0,
             a.exec,
             crate::ui::watch::health_word(s.health),
-            format!("{}/{}", s.inflight, a.max_concurrency.unwrap_or(2)),
+            format!("{}/{cap}", s.inflight),
             util(window(&s, LimitScope::FiveHour)),
             util(window(&s, LimitScope::SevenDay)),
             cooldown(&s, now),
