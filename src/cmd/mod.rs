@@ -12,6 +12,7 @@ pub mod resume;
 pub mod run;
 pub mod runs;
 pub mod trace;
+pub mod usage;
 pub mod watch;
 pub mod worktrees;
 

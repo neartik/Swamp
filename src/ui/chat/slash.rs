@@ -28,6 +28,11 @@ pub const COMMANDS: &[Cmd] = &[
         help: "the account pool, health and spend",
     },
     Cmd {
+        name: "/usage",
+        args: "[--json]",
+        help: "per-account tokens and quota windows",
+    },
+    Cmd {
         name: "/trace",
         args: "[node]",
         help: "the run tree with its events",
@@ -320,6 +325,10 @@ mod tests {
         assert_eq!(lines.len(), MAX_ROWS + 1);
         let text = crate::ui::chat::blocks::text_of(&lines);
         assert!(text[1].starts_with('▌'), "{text:?}");
-        assert!(text.last().unwrap().contains("+4 more"), "{text:?}");
+        let hidden = COMMANDS.len() - MAX_ROWS;
+        assert!(
+            text.last().unwrap().contains(&format!("+{hidden} more")),
+            "{text:?}"
+        );
     }
 }

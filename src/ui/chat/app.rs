@@ -1,4 +1,5 @@
 use crate::brain::BrainEvent;
+use crate::config::schema::AccountCfg;
 use crate::dispatch::account::AccountState;
 use crate::ids::{NodeId, RunId};
 use crate::journal::fold::RunView;
@@ -64,6 +65,8 @@ pub struct App {
     pub brain: NodeId,
     pub view: RunView,
     pub pool: Vec<(Provider, AccountId, AccountState)>,
+    /// `exec` and `max_concurrency` for `/usage`; the pool snapshot alone does not carry them.
+    account_cfg: Vec<AccountCfg>,
     pub blocks: Vec<Block>,
     pub editor: Editor,
     pub history: History,
@@ -109,6 +112,7 @@ impl App {
             brain: NodeId(run.0),
             view: RunView::default(),
             pool: Vec::new(),
+            account_cfg: cfg.accounts.clone(),
             blocks: Vec::new(),
             editor: Editor::default(),
             history,
@@ -827,6 +831,7 @@ impl App {
                 let body = self.accounts_body();
                 vec![self.output("", body)]
             }
+            "usage" => vec![self.usage_output(arg.as_deref() == Some("--json"))],
             "cost" => {
                 let body = self.cost_body();
                 vec![self.output("", body)]
@@ -979,6 +984,22 @@ impl App {
                 )
             })
             .collect()
+    }
+
+    /// Shares `ui::usage::render` byte-for-byte with `swamp usage`; only `--json` goes through
+    /// `Block::Slash` since a table needs its own colouring, not the block's flat `meta`.
+    fn usage_output(&mut self, json: bool) -> Effect {
+        let stale: Vec<(AccountId, AccountState)> = Vec::new();
+        let rows = crate::ui::usage::rows_from(&self.account_cfg, &self.pool, &stale);
+        if json {
+            let text = serde_json::to_string_pretty(&crate::ui::usage::json(&rows))
+                .unwrap_or_default();
+            let mut body: Vec<String> = vec!["```json".to_owned()];
+            body.extend(text.lines().map(str::to_owned));
+            body.push("```".to_owned());
+            return self.output("", body);
+        }
+        Effect::Commit(crate::ui::usage::render(&rows, self.width, &self.theme))
     }
 
     fn cost_body(&self) -> Vec<String> {
