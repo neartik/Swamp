@@ -22,7 +22,7 @@ use crate::worker::adapter::{LaunchSpec, SessionPlan};
 use crate::workspace::{NodeWorktree, WorkspaceManager};
 use async_trait::async_trait;
 use parking_lot::Mutex;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
@@ -186,16 +186,34 @@ impl Dispatcher {
         self.base_depth.store(depth, Ordering::Relaxed);
     }
 
-    /// Every live node, for shutdown. Cancelling an already-settled node is a no-op.
+    /// Every node still running, for `esc esc` and shutdown. Settled nodes are dropped rather
+    /// than cancelled, so the count is the number of workers actually stopped and a later
+    /// dispatch on the same run is untouched.
     pub fn cancel_all(&self) -> usize {
-        let tokens: Vec<CancellationToken> = self.cancels.lock().values().cloned().collect();
+        // The brain is the run's own root: cancelling it would end the session, not a worker.
+        let brain = NodeId(self.journal.run().0);
+        let settled: HashSet<NodeId> = {
+            let results = self.results.lock();
+            results
+                .iter()
+                .filter(|(_, r)| r.state != "running")
+                .map(|(id, _)| *id)
+                .collect()
+        };
         let mut n = 0;
-        for t in tokens {
-            if !t.is_cancelled() {
-                t.cancel();
+        self.cancels.lock().retain(|id, token| {
+            if *id == brain {
+                return true;
+            }
+            if settled.contains(id) {
+                return false;
+            }
+            if !token.is_cancelled() {
+                token.cancel();
                 n += 1;
             }
-        }
+            true
+        });
         n
     }
 

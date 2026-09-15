@@ -26,6 +26,8 @@ impl Write for Vt {
 struct Host {
     term: Inline<Vt>,
     vt: Vt,
+    cols: u16,
+    rows: u16,
 }
 
 impl Host {
@@ -33,12 +35,19 @@ impl Host {
     fn new(prelude: &[&str]) -> Host {
         let parser = Rc::new(RefCell::new(vt100::Parser::new(ROWS, COLS, 500)));
         for line in prelude {
-            parser.borrow_mut().process(format!("{line}\r\n").as_bytes());
+            parser
+                .borrow_mut()
+                .process(format!("{line}\r\n").as_bytes());
         }
         let row = parser.borrow().screen().cursor_position().0;
         let vt = Vt(parser);
         let term = Inline::new(vt.clone(), COLS, ROWS, 4, row).expect("inline");
-        Host { term, vt }
+        Host {
+            term,
+            vt,
+            cols: COLS,
+            rows: ROWS,
+        }
     }
 
     /// One turn of the chat loop: size the live area, then draw it.
@@ -57,33 +66,42 @@ impl Host {
         self.term.draw(lines(live_after), (0, 0)).expect("draw");
     }
 
+    /// The window changing shape: the emulator reflows first, then the chat loop is told.
+    fn resize(&mut self, cols: u16, rows: u16, live: &[&str]) {
+        self.vt.0.borrow_mut().set_size(rows, cols);
+        self.cols = cols;
+        self.rows = rows;
+        self.term.set_size(cols, rows).expect("set_size");
+        self.frame(live);
+    }
+
     fn screen(&self) -> Vec<String> {
         let mut parser = self.vt.0.borrow_mut();
         parser.set_scrollback(0);
-        rows(&parser)
+        rows(&parser, self.cols)
     }
 
     /// Scrollback first, then the visible screen: everything the terminal still holds.
     fn history(&self) -> Vec<String> {
         let mut parser = self.vt.0.borrow_mut();
         // vt100 cannot show more than one screenful of scrollback at a time.
-        parser.set_scrollback(ROWS as usize);
+        parser.set_scrollback(self.rows as usize);
         let depth = parser.screen().scrollback();
         let mut out = Vec::new();
         for n in (1..=depth).rev() {
             parser.set_scrollback(n);
-            out.push(rows(&parser).swap_remove(0));
+            out.push(rows(&parser, self.cols).swap_remove(0));
         }
         parser.set_scrollback(0);
-        out.extend(rows(&parser));
+        out.extend(rows(&parser, self.cols));
         out
     }
 }
 
-fn rows(parser: &vt100::Parser) -> Vec<String> {
+fn rows(parser: &vt100::Parser, cols: u16) -> Vec<String> {
     parser
         .screen()
-        .rows(0, COLS)
+        .rows(0, cols)
         .map(|r| r.trim_end().to_owned())
         .collect()
 }
@@ -98,7 +116,10 @@ fn assert_in_order(history: &[String], wanted: &[&str]) {
     for want in wanted {
         match history[at..].iter().position(|row| row == want) {
             Some(i) => at += i + 1,
-            None => panic!("`{want}` missing after row {at} in:\n{}", history.join("\n")),
+            None => panic!(
+                "`{want}` missing after row {at} in:\n{}",
+                history.join("\n")
+            ),
         }
     }
 }
@@ -118,6 +139,33 @@ fn assert_no_blank_runs(history: &[String], first: &str, last: &str) {
     }
 }
 
+/// The live area hangs off the committed tail: one blank row between them at the very most.
+fn assert_no_hole(screen: &[String], first_live: &str) {
+    let live = screen
+        .iter()
+        .position(|r| r == first_live)
+        .expect("live area");
+    let tail = screen[..live]
+        .iter()
+        .rposition(|r| !r.is_empty())
+        .expect("committed tail");
+    assert!(
+        live - tail <= 2,
+        "{} blank rows above the live area:\n{}",
+        live - tail - 1,
+        screen.join("\n")
+    );
+}
+
+/// Exactly one live area on screen, whatever the terminal has just done to its rows.
+fn assert_no_duplicate_live(screen: &[String], live: &[&str]) {
+    let seen = screen
+        .windows(live.len())
+        .filter(|w| w.iter().zip(live).all(|(row, want)| row == want.trim_end()))
+        .count();
+    assert_eq!(seen, 1, "{seen} live areas in:\n{}", screen.join("\n"));
+}
+
 fn welcome() -> Vec<&'static str> {
     vec![
         "* swamp",
@@ -135,9 +183,27 @@ fn idle() -> Vec<&'static str> {
 
 fn board() -> Vec<&'static str> {
     vec![
-        "* workers", "  node 1", "  node 2", "  node 3", "  node 4", "  node 5", "", "----",
-        "> ", "----", "status",
+        "* workers",
+        "  node 1",
+        "  node 2",
+        "  node 3",
+        "  node 4",
+        "  node 5",
+        "",
+        "----",
+        "> ",
+        "----",
+        "status",
     ]
+}
+
+/// `n` committed rows, enough of them to push the live area onto the last rows of the screen.
+fn filler(n: usize) -> Vec<String> {
+    (0..n).map(|i| format!("row {i}")).collect()
+}
+
+fn refs(lines: &[String]) -> Vec<&str> {
+    lines.iter().map(String::as_str).collect()
 }
 
 #[test]
@@ -167,7 +233,10 @@ fn a_notice_committed_under_a_tall_board_survives() {
 
     let history = host.history();
     assert_in_order(&history, &["* swamp", "/ cancelled 3 nodes"]);
-    let seen = history.iter().filter(|r| *r == "/ cancelled 3 nodes").count();
+    let seen = history
+        .iter()
+        .filter(|r| *r == "/ cancelled 3 nodes")
+        .count();
     assert_eq!(seen, 1, "notice duplicated in:\n{}", history.join("\n"));
 }
 
@@ -175,6 +244,7 @@ fn a_notice_committed_under_a_tall_board_survives() {
 fn shrinking_the_live_area_scrolls_no_blank_rows() {
     let mut host = Host::new(&["$ swamp chat"]);
     host.commit(&welcome(), &idle());
+    host.commit(&refs(&filler(19)), &idle());
     host.frame(&board());
     // The batch finishes: the board is committed and the live area collapses to the input.
     let done: Vec<&str> = board()[..7].to_vec();
@@ -183,15 +253,22 @@ fn shrinking_the_live_area_scrolls_no_blank_rows() {
     let history = host.history();
     assert_no_blank_runs(&history, "* swamp", "  node 5");
     // The input bar follows the committed board with at most one blank row between.
+    assert_no_hole(&host.screen(), "----");
+}
+
+#[test]
+fn a_shrink_with_no_commit_behind_it_leaves_no_hole() {
+    let mut host = Host::new(&["$ swamp chat"]);
+    host.commit(&welcome(), &idle());
+    host.commit(&refs(&filler(19)), &idle());
+    // `/` opens the command overlay and Backspace closes it again: nothing is committed.
+    host.frame(&board());
+    host.frame(&idle());
+
     let screen = host.screen();
-    let last = screen.iter().rposition(|r| r == "  node 5").expect("board");
-    let rule = screen.iter().position(|r| r == "----").expect("rule");
-    assert!(
-        rule - last <= 2,
-        "gap of {} rows:\n{}",
-        rule - last,
-        screen.join("\n")
-    );
+    assert_no_hole(&screen, "----");
+    assert_no_duplicate_live(&screen, &idle());
+    assert_in_order(&host.history(), &["* swamp", "row 18"]);
 }
 
 #[test]
@@ -225,14 +302,82 @@ fn grow_shrink_commit_cycles_lose_nothing() {
 }
 
 #[test]
-fn the_live_area_is_always_the_last_rows_of_the_screen() {
+fn the_live_area_follows_the_committed_tail() {
     let mut host = Host::new(&["$ swamp chat"]);
     host.commit(&welcome(), &idle());
     host.frame(&board());
-    let screen = host.screen();
-    assert_eq!(screen[ROWS as usize - 1], "status");
-    host.frame(&idle());
+    assert_no_hole(&host.screen(), "* workers");
+    // Once the screen is full the area is the last rows of it, and stays there.
+    host.commit(&refs(&filler(30)), &idle());
     let screen = host.screen();
     assert_eq!(screen[ROWS as usize - 1], "status");
     assert_eq!(screen[ROWS as usize - 4], "----");
+    host.frame(&board());
+    let screen = host.screen();
+    assert_eq!(screen[ROWS as usize - 1], "status");
+}
+
+#[test]
+fn shrinking_the_terminal_keeps_the_committed_rows_it_still_has() {
+    let mut host = Host::new(&["$ swamp chat"]);
+    host.commit(&welcome(), &idle());
+    host.commit(&refs(&filler(19)), &idle());
+    // The live area is on the last four rows; the rows just above it are committed.
+    host.resize(COLS, 18, &idle());
+
+    let history = host.history();
+    // `row 17` and `row 18` are the two rows the emulator itself drops when it loses six rows:
+    // everything the terminal still holds has to survive the redraw.
+    let mut wanted: Vec<String> = welcome().iter().map(|r| (*r).to_owned()).collect();
+    wanted.retain(|r| !r.is_empty());
+    wanted.extend(filler(17));
+    assert_in_order(&history, &refs(&wanted));
+    let screen = host.screen();
+    assert_no_duplicate_live(&screen, &idle());
+    assert_eq!(screen[17], "status");
+}
+
+#[test]
+fn growing_the_terminal_leaves_one_live_area() {
+    let mut host = Host::new(&["$ swamp chat"]);
+    host.commit(&welcome(), &idle());
+    host.commit(&refs(&filler(19)), &idle());
+    host.resize(COLS, 32, &idle());
+
+    let screen = host.screen();
+    assert_no_duplicate_live(&screen, &idle());
+    assert_no_hole(&screen, "----");
+    assert_in_order(&host.history(), &refs(&filler(19)));
+}
+
+#[test]
+fn a_width_change_leaves_no_stale_live_rows() {
+    let mut host = Host::new(&["$ swamp chat"]);
+    host.commit(&welcome(), &idle());
+    host.commit(&refs(&filler(19)), &idle());
+    let live = vec!["----------", "> ", "----------", "status"];
+    host.frame(&live);
+    host.resize(28, ROWS, &live);
+    host.resize(COLS, ROWS, &live);
+
+    let screen = host.screen();
+    assert_no_duplicate_live(&screen, &live);
+    assert_no_hole(&screen, "----------");
+    assert_in_order(&host.history(), &refs(&filler(19)));
+}
+
+#[test]
+fn a_resize_under_a_tall_board_keeps_the_board_live() {
+    let mut host = Host::new(&["$ swamp chat"]);
+    host.commit(&welcome(), &idle());
+    host.commit(&refs(&filler(19)), &idle());
+    host.frame(&board());
+    host.resize(30, 20, &board());
+    host.commit(&board()[..7], &idle());
+
+    let history = host.history();
+    assert_in_order(&history, &["* workers", "  node 5"]);
+    let screen = host.screen();
+    assert_no_duplicate_live(&screen, &idle());
+    assert_no_hole(&screen, "----");
 }

@@ -76,6 +76,8 @@ struct Scripted {
     calls: Mutex<Vec<Call>>,
     worktrees: Mutex<Vec<Utf8PathBuf>>,
     delay: Option<Duration>,
+    /// When set, only that call is slow; every other one returns at once.
+    slow_call: Option<usize>,
 }
 
 impl Scripted {
@@ -86,16 +88,27 @@ impl Scripted {
             calls: Mutex::new(Vec::new()),
             worktrees: Mutex::new(Vec::new()),
             delay: None,
+            slow_call: None,
         })
     }
     fn slow(root: &Utf8PathBuf, delay: Duration) -> Arc<Self> {
-        let me = Self::new(root, Vec::new());
         Arc::new(Self {
-            root: me.root.clone(),
+            root: root.clone(),
             outcomes: Mutex::new(VecDeque::new()),
             calls: Mutex::new(Vec::new()),
             worktrees: Mutex::new(Vec::new()),
             delay: Some(delay),
+            slow_call: None,
+        })
+    }
+    fn slow_call(root: &Utf8PathBuf, call: usize, delay: Duration) -> Arc<Self> {
+        Arc::new(Self {
+            root: root.clone(),
+            outcomes: Mutex::new(VecDeque::new()),
+            calls: Mutex::new(Vec::new()),
+            worktrees: Mutex::new(Vec::new()),
+            delay: Some(delay),
+            slow_call: Some(call),
         })
     }
     fn calls(&self) -> Vec<Call> {
@@ -130,7 +143,7 @@ impl NodeRunner for Scripted {
         _timeout: Duration,
         _cancel: CancellationToken,
     ) -> anyhow::Result<RunOutcome> {
-        self.calls.lock().expect("calls").push(Call {
+        let call = Call {
             exec: spec.exec.clone(),
             cwd: spec.cwd.clone(),
             attempt: spec.attempt,
@@ -140,8 +153,15 @@ impl NodeRunner for Scripted {
                 SessionPlan::Resume(h) => Session::Resume(h.clone()),
             },
             provider: spec.provider,
-        });
-        if let Some(d) = self.delay {
+        };
+        let index = {
+            let mut calls = self.calls.lock().expect("calls");
+            calls.push(call);
+            calls.len() - 1
+        };
+        if let Some(d) = self.delay
+            && self.slow_call.is_none_or(|slow| slow == index)
+        {
             tokio::time::sleep(d).await;
         }
         Ok(self
@@ -743,6 +763,34 @@ async fn max_parallel_dispatch_serializes_a_batch() {
     assert_eq!(results.len(), 2);
     assert!(results.iter().all(|r| r.state == "running"));
     assert_eq!(runner.calls().len(), 1, "only one node runs at a time");
+}
+
+/// `esc esc` stops the workers that are still running and nothing else: a finished node has
+/// nothing to cancel, the brain is the run itself, and the next dispatch has to still work.
+#[tokio::test]
+async fn cancel_all_only_stops_the_nodes_still_running() {
+    let f = fixture(TWO_ACCOUNTS).await;
+    let runner = Scripted::slow_call(&f.root, 2, Duration::from_secs(30));
+    let disp = f.dispatcher(runner.clone()).await;
+    let brain = NodeId(disp.journal.run().0);
+    assert!(disp.dispatch_one(brain, task("first")).await.ok);
+    assert!(disp.dispatch_one(brain, task("second")).await.ok);
+    let batch = disp
+        .dispatch_batch(brain, vec![task("slow")], Duration::from_millis(120))
+        .await;
+    assert_eq!(batch.len(), 1);
+    assert_eq!(batch[0].state, "running");
+
+    assert_eq!(disp.cancel_all(), 1, "two nodes had already finished");
+    assert!(
+        disp.cancel(brain).await.is_err(),
+        "the brain is never a cancellable node"
+    );
+    assert_eq!(disp.cancel_all(), 0, "nothing is left to cancel");
+
+    let later = disp.dispatch_one(brain, task("after")).await;
+    assert!(later.ok, "the dispatcher is still usable: {later:?}");
+    assert_eq!(runner.calls().len(), 4);
 }
 
 #[tokio::test]
