@@ -214,6 +214,9 @@ impl AccountState {
             return false;
         };
         let minutes = (secs / 60) as u32;
+        // The stored key has already expired, so this roll is unconditional: the drift
+        // tolerance of `same_window` is for two readings of a window that is still live.
+        self.window_key = None;
         self.roll_window(
             Some(WindowKey {
                 scope: crate::worker::codex_quota::scope_of(Some(minutes)),

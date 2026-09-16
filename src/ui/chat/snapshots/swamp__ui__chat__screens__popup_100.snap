@@ -1,6 +1,5 @@
 ---
 source: src/ui/chat/screens.rs
-assertion_line: 251
 expression: "live(&mut app, 100)"
 ---
 ▌ /trace      the run tree with its events
@@ -15,4 +14,4 @@ expression: "live(&mut app, 100)"
 ────────────────────────────────────────────────────────────────────────────────────────────────────
 > /t
 ────────────────────────────────────────────────────────────────────────────────────────────────────
-  tab completes · ↑↓ chooses · esc closes     ⏵⏵ dispatch mid           run 9g5fav · idle · ~$0.00
+  tab completes · ↑↓ chooses · esc closes         ⏵⏵ dispatch mid       run 9g5fav · idle · ~$0.00

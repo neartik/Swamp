@@ -16,6 +16,7 @@ pub mod tests_support;
 
 use crate::brain::{Brain, BrainEvent};
 use crate::cmd::Ctx;
+use crate::dispatch::AccountPool;
 use crate::dispatch::Dispatcher;
 use crate::dispatch::account::{AccountState, Health};
 use crate::journal::fold::RunView;
@@ -97,6 +98,14 @@ async fn plain(mut brain: Box<dyn Brain>, disp: Arc<Dispatcher>, ctx: &Ctx) -> a
     Ok(code)
 }
 
+/// Both halves of the pool view move together: the pool adopts accounts other repos wrote
+/// while the chat runs, and a `/usage` redrawn from live rows next to a startup-time stale
+/// list would disagree with `swamp usage`.
+pub fn refresh_pool(app: &mut App, pool: &AccountPool) {
+    app.set_pool(pool.snapshot());
+    app.set_stale_accounts(pool.unconfigured());
+}
+
 /// One slash table for both surfaces: `/help` here lists what the viewport lists, so it
 /// cannot advertise a command the pipe then refuses. True means the session is over.
 async fn plain_slash(command: &str, disp: &Arc<Dispatcher>, ctx: &Ctx) -> anyhow::Result<bool> {
@@ -157,8 +166,7 @@ async fn interactive(
         cfg.ui.chat_history.unwrap_or(DEFAULT_HISTORY),
     );
     let mut app = App::new(paths.run, theme, welcome(ctx, &disp), history, &cfg);
-    app.set_pool(disp.pool().snapshot());
-    app.set_stale_accounts(disp.pool().unconfigured());
+    refresh_pool(&mut app, disp.pool());
 
     let mut tailer = Tailer::open(&paths.journal())?;
     let period = Duration::from_millis(
@@ -180,7 +188,7 @@ async fn interactive(
         app.now = OffsetDateTime::now_utc();
         app.width = width;
         app.rows = rows;
-        app.set_pool(disp.pool().snapshot());
+        refresh_pool(&mut app, disp.pool());
         term.set_height(render::live_height(&app, rows))?;
         let frame = render::compose(&app);
         term.draw(frame.lines, frame.cursor)?;

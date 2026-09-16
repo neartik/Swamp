@@ -160,17 +160,14 @@ pub fn short_sha(s: &str) -> String {
     s.chars().take(7).collect()
 }
 
-/// "41m", "2h05m": a window rolls minutes from now at best, so the seconds are noise.
-fn away(from: OffsetDateTime, to: OffsetDateTime) -> String {
-    let secs = (to - from).whole_seconds().max(0);
-    let (h, m) = (secs / 3600, (secs % 3600) / 60);
-    if h > 0 {
-        format!("{h}h{m:02}m")
-    } else if m > 0 {
-        format!("{m}m")
-    } else {
-        format!("{secs}s")
+/// "02:30", or "02:30 on 2026-09-22" once the reset is not on today's UTC date: a seven-day
+/// window resets days out, and a bare wall clock names no day at all.
+fn clock_day(at: OffsetDateTime, now: OffsetDateTime) -> String {
+    let at = at.to_offset(time::UtcOffset::UTC);
+    if at.date() == now.to_offset(time::UtcOffset::UTC).date() {
+        return clock_hm(at);
     }
+    format!("{} on {}", clock_hm(at), at.date())
 }
 
 /// The one line a node blocked on an exhausted pool gets. `cancel` is the only part chat and
@@ -181,10 +178,11 @@ pub fn blocked_notice(
     now: OffsetDateTime,
     cancel: &str,
 ) -> String {
+    let secs = (until - now).whole_seconds().max(0) as u64;
     format!(
         "every {provider} account is at its limit \u{b7} earliest reset {} (in {}) \u{b7} {cancel}",
-        clock_hm(until),
-        away(now, until)
+        clock_day(until, now),
+        self::until(Duration::from_secs(secs))
     )
 }
 
@@ -256,6 +254,30 @@ mod tests {
         assert!(shown.contains("swamp: run succeeded"));
         assert_eq!(truncate("a\nb\tc", 10), "a b c");
         assert_eq!(truncate("plain", 10), "plain");
+    }
+
+    /// `Pool::block_reason` feeds this the soonest reset, which is legitimately a seven-day
+    /// window: an hours-only span and a bare wall clock named no day at all and disagreed
+    /// with the RESETS column on the same instant.
+    #[test]
+    fn a_blocked_notice_days_away_names_the_day() {
+        let now = OffsetDateTime::from_unix_timestamp(1_789_400_000).expect("now");
+        let far = now + Duration::from_secs(6 * 86_400 + 17 * 3600);
+        let line = blocked_notice(Provider::Anthropic, far, now, "ctrl-c to cancel");
+        assert!(line.contains("(in 6d17h)"), "{line}");
+        assert!(
+            line.contains(&format!("reset {} on {}", clock_hm(far), far.date())),
+            "{line}"
+        );
+
+        // Today: the wall clock alone still says it.
+        let soon = now + Duration::from_secs(41 * 60);
+        let near = blocked_notice(Provider::Anthropic, soon, now, "ctrl-c to cancel");
+        assert!(
+            near.contains(&format!("reset {} (in 41m)", clock_hm(soon))),
+            "{near}"
+        );
+        assert!(!near.contains(" on "), "{near}");
     }
 
     #[test]

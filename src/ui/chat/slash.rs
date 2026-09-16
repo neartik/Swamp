@@ -283,6 +283,31 @@ pub fn help_body() -> Vec<String> {
 mod tests {
     use super::*;
 
+    /// UI.md illustrated the refused-input status line with `/adopt`, which has never been a
+    /// slash command: adopting is CLI-only. Every command an example refuses must exist.
+    #[test]
+    fn the_ui_doc_refusal_examples_name_real_commands() {
+        let doc = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/UI.md"),
+        )
+        .expect("UI.md");
+        let mut seen = 0;
+        for line in doc.lines().filter(|l| l.contains("try /")) {
+            for word in line.split_whitespace() {
+                let name = word.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '/');
+                if !name.starts_with('/') {
+                    continue;
+                }
+                seen += 1;
+                assert!(
+                    COMMANDS.iter().any(|c| c.name == name),
+                    "UI.md names `{name}`, which is not a slash command: {line}"
+                );
+            }
+        }
+        assert!(seen > 0, "no refusal example left to check");
+    }
+
     #[test]
     fn tab_completes_to_the_common_prefix_of_every_candidate() {
         let cands = filter("/t");

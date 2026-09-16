@@ -231,6 +231,28 @@ fn swamp_usage_needs_no_supervisor_and_a_missing_file_is_not_an_error() {
     empty.swamp(&["usage"]).assert().success();
 }
 
+/// An unreadable state file is the one case `load_state` reports: rendering it as zeros
+/// reads as "nothing was spent", and `--probe` would then overwrite it with the probed
+/// accounts alone, losing every lifetime counter the file held.
+#[test]
+fn an_unreadable_state_file_is_reported_and_never_overwritten() {
+    let h = Harness::new();
+    let path = h.paths().accounts_state();
+    std::fs::create_dir_all(path.parent().expect("a parent")).expect("the state directory");
+    std::fs::write(&path, "{ not json at all").expect("a corrupt state file");
+
+    let out = h.swamp(&["usage"]).assert().failure();
+    let stderr = String::from_utf8_lossy(&out.get_output().stderr).into_owned();
+    assert!(stderr.contains("accounts.json"), "{stderr}");
+
+    h.swamp(&["usage", "--probe"]).assert().failure();
+    assert_eq!(
+        std::fs::read_to_string(&path).expect("the file survives"),
+        "{ not json at all",
+        "a probe must not replace a file it could not read"
+    );
+}
+
 /// Acceptance 6: a stale `quota_observed_at` renders its age in the `err` role.
 #[test]
 fn a_stale_observed_time_renders_in_the_err_role() {
@@ -703,6 +725,63 @@ fn an_estimated_reset_in_minutes_fits_the_column() {
             body.contains(&format!("~in {minutes}m")),
             "{minutes}m: {body}"
         );
+    }
+}
+
+/// The table downgrades an elapsed cooldown to `healthy`; `--json` on the same bytes must
+/// not keep calling it `cooling`, or a script gates dispatch on a word the table denies.
+#[test]
+fn json_reports_the_health_the_table_shows() {
+    let mut r = row("claude-main", Provider::Anthropic, Health::Cooling);
+    r.cooldown_until = Some(OffsetDateTime::now_utc() - time::Duration::hours(2));
+    let body = screen(
+        &usage::render(std::slice::from_ref(&r), 100, &Theme::plain(), MAX_AGE),
+        100,
+    );
+    assert!(body.contains("healthy"), "{body}");
+    let v = usage::json(std::slice::from_ref(&r));
+    assert_eq!(v["accounts"][0]["health"], "healthy");
+
+    // A cooldown still running is still cooling on both surfaces.
+    r.cooldown_until = Some(OffsetDateTime::now_utc() + time::Duration::hours(2));
+    assert_eq!(usage::json(&[r])["accounts"][0]["health"], "cooling");
+}
+
+/// `lifetime_cost_usd` spans every run and repo, so four figures are ordinary. `~$12345.67`
+/// is nine columns in an eight-column cell, and truncation ate the digits that carry it.
+#[test]
+fn a_four_figure_cost_keeps_its_magnitude() {
+    let mut r = row("claude-main", Provider::Anthropic, Health::Healthy);
+    r.cost_usd = 12_345.67;
+    let body = screen(
+        &usage::render(std::slice::from_ref(&r), 100, &Theme::plain(), MAX_AGE),
+        100,
+    );
+    assert!(!body.contains('\u{2026}'), "{body}");
+    assert!(body.contains("~$12.3k"), "{body}");
+}
+
+/// Every other row is width-bounded; the `observed` line emitted its first entry whatever
+/// its length, so one long account id pushed it past the table it sits under.
+#[test]
+fn the_observed_line_fits_a_narrow_table() {
+    let mut r = row(
+        "anthropic-team-billing-account-primary",
+        Provider::Anthropic,
+        Health::Healthy,
+    );
+    r.quota_observed_at = Some(OffsetDateTime::now_utc() - time::Duration::seconds(12));
+    r.quota_source = Some(QuotaSource::Telemetry);
+    for width in [62u16, 80, 100] {
+        let lines = usage::render(std::slice::from_ref(&r), width, &Theme::plain(), MAX_AGE);
+        for line in &lines {
+            assert!(
+                line.width() <= width as usize,
+                "{width} columns: {:?} is {} wide",
+                line,
+                line.width()
+            );
+        }
     }
 }
 

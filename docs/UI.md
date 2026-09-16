@@ -647,7 +647,7 @@ Second esc:
 ```
 
 A refused input (a slash command that cannot run) is not committed: it replaces the status line
-for 3 s, `  /adopt needs a node id · try /status`.
+for 3 s, `  /diff needs a node id · try /status`.
 
 ### 3.7 Slash popup
 

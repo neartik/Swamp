@@ -37,6 +37,8 @@ pub struct AccountPool {
     scoring: Scoring,
     /// The brain's own slot, which is not a worker slot.
     brain: Arc<Semaphore>,
+    /// The account the brain's live lease occupies, if any.
+    brain_held: Mutex<Option<AccountId>>,
     returned: Notify,
     reserved: Mutex<Option<AccountId>>,
     wakeups: AtomicU64,
@@ -75,6 +77,7 @@ impl Drop for Lease {
     fn drop(&mut self) {
         if self.brain {
             self.pool.release_reservation();
+            *self.pool.brain_held.lock() = None;
         }
         {
             let mut state = self.pool.state.lock();
@@ -187,6 +190,7 @@ impl AccountPool {
             state: Mutex::new(state),
             ledger: Mutex::new(UsageLedger::default()),
             brain: Arc::new(Semaphore::new(1)),
+            brain_held: Mutex::new(None),
             returned: Notify::new(),
             reserved: Mutex::new(None),
             wakeups: AtomicU64::new(0),
@@ -369,6 +373,7 @@ impl AccountPool {
                         Some(mut lease) => {
                             lease._permit = permit.take();
                             lease.brain = true;
+                            *self.brain_held.lock() = Some(lease.account.clone());
                             return Ok(lease);
                         }
                         None => {
@@ -781,11 +786,17 @@ impl AccountPool {
         let pool_window = pool_window(&live);
         let (mut busy, mut retry_at) = (false, None::<OffsetDateTime>);
         let mut why: Vec<String> = Vec::new();
+        let brain_held = self.brain_held.lock().clone();
         for (a, s) in &live {
             if score(self.policy, a, s, pool_window, &self.scoring, now).is_some() {
                 return Capacity::Ready;
             }
             match self.block_reason(a, s, now) {
+                // A slot the brain holds for the whole run comes back to nobody, so it must
+                // not look like a lease that is about to be returned.
+                Block::Busy if brain_held.as_ref() == Some(&a.id) => {
+                    why.push(format!("{} is held by the brain", a.id.0));
+                }
                 Block::Busy => busy = true,
                 Block::Wait { at, why: w } => {
                     retry_at = Some(retry_at.map_or(at, |c: OffsetDateTime| c.min(at)));

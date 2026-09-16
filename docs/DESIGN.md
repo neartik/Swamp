@@ -201,7 +201,7 @@ Swamp/
 
     config/
       mod.rs            re-exports, Config::load
-      schema.rs         serde structs mirroring swamp.toml exactly
+      schema.rs         serde structs mirroring config.toml exactly
       load.rs           layered merge: defaults <- ~/.config <- ./.swamp <- env <- flags
       resolve.rs        tier x provider -> model; account -> exec/env; path expansion
       validate.rs       all errors reported together, with the offending key
@@ -712,7 +712,7 @@ pub struct NodeResult {
 pub enum SwampError {
     #[error("no {provider:?} account available: {excluded} excluded by failover, {cooling} cooling down")]
     NoAccountAvailable { provider: Provider, excluded: usize, cooling: usize },
-    #[error("no model configured for {provider:?} tier {tier:?}; set providers.<p>.models.<t> in swamp.toml")]
+    #[error("no model configured for {provider} tier {tier}; set providers.{provider}.models.{tier} in .swamp/config.toml")]
     TierUnmapped { provider: Provider, tier: Tier },
     #[error("executable `{exec}` for account `{id}` not found in PATH")]
     ExecNotFound { id: String, exec: String },

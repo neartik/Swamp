@@ -181,7 +181,8 @@ impl WorkspaceManager {
         })
     }
 
-    /// Commits whatever the worker left uncommitted, then lets git report what changed.
+    /// Commits whatever the worker left uncommitted unless `workspace.commit_on_success` is
+    /// off, then lets git report what changed.
     pub async fn finalize(
         &self,
         wt: &NodeWorktree,
@@ -191,7 +192,10 @@ impl WorkspaceManager {
         if !wt.path.is_dir() {
             return Ok(None);
         }
-        if !self.git.is_clean_at(&wt.path).await? {
+        // `commit_on_success = false` leaves the worker's changes in the worktree for a human
+        // to stage; the branch, and so the captured diff, then carries nothing new.
+        let commit = self.cfg.workspace.commit_on_success != Some(false);
+        if commit && !self.git.is_clean_at(&wt.path).await? {
             let message = self.commit_message(title, tier, wt);
             self.git.run(&wt.path, &["add", "-A"]).await?;
             self.git

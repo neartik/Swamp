@@ -430,6 +430,27 @@ fn an_account_with_no_quota_source_rolls_on_wall_time() {
     assert_eq!(measured.window_tokens.billable(), 500);
 }
 
+/// USAGE 2.1: once the stored window has expired the wall-time roll is unconditional. The
+/// half-window drift tolerance is for two readings of a live window, and letting it suppress
+/// the roll left two windows of spend in a counter labelled "this window".
+#[test]
+fn an_expired_window_rolls_even_when_the_grid_boundary_is_near_it() {
+    let window = std::time::Duration::from_secs(7 * 24 * 3600);
+    let now = OffsetDateTime::from_unix_timestamp(1_789_400_000).expect("now");
+    let expired = now - time::Duration::hours(1);
+    let mut state = AccountState::default();
+    state.apply_quota(snapshot(expired), QuotaSource::Telemetry, expired);
+    state.credit_tokens(&tokens(1_000));
+
+    // The epoch grid boundary lands 2.4 days from the stale reset, inside the 3.5 day slack.
+    assert!(state.roll_elapsed_window(window, now), "the window expired");
+    assert_eq!(state.window_tokens, Usage::default());
+    assert_eq!(state.window_started_at, Some(now));
+    assert_eq!(state.lifetime_tokens.billable(), 1_000);
+    let key = state.window_key.clone().expect("a fresh key");
+    assert!(key.resets_at > now, "the new window is still ahead of us");
+}
+
 /// Cost accumulates per process from what the file held at startup, so the merge has to take
 /// the larger of the two totals like every other lifetime counter.
 #[test]

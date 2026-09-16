@@ -11,10 +11,12 @@ use std::collections::BTreeMap;
 use time::OffsetDateTime;
 
 /// Reads `~/.swamp/accounts.json` under the `fs4` lock and renders the same table `/usage`
-/// does. Never needs a running supervisor; a missing file renders an empty table, not an error.
+/// does. Never needs a running supervisor; a missing file renders an empty table, not an
+/// error. An unreadable one IS an error: rendering zeros would read as "nothing was spent",
+/// and `--probe` would then rewrite the file with only the accounts it probed.
 pub async fn run(ctx: &Ctx, args: &UsageArgs) -> anyhow::Result<i32> {
     let path = ctx.paths.accounts_state();
-    let mut state = persist::load_state(&path).unwrap_or_default();
+    let mut state = persist::load_state(&path)?;
 
     if args.probe {
         let probed = probe_all(ctx).await;

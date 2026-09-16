@@ -270,6 +270,34 @@ fn the_slash_popup_and_the_shortcut_overlay() {
     insta::assert_snapshot!("overlay_100", live(&mut app, 100));
 }
 
+/// The centre segment was laid out from byte lengths while the right block used char
+/// counts, so the multi-byte popup hint pushed `dispatch mid` several columns off centre.
+#[test]
+fn the_status_centre_is_placed_by_display_width() {
+    let centre = "\u{23f5}\u{23f5} dispatch mid";
+    for hint in [false, true] {
+        let mut app = fx::app(100);
+        app.take_welcome();
+        if hint {
+            typed(&mut app, "/t");
+            assert!(app.popup.is_some(), "the hint needs the popup open");
+        }
+        let line = screen(vec![app.status_line()], 100);
+        let cols = unicode_width::UnicodeWidthStr::width;
+        let i = line
+            .find(centre)
+            .unwrap_or_else(|| panic!("no centre segment in {line}"));
+        let head = &line[..i];
+        let tail = &line[i + centre.len()..];
+        let left_gap = cols(head) - cols(head.trim_end());
+        let right_gap = cols(tail) - cols(tail.trim_start());
+        assert!(
+            left_gap.abs_diff(right_gap) <= 2,
+            "centre sits {left_gap} from the left and {right_gap} from the right: {line}"
+        );
+    }
+}
+
 #[test]
 fn the_welcome_box_carries_the_run_id_so_chat_drops_the_one_shot_header() {
     let mut app = fx::app(100);

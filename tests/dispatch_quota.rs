@@ -1125,3 +1125,117 @@ async fn the_chat_probe_waits_on_the_account_probe_gate() {
         "a fresh reading answers for everyone"
     );
 }
+
+const BRAIN_HELD_PEER: &str = r#"
+[brain]
+reserve_brain_slot = false
+[providers.anthropic]
+models = { mid = "tier-mid" }
+[[accounts]]
+id = "main"
+provider = "anthropic"
+exec = "claude-main"
+max_concurrency = 3
+[[accounts]]
+id = "work"
+provider = "anthropic"
+exec = "claude-work"
+max_concurrency = 1
+"#;
+
+/// USAGE 4.7: a slot the brain holds for the whole run returns to nobody, so it must not
+/// report the pool as merely busy and hide the exhausted peers from failover.
+#[tokio::test]
+async fn a_brain_held_account_does_not_mask_an_exhausted_pool() {
+    let h = harness(BRAIN_HELD_PEER).await;
+    let brain = h
+        .pool
+        .acquire_brain(
+            Provider::Anthropic,
+            Some(&id("work")),
+            Instant::now() + Duration::from_millis(200),
+        )
+        .await
+        .expect("the brain leases work");
+    assert_eq!(brain.account, id("work"));
+
+    let now = OffsetDateTime::now_utc();
+    let resets_at = now + Duration::from_secs(40 * 60);
+    h.pool.observe_quota(
+        &id("main"),
+        RateLimitSnapshot {
+            status: LimitStatus::Warning,
+            windows: vec![LimitWindow {
+                scope: LimitScope::SevenDay,
+                utilization: 0.99,
+                resets_at: Some(resets_at),
+                measured: true,
+                ..Default::default()
+            }],
+            ..Default::default()
+        },
+    );
+
+    let Some(NoCapacity::AllExhausted { retry_at, why }) =
+        h.pool.all_exhausted(Provider::Anthropic, &HashSet::new())
+    else {
+        panic!("the run-long brain lease hid the exhausted pool");
+    };
+    assert!(
+        (retry_at - resets_at).abs() < time::Duration::seconds(2),
+        "the peer's reset is the retry time: {retry_at} vs {resets_at}"
+    );
+    assert!(why.contains("work is held by the brain"), "{why}");
+    drop(brain);
+}
+
+/// USAGE 3.1: chat refreshes both halves of the pool view, not just the rows. The pool
+/// adopts accounts other repos wrote while the chat runs, and `/usage` has to list them
+/// under `not in config` exactly as `swamp usage` does.
+#[tokio::test]
+async fn the_chat_pool_refresh_picks_up_an_account_adopted_mid_session() {
+    use swamp::ui::chat::app::{App, Effect};
+
+    let h = harness(ONE_CAPPED).await;
+    let mut app = App::new(
+        RunId::new(),
+        swamp::ui::chat::theme::Theme::plain(),
+        swamp::ui::chat::blocks::WelcomeInfo::default(),
+        swamp::ui::chat::input::History::load(None, 0),
+        &h.pool.cfg,
+    );
+    app.width = 100;
+    app.now = OffsetDateTime::now_utc();
+
+    let usage_text = |app: &mut App| -> String {
+        app.command("usage")
+            .into_iter()
+            .filter_map(|e| match e {
+                Effect::Commit(body) => Some(swamp::ui::chat::blocks::text_of(&body).join("\n")),
+                _ => None,
+            })
+            .collect::<Vec<String>>()
+            .join("\n")
+    };
+
+    swamp::ui::chat::refresh_pool(&mut app, &h.pool);
+    assert!(!usage_text(&mut app).contains("codex-work"));
+
+    // Another repo's run records an account this config does not name.
+    let mut theirs = swamp::dispatch::persist::StateMap::new();
+    theirs.insert(
+        id("codex-work"),
+        AccountState {
+            lifetime_nodes: 2,
+            updated_at: Some(OffsetDateTime::now_utc()),
+            ..Default::default()
+        },
+    );
+    swamp::dispatch::persist::merge_state(&h.pool.state_path, &theirs).expect("their write");
+    h.pool.report(&id("main"), None, None);
+
+    swamp::ui::chat::refresh_pool(&mut app, &h.pool);
+    let text = usage_text(&mut app);
+    assert!(text.contains("not in config"), "{text}");
+    assert!(text.contains("codex-work"), "{text}");
+}

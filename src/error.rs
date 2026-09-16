@@ -11,7 +11,7 @@ pub enum SwampError {
         cooling: usize,
     },
     #[error(
-        "no model configured for {provider:?} tier {tier:?}; set providers.<p>.models.<t> in swamp.toml"
+        "no model configured for {provider} tier {tier}; set providers.{provider}.models.{tier} in .swamp/config.toml"
     )]
     TierUnmapped { provider: Provider, tier: Tier },
     #[error("executable `{exec}` for account `{id}` not found in PATH")]

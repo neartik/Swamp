@@ -400,13 +400,16 @@ fn reset_cell(w: Option<&LimitWindow>, now: OffsetDateTime) -> String {
 }
 
 /// `-`, never `$0.00`: an account that has spent nothing looks the same as one with no cost
-/// data at all, and both mean "nothing to show here".
+/// data at all, and both mean "nothing to show here". A four-figure lifetime is abbreviated
+/// like the token columns, or the eight-column cell would cut the digits that carry it.
 fn cost_cell(usd: f64) -> String {
-    if usd > 0.0 {
-        format!("~${usd:.2}")
-    } else {
-        "-".to_owned()
+    if usd <= 0.0 {
+        return "-".to_owned();
     }
+    if usd < 1000.0 {
+        return format!("~${usd:.2}");
+    }
+    format!("~${}", fmt::tokens(usd.round() as u64))
 }
 
 fn health_role(h: Health) -> Role {
@@ -481,10 +484,13 @@ fn observed_lines(
     }
     let lead = "observed  ";
     let indent = " ".repeat(lead.width());
+    // Every other row is width-bounded, and chat commits fixed-width lines to scrollback.
+    let cap = (width as usize).saturating_sub(indent.width());
     let mut out = Vec::new();
     let mut spans: Vec<Span<'static>> = vec![theme.span(lead.to_owned(), Role::Meta)];
     let mut used = lead.width();
     for (i, (text, stale)) in entries.iter().enumerate() {
+        let text = fmt::truncate(text, cap);
         let sep = if i == 0 { "" } else { " \u{b7} " };
         let role = if *stale { Role::Err } else { Role::Meta };
         if used + sep.width() + text.width() > width as usize && used > indent.width() {
@@ -622,7 +628,7 @@ fn account_json(r: &AccountRow, now: OffsetDateTime) -> Value {
         "provider": r.provider.map(|p| p.as_str()),
         "account": r.account.0,
         "exec": r.exec,
-        "health": r.health,
+        "health": shown_health(r, now),
         "in_config": r.in_config,
         "inflight": r.inflight,
         "max_concurrency": r.max_concurrency,

@@ -145,8 +145,11 @@ async fn a_tier_with_no_model_is_one_error_that_names_the_key() {
     let errors = errors(&out);
     assert_eq!(errors.len(), 1);
     assert_eq!(errors[0].name, "providers/anthropic/high");
+    // The key the user has to set, spelled the way the config spells it, in a real file.
     assert!(
-        errors[0].detail.contains("providers.<p>.models.<t>"),
+        errors[0]
+            .detail
+            .contains("providers.anthropic.models.high in .swamp/config.toml"),
         "{}",
         errors[0].detail
     );

@@ -18,6 +18,10 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 pub const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 const ROLLOUT_DEPTH: usize = 4;
 
+/// How long a failed `CODEX_HOME` probe is remembered. Long enough to coalesce one burst of
+/// finishing nodes, short enough that a single timeout cannot disable the rollout reader.
+const HOME_RETRY_AFTER: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// One `rate_limits` object: the rollout spells it snake_case, the app-server camelCase.
 #[derive(Debug, Default, Clone, Copy, Deserialize)]
 pub struct RateLimits {
@@ -321,15 +325,15 @@ pub async fn resolve_codex_home(exec: &str, env: &BTreeMap<String, String>) -> O
         return Some(Utf8PathBuf::from(home));
     }
     let key = home_key(exec, env);
-    if let Some(hit) = homes().lock().get(&key) {
-        return hit.clone();
+    if let Some(hit) = cached_home(&key) {
+        return hit;
     }
     // Single-flight, not a check-then-insert: eight nodes finishing together would otherwise
     // all miss the cold cache and spawn eight app-servers for one answer.
     let gate = home_gate(&key);
     let _held = gate.lock().await;
-    if let Some(hit) = homes().lock().get(&key) {
-        return hit.clone();
+    if let Some(hit) = cached_home(&key) {
+        return hit;
     }
     let found = match probe(exec, env).await {
         Ok((home, _)) => home,
@@ -338,8 +342,20 @@ pub async fn resolve_codex_home(exec: &str, env: &BTreeMap<String, String>) -> O
             None
         }
     };
-    homes().lock().insert(key, found.clone());
+    homes().lock().insert(key, CachedHome::new(found.clone()));
     found
+}
+
+/// A resolved home is permanent; a failure is only remembered until it goes stale, so one
+/// timed-out probe cannot disable the rollout reader for the rest of the process.
+fn cached_home(key: &str) -> Option<Option<Utf8PathBuf>> {
+    let homes = homes().lock();
+    let hit = homes.get(key)?;
+    match &hit.home {
+        Some(home) => Some(Some(home.clone())),
+        None if hit.at.elapsed() < HOME_RETRY_AFTER => Some(None),
+        None => None,
+    }
 }
 
 /// The resolved home depends on the whole environment the app-server is spawned with, so two
@@ -364,7 +380,9 @@ pub async fn read_rate_limits(
 ) -> anyhow::Result<RateLimitsRead> {
     let (home, read) = probe(exec, env).await?;
     if home.is_some() && !env.contains_key("CODEX_HOME") {
-        homes().lock().insert(home_key(exec, env), home);
+        homes()
+            .lock()
+            .insert(home_key(exec, env), CachedHome::new(home));
     }
     read.ok_or_else(|| anyhow::anyhow!("{exec} app-server returned no rate limits"))
 }
@@ -381,9 +399,23 @@ fn home_gate(key: &str) -> std::sync::Arc<tokio::sync::Mutex<()>> {
     )
 }
 
-fn homes() -> &'static Mutex<BTreeMap<String, Option<Utf8PathBuf>>> {
-    static HOMES: OnceLock<Mutex<BTreeMap<String, Option<Utf8PathBuf>>>> = OnceLock::new();
+fn homes() -> &'static Mutex<BTreeMap<String, CachedHome>> {
+    static HOMES: OnceLock<Mutex<BTreeMap<String, CachedHome>>> = OnceLock::new();
     HOMES.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+struct CachedHome {
+    home: Option<Utf8PathBuf>,
+    at: std::time::Instant,
+}
+
+impl CachedHome {
+    fn new(home: Option<Utf8PathBuf>) -> Self {
+        Self {
+            home,
+            at: std::time::Instant::now(),
+        }
+    }
 }
 
 async fn probe(
@@ -752,5 +784,46 @@ models = { mid = "gpt-5.1-codex-mini" }
             .lines()
             .count();
         assert_eq!(spawns, 1, "one app-server for the whole burst");
+    }
+
+    /// A single slow or failed handshake used to be cached as "no home" forever, which
+    /// silently turned the rollout reader off for the rest of the supervisor's life.
+    #[tokio::test]
+    async fn a_failed_home_probe_is_re_probed_once_it_goes_stale() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let exec = dir.path().join("fake-codex-stale");
+        let chmod = |p: &std::path::Path| {
+            std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o755)).expect("chmod")
+        };
+        std::fs::write(&exec, "#!/bin/sh\nexit 1\n").expect("write");
+        chmod(&exec);
+        let exec = exec.to_string_lossy().into_owned();
+        let env = BTreeMap::new();
+        assert!(resolve_codex_home(&exec, &env).await.is_none());
+
+        let key = home_key(&exec, &env);
+        {
+            let mut homes = homes().lock();
+            let hit = homes
+                .get_mut(&key)
+                .expect("the failure is remembered briefly");
+            hit.at = hit
+                .at
+                .checked_sub(HOME_RETRY_AFTER + std::time::Duration::from_secs(1))
+                .expect("a stale entry");
+        }
+
+        std::fs::write(
+            &exec,
+            "#!/bin/sh\necho '{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"codexHome\":\"/home/agent/.codex\"}}'\n",
+        )
+        .expect("write");
+        chmod(std::path::Path::new(&exec));
+        assert_eq!(
+            resolve_codex_home(&exec, &env).await.as_deref(),
+            Some(Utf8Path::new("/home/agent/.codex")),
+            "a stale failure must not outlive a readable app-server"
+        );
     }
 }

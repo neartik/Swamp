@@ -466,7 +466,7 @@ Columns, left to right, with widths:
 | RESETS | 9 | right | same | `-` |
 | WINDOW | 10 | right | `fmt::tokens(window_tokens.billable())` | `0` |
 | LIFETIME | 10 | right | `fmt::tokens(lifetime_tokens.billable())` | `0` |
-| COST | 8 | right | `~$N.NN` from `lifetime_cost_usd` | `-`, never `$0.00` |
+| COST | 8 | right | `~$N.NN` from `lifetime_cost_usd`, `~$N.Nk` from $1000 up | `-`, never `$0.00` |
 | FLIGHT | 6 | right | `inflight/max_concurrency`, `N/-` when unlimited | never |
 
 Total 96 columns with single-space gaps. A window Swamp has no named column for (`Minute`, or an
@@ -501,7 +501,9 @@ re-rendered once, in place, as a live block, then committed. At most one re-rend
 so `/usage` can never loop.
 
 `swamp usage` reads `~/.swamp/accounts.json` under the `fs4` lock (`persist::load_state`), renders
-the same table through the same function, exits 0. It does not need a running supervisor.
+the same table through the same function, exits 0. It does not need a running supervisor. A
+missing file is an empty table; an unreadable one is an error, so a table of zeros never stands in
+for spend the file still holds and `--probe` never overwrites what it could not read.
 `swamp usage --probe` forces one out-of-band probe per account first and waits for it, with a 10s
 per-account timeout; a timeout renders the cached row with its age, never an error.
 
@@ -738,6 +740,8 @@ account `None` (it contributes nothing; a credits-depleted account has no reset)
    - chat: a `Notice` block, `⏸ every anthropic account is at its limit · earliest reset 22:40
      (in 41m) · esc esc to cancel`;
    - `swamp run`: one line on stderr with the same text and `ctrl-c to cancel`;
+   - the span carries a day unit and the clock gains `on <date>` once the reset is not today,
+     so a seven-day window reads the same here as in the RESETS column;
 3. sleeps until `min(retry_at, deadline)` or until `returned.notify_waiters()` fires, then rechecks.
 
 It fails only when the caller's `deadline` passes (`NoCapacity::Saturated`), when the

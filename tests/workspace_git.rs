@@ -394,6 +394,34 @@ async fn finalize_reports_git_sourced_changes_and_a_patch_that_applies() {
     );
 }
 
+/// DESIGN 5.7: the workspace commits "when `commit_on_success`". The key was declared,
+/// defaulted and documented, and nothing in the code ever read it.
+#[tokio::test]
+async fn commit_on_success_false_leaves_the_work_uncommitted() {
+    let h = harness_with(false, |w| w.commit_on_success = Some(false)).await;
+    let wt = h.mgr.create(NodeId::new(), 1).await.unwrap();
+    let head_before = git_ok(&wt.path, &["rev-parse", "HEAD"]).trim().to_owned();
+    write(&wt, "README.md", "swamp test repo\nplus a line\n");
+
+    h.mgr
+        .finalize(&wt, "add a line", Tier::Mid)
+        .await
+        .expect("finalize")
+        .expect("a result");
+
+    assert_eq!(
+        git_ok(&wt.path, &["rev-parse", "HEAD"]).trim(),
+        head_before,
+        "the node's changes were committed anyway"
+    );
+    assert!(
+        !git_ok(&wt.path, &["status", "--porcelain"])
+            .trim()
+            .is_empty(),
+        "the changes are still there for a human to stage"
+    );
+}
+
 #[tokio::test]
 async fn finalize_sees_a_file_no_edit_tool_ever_touched() {
     let h = harness().await;

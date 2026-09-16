@@ -17,6 +17,7 @@ use ratatui::text::Line;
 use std::str::FromStr;
 use std::time::Duration;
 use time::OffsetDateTime;
+use unicode_width::UnicodeWidthStr;
 
 /// Rule, input, rule, status: the floor under the live area.
 pub const MIN_LIVE: u16 = 4;
@@ -1282,14 +1283,17 @@ impl App {
         if width < 50 {
             right = format!("run {}", self.run.short());
         }
-        let centre_room = width.saturating_sub(left.len() + right.len() + 4);
+        // Display width throughout: the popup hint and the separators are multi-byte, so
+        // byte lengths would drop or misplace the centre segment.
+        let (lw, rw, cw) = (left.width(), right.width(), centre.width());
+        let centre_room = width.saturating_sub(lw + rw + 4);
         let mut text = left.clone();
-        if width >= 80 && centre_room >= centre.chars().count() {
-            let gap = (width - left.len() - right.len() - centre.chars().count()) / 2;
+        if width >= 80 && centre_room >= cw {
+            let gap = (width - lw - rw - cw) / 2;
             text.push_str(&" ".repeat(gap));
             text.push_str(&centre);
         }
-        let pad = width.saturating_sub(text.chars().count() + right.chars().count() + 2);
+        let pad = width.saturating_sub(text.width() + rw + 2);
         text.push_str(&" ".repeat(pad));
         text.push_str(&right);
         Line::from(t.span(fmt::truncate(&text, width), Role::Meta))

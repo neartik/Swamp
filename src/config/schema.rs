@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-/// Raw deserialization target: one layer of swamp.toml, before merging.
+/// Raw deserialization target: one layer of a config.toml, before merging.
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Schema {

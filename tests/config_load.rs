@@ -174,7 +174,32 @@ models = { mid = "model-mid" }
         ),
         "{err}"
     );
-    assert!(err_text(&err).contains("providers.<p>.models.<t>"));
+    // The message has the names in hand: it must spell the real key, in the lowercase the
+    // config uses, and name a file Swamp actually reads.
+    let text = err_text(&err);
+    assert!(text.contains("providers.anthropic.models.high"), "{text}");
+    assert!(text.contains(".swamp/config.toml"), "{text}");
+    assert!(!text.contains("in swamp.toml"), "{text}");
+    assert!(!text.contains("Anthropic"), "{text}");
+}
+
+/// swamp.example.toml documents four fsync policies and `FsyncPolicy::from_str` refuses
+/// anything else, but the only call site threw that error away and ran at the default. A
+/// config that cannot deliver the durability it asks for has to say so at load time.
+#[test]
+fn a_misspelled_fsync_policy_is_refused() {
+    let sb = Sandbox::new();
+    let bad = sb.write("bad-fsync.toml", "[journal]\nfsync = \"allways\"\n");
+    let text = err_text(
+        &sb.load(Some(&bad), None)
+            .expect_err("`allways` is not a policy"),
+    );
+    assert!(text.contains("journal.fsync"), "{text}");
+    assert!(text.contains("allways"), "{text}");
+
+    let good = sb.write("good-fsync.toml", "[journal]\nfsync = \"interval:250ms\"\n");
+    sb.load(Some(&good), None)
+        .expect("interval:250ms is documented");
 }
 
 #[test]

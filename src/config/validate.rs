@@ -128,6 +128,11 @@ pub fn problems(cfg: &Config) -> Vec<Problem> {
             "must be non-negative".to_string(),
         );
     }
+    if let Some(fsync) = cfg.journal.fsync.as_deref()
+        && let Err(e) = fsync.parse::<crate::journal::writer::FsyncPolicy>()
+    {
+        push("journal.fsync".into(), format!("{e}"));
+    }
     for (p, pc) in &cfg.providers {
         if let Some(src) = pc.quota_source.as_deref()
             && !matches!(src, "auto" | "rollout" | "app-server" | "none")
