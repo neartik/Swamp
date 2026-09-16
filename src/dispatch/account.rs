@@ -138,6 +138,12 @@ impl QuotaSource {
         !matches!(self, Self::Estimated)
     }
 
+    /// Whether a reading from this source can state `ordinary_usage_allowed` / `reached` at
+    /// all. A rollout tail and an estimate carry only percentages, so they never clear them.
+    pub fn reports_gate(&self) -> bool {
+        matches!(self, Self::Telemetry | Self::AppServer)
+    }
+
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Telemetry => "telemetry",
@@ -204,10 +210,22 @@ impl AccountState {
     ) -> bool {
         // Two buckets are two allowances: merging across them lets one bucket inherit the
         // other's windows and park a model family that has no limit at all.
-        let merged = match &self.quota {
+        let mut merged = match &self.quota {
             Some(prev) if prev.limit_id == snap.limit_id => snap.merged_over(prev, now),
             _ => snap,
         };
+        // Only a source that can report the provider's gate may clear it: a rollout tail or
+        // an estimate carries a percentage and nothing else, so it inherits the last gate.
+        if !source.reports_gate()
+            && let Some(prev) = self.quota.as_ref()
+        {
+            if merged.ordinary_usage_allowed.is_none() {
+                merged.ordinary_usage_allowed = prev.ordinary_usage_allowed;
+            }
+            if merged.reached.is_none() {
+                merged.reached = prev.reached;
+            }
+        }
         let rolled = self.roll_window(WindowKey::of(&merged), now);
         if let Some(id) = merged.limit_id.clone() {
             self.quota_buckets.insert(id, merged.clone());

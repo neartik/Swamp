@@ -447,7 +447,11 @@ impl AccountPool {
                         let consecutive = entry.consecutive_infra_failures;
                         if let Some(d) = cooldown_for(f, consecutive, &self.cfg.cooldown, now) {
                             entry.cooldown_until = Some(now + d);
-                            entry.health = Health::Cooling;
+                            // A hard gate is not a timer: cooling must not overwrite the
+                            // health the provider's own refusal set.
+                            if !hard_gated(entry) {
+                                entry.health = Health::Cooling;
+                            }
                         }
                     }
                     if matches!(f, Failure::AuthExpired { .. }) {

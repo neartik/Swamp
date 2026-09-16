@@ -154,7 +154,7 @@ is then balancing that account on token share alone (§4.4).
 
 ### 1.8 Documentation mentions to delete
 
-`docs/DESIGN.md:145,147,160-161,378,536,568,740,831,876,921,1120,1236,1386-1396,1868-1869,1883,1938,2023,2025-2026,2031-2032,2183,2191,2231,2239,2385,2392,2434`;
+`docs/DESIGN.md:145,147,160-161,378,536,568,740,831,876,921,1120,1236,1386-1396,1868-1869,1883,1938,2023,2025-2026,2031-2032,2183,2191,2231,2239,2385,2392,2434,2585`;
 `docs/UI.md:433,447,737`; `docs/PLAN.md:153,184,191,436,470,601,915`;
 `README.md:77,190,201,242`; `swamp.example.toml:6,8,9,14,15,167,175,220`.
 
@@ -273,7 +273,9 @@ pub struct RateLimitSnapshot {
     pub limit_id: Option<String>,
     /// codex `ordinaryUsageAllowed`. The authoritative gate: the schema says clients must NOT
     /// infer recovery from percentages or reset times. `Some(false)` makes the account
-    /// ineligible whatever the percentages say.
+    /// ineligible whatever the percentages say. Only a source that can state the gate -
+    /// `QuotaSource::reports_gate`, i.e. the app-server or claude's `rate_limit_event` - may
+    /// clear it; a rollout tail or an estimate carries percentages only and inherits it.
     pub ordinary_usage_allowed: Option<bool>,
     /// Why the limit was reached, when the provider says. Decides cooldown vs park.
     pub reached: Option<LimitReached>,
@@ -485,7 +487,11 @@ Rules:
   never printed bare.
 - A cooling or parked account gets a continuation row: `until HH:MM · <LimitReached word>`, or
   `until HH:MM` when the provider gave no reason, or `auth broken · re-auth <exec>` for
-  `Health::AuthBroken`.
+  `Health::AuthBroken`. The clock is `fmt::clock_day`, so a reset on another UTC day names it.
+- The hard gates come first, in `pool::block_reason`'s own order: an account carrying
+  `reached: credits_depleted` / `spend_control` or `ordinary_usage_allowed: false` renders
+  `<reason> · no timer clears this` and never an `until HH:MM`, whatever its cooldown says,
+  because `policy::score` refuses it outright and `capacity` contributes no `retry_at` for it.
 - `observed` lists per-account age and source. An account whose `quota_observed_at` is older than
   `dispatch.quota_max_age` renders the age in `err` colour, because a stale percentage is what makes
   dispatch wrong.
@@ -515,7 +521,11 @@ per-account timeout; a timeout renders the cached row with its age, never an err
 
 `/accounts` and `swamp accounts` are unchanged and keep their role: health, cooldown, exec
 resolution, admin subcommands. `/usage` is the token and quota view. The split is deliberate; they
-share `watch::health_word` and `watch::health_color` so the two cannot disagree on health.
+share `watch::health_word(watch::shown_health(..))`, `watch::health_color` and `fmt::clock_day`, so
+the two can disagree on neither health nor the day a cooldown ends. The `5H` / `7D` fractions
+`swamp accounts` quotes are filtered by `LimitWindow::is_current` exactly as `/usage` filters them,
+and an estimated one carries the same leading `~` (§2.3): a window whose reset has passed measures
+an allowance that has already rolled, and dispatch ignores it too.
 
 ### 3.3 JSON
 

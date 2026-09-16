@@ -7,7 +7,7 @@ use swamp::ids::{NodeId, RunId};
 use swamp::journal::fold::RunView;
 use swamp::journal::record::{JournalEvent, JournalLine};
 use swamp::model::core::{
-    AccountId, LimitScope, LimitStatus, LimitWindow, RateLimitSnapshot, Usage,
+    AccountId, LimitReached, LimitScope, LimitStatus, LimitWindow, RateLimitSnapshot, Usage,
 };
 use time::OffsetDateTime;
 
@@ -359,6 +359,43 @@ fn applying_a_snapshot_records_its_provenance_and_rolls_once() {
     assert_eq!(state.window_tokens.billable(), 900);
     assert_eq!(state.quota_observed_at, Some(later));
     assert_eq!(state.quota_source, Some(QuotaSource::AppServer));
+}
+
+/// USAGE 2.2 and 4.3: `ordinary_usage_allowed` is the authoritative gate, and a codex rollout
+/// carries a percentage and nothing else. A rollout tail must therefore never lift a refusal
+/// the app-server read, or Swamp keeps leasing an account the provider has already refused.
+#[test]
+fn a_rollout_reading_cannot_lift_the_provider_gate() {
+    let now = OffsetDateTime::from_unix_timestamp(1_789_400_000).expect("now");
+    let resets = now + time::Duration::days(7);
+    let mut state = AccountState::default();
+
+    let mut refused = snapshot(resets);
+    refused.ordinary_usage_allowed = Some(false);
+    refused.reached = Some(LimitReached::CreditsDepleted);
+    state.apply_quota(refused, QuotaSource::AppServer, now);
+    assert!(swamp::dispatch::pool::hard_gated(&state));
+
+    // `parse_rollout` builds `Bucket { limits, ..default() }`: both gate fields are unset.
+    let later = now + time::Duration::minutes(1);
+    state.apply_quota(snapshot(resets), QuotaSource::Rollout, later);
+    let q = state.quota.as_ref().expect("a snapshot");
+    assert_eq!(q.ordinary_usage_allowed, Some(false));
+    assert_eq!(q.reached, Some(LimitReached::CreditsDepleted));
+    assert!(
+        swamp::dispatch::pool::hard_gated(&state),
+        "a rollout tail lifted the provider's hard gate"
+    );
+    assert_eq!(
+        swamp::dispatch::pool::health_from_quota(&state, 0.9),
+        swamp::dispatch::account::Health::AuthBroken
+    );
+
+    // The app-server can state the gate, so it is what clears it.
+    let mut allowed = snapshot(resets);
+    allowed.ordinary_usage_allowed = Some(true);
+    state.apply_quota(allowed, QuotaSource::AppServer, later);
+    assert!(!swamp::dispatch::pool::hard_gated(&state));
 }
 
 /// codex reports its reset as a countdown, so the absolute instant Swamp derives moves

@@ -162,7 +162,9 @@ pub fn render(
             Some(p) => p.as_str().to_owned(),
             None => "not in config (drop with swamp accounts reset <id>)".to_owned(),
         };
-        out.push(Line::from(theme.span(head, Role::Name)));
+        out.push(Line::from(
+            theme.span(fmt::truncate(&head, width as usize), Role::Name),
+        ));
         out.push(header_line(&layout, theme, width));
         for r in group {
             out.extend(account_lines(r, &layout, theme, now, width));
@@ -302,10 +304,18 @@ fn parked_reason(r: &AccountRow) -> Option<&'static str> {
 }
 
 fn status_continuation(r: &AccountRow, now: OffsetDateTime) -> Option<String> {
+    let health = shown_health(r, now);
     let refused = parked_reason(r)
         .map(|w| format!("{w} \u{b7} "))
         .unwrap_or_default();
-    match shown_health(r, now) {
+    // The hard gates first, exactly as `pool::block_reason` orders them: an account the
+    // provider refuses must never advertise an `until HH:MM` that brings nobody back.
+    if health != Health::AuthBroken
+        && let Some(w) = parked_reason(r)
+    {
+        return Some(format!("{w} \u{b7} no timer clears this"));
+    }
+    match health {
         Health::AuthBroken if r.exec.is_empty() => {
             return Some(format!(
                 "auth broken \u{b7} {refused}drop with swamp accounts reset <id>"
@@ -328,7 +338,7 @@ fn status_continuation(r: &AccountRow, now: OffsetDateTime) -> Option<String> {
         }
         _ => {}
     }
-    parked_reason(r).map(|w| format!("{w} \u{b7} no timer clears this"))
+    None
 }
 
 fn reached_word(r: LimitReached) -> &'static str {

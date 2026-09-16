@@ -466,10 +466,11 @@ pub enum LimitScope { FiveHour, SevenDay, Minute, Unknown }
 #[serde(rename_all = "snake_case")]
 pub enum LimitStatus { Allowed, Warning, Rejected }
 
-/// Why the limit was reached, when the provider says so. Decides cooldown vs park.
+/// Why the limit was reached, when the provider says so. Decides cooldown vs park:
+/// `RateLimit` cools and comes back, the other two park until a human acts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum LimitReached { UsageLimit, CreditsDepleted, SpendControl }
+pub enum LimitReached { RateLimit, CreditsDepleted, SpendControl }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LimitWindow {
@@ -1682,6 +1683,10 @@ openai     codex    codex-main   healthy      0/2     -     -    -           31 
 Account ids are unique machine-wide, not per provider: `validate::problems` rejects a second
 `main` whatever provider it names, and `~/.swamp/accounts.json` is keyed by the bare id too.
 
+A window whose `resets_at` has passed is blank too: it measures an allowance that has already
+rolled, so `swamp accounts`, `swamp usage` and `swamp doctor` all drop it. An estimated fraction
+carries a leading `~`, as everywhere else.
+
 The 5H/7D columns are blank for OpenAI when it has no live quota source at all; `USAGE.md` §2.3's rollout
 tailer and app-server probe give it one on most setups, which is exactly what makes `QuotaAware`
 safe as the default. `swamp accounts` stays the health, cooldown and exec-resolution view; the token
@@ -2582,7 +2587,10 @@ and deterministic.
 8. **Worktree isolation is leaky.** A fresh worktree has no `node_modules`, no `.env`, no `target`,
    and a worker that cannot build produces a useless diff expensively. Mitigation:
    `workspace.link` / `copy` / `post_create`, plus a doctor warning when a heavy build dir exists and
-   `link` is empty. `isolation = "shared"` is the escape hatch, hard-capped at one worker.
+   `link` is empty. `isolation = "shared"` is accepted by config but has no runtime effect in v1:
+   every node still gets its own worktree, and the `max_parallel = 1` forcing that used to back the
+   escape hatch went with the rest of the global cap (USAGE.md 1.1). Re-asserting the "one worker in
+   the real tree" guarantee means wiring `WorkspaceManager::shared_lock`, which has no caller yet.
 
 9. **Prompt injection from worker output into a brain that holds dispatch tools.** Worker output is
    attacker-influenced data (repo content, test output, fetched text) fed straight into the brain's

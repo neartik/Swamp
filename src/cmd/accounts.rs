@@ -4,7 +4,7 @@ use crate::dispatch::account::{AccountState, Health};
 use crate::dispatch::persist::{self, StateMap};
 use crate::dispatch::policy::Scoring;
 use crate::dispatch::pool;
-use crate::model::core::{AccountId, LimitScope, Provider};
+use crate::model::core::{AccountId, LimitScope, LimitWindow, Provider};
 use serde_json::json;
 use time::OffsetDateTime;
 
@@ -70,8 +70,8 @@ fn list(ctx: &Ctx) -> anyhow::Result<i32> {
                     "health": crate::ui::watch::shown_health(s.health, s.cooldown_until, now),
                     "inflight": s.inflight,
                     "max_concurrency": a.max_concurrency,
-                    "five_hour": window(&s, LimitScope::FiveHour),
-                    "seven_day": window(&s, LimitScope::SevenDay),
+                    "five_hour": window(&s, LimitScope::FiveHour, now).map(|w| w.utilization),
+                    "seven_day": window(&s, LimitScope::SevenDay, now).map(|w| w.utilization),
                     "cooldown_until": s.cooldown_until.map(|t| t.to_string()),
                     "nodes": s.lifetime_nodes,
                     "cost_usd": s.lifetime_cost_usd,
@@ -116,8 +116,8 @@ fn list(ctx: &Ctx) -> anyhow::Result<i32> {
                 now,
             )),
             format!("{}/{cap}", s.inflight),
-            util(window(&s, LimitScope::FiveHour)),
-            util(window(&s, LimitScope::SevenDay)),
+            util(window(&s, LimitScope::FiveHour, now)),
+            util(window(&s, LimitScope::SevenDay, now)),
             cooldown(&s, now),
             s.lifetime_nodes,
             s.lifetime_cost_usd,
@@ -146,8 +146,8 @@ fn list(ctx: &Ctx) -> anyhow::Result<i32> {
                     now,
                 )),
                 "-",
-                util(window(&s, LimitScope::FiveHour)),
-                util(window(&s, LimitScope::SevenDay)),
+                util(window(&s, LimitScope::FiveHour, now)),
+                util(window(&s, LimitScope::SevenDay, now)),
                 cooldown(&s, now),
                 s.lifetime_nodes,
                 s.lifetime_cost_usd,
@@ -223,19 +223,23 @@ fn edit(
     persist::merge_state(path, &state).map(|_| ())
 }
 
-/// Blank, never zero: `codex exec --json` reports no quota telemetry at all.
-fn window(s: &AccountState, scope: LimitScope) -> Option<f64> {
+/// Blank, never zero: `codex exec --json` reports no quota telemetry at all. A window whose
+/// reset has passed measures an allowance that has already rolled, so it is not a window.
+fn window(s: &AccountState, scope: LimitScope, now: OffsetDateTime) -> Option<&LimitWindow> {
     s.quota
         .as_ref()?
         .windows
         .iter()
-        .find(|w| w.scope == scope)
-        .map(|w| w.utilization)
+        .find(|w| w.scope == scope && w.is_current(now))
 }
 
-fn util(v: Option<f64>) -> String {
-    v.map(|u| format!("{u:.2}"))
-        .unwrap_or_else(|| "-".to_owned())
+/// A `~` prefix marks an estimated number, the way `/usage` renders it.
+fn util(w: Option<&LimitWindow>) -> String {
+    match w {
+        None => "-".to_owned(),
+        Some(w) if w.measured => format!("{:.2}", w.utilization),
+        Some(w) => format!("~{:.2}", w.utilization),
+    }
 }
 
 fn cooldown(s: &AccountState, now: OffsetDateTime) -> String {

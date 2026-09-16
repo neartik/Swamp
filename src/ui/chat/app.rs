@@ -1079,12 +1079,16 @@ impl App {
                 let cooldown = state
                     .cooldown_until
                     .filter(|t| *t > self.now)
-                    .map(|t| format!("  until {}", fmt::clock_hm(t)))
+                    .map(|t| format!("  until {}", fmt::clock_day(t, self.now)))
                     .unwrap_or_default();
                 format!(
                     "{provider}/{:<10} {:<11} {} {:>3}%  {} inflight  {} nodes  ~${:.2}{cooldown}",
                     id.0,
-                    watch::health_word(state.health),
+                    watch::health_word(watch::shown_health(
+                        state.health,
+                        state.cooldown_until,
+                        self.now
+                    )),
                     watch::gauge_bar(util),
                     (util * 100.0).round() as i64,
                     state.inflight,

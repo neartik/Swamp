@@ -232,6 +232,62 @@ fn swamp_usage_needs_no_supervisor_and_a_missing_file_is_not_an_error() {
     empty.swamp(&["usage"]).assert().success();
 }
 
+/// USAGE 2.3: `swamp accounts` quotes the same windows dispatch scores against. A window whose
+/// reset has passed has already rolled, so `/usage`, `doctor` and the table must all drop it,
+/// and an estimated number carries the `~` that says nobody measured it.
+#[test]
+fn swamp_accounts_drops_an_expired_window_and_marks_an_estimated_one() {
+    let h = Harness::new();
+    let now = OffsetDateTime::now_utc();
+    let mut state = swamp::dispatch::persist::StateMap::new();
+    state.insert(
+        AccountId("main".into()),
+        AccountState {
+            quota: Some(RateLimitSnapshot {
+                status: LimitStatus::Allowed,
+                windows: vec![
+                    LimitWindow {
+                        scope: LimitScope::FiveHour,
+                        utilization: 0.91,
+                        resets_at: Some(now - time::Duration::hours(2)),
+                        window_minutes: Some(300),
+                        measured: true,
+                    },
+                    LimitWindow {
+                        scope: LimitScope::SevenDay,
+                        utilization: 0.02,
+                        resets_at: Some(now + time::Duration::days(3)),
+                        window_minutes: Some(10080),
+                        measured: false,
+                    },
+                ],
+                ..RateLimitSnapshot::default()
+            }),
+            quota_observed_at: Some(now - time::Duration::hours(3)),
+            quota_source: Some(QuotaSource::Estimated),
+            ..Default::default()
+        },
+    );
+    swamp::dispatch::persist::save_state(&h.paths().accounts_state(), &state)
+        .expect("writing accounts.json by hand");
+
+    let out = h.swamp(&["accounts"]).assert().success();
+    let stdout = String::from_utf8_lossy(&out.get_output().stdout).into_owned();
+    assert!(
+        !stdout.contains("0.91"),
+        "a rolled window is still quoted: {stdout}"
+    );
+    assert!(
+        stdout.contains("~0.02"),
+        "an estimated window reads as a measurement: {stdout}"
+    );
+
+    let json = h.swamp(&["--json", "accounts"]).assert().success();
+    let text = String::from_utf8_lossy(&json.get_output().stdout).into_owned();
+    let rows: serde_json::Value = serde_json::from_str(&text).expect("json rows");
+    assert_eq!(rows[0]["five_hour"], serde_json::Value::Null, "{text}");
+}
+
 /// An unreadable state file is the one case `load_state` reports: rendering it as zeros
 /// reads as "nothing was spent", and `--probe` would then overwrite it with the probed
 /// accounts alone, losing every lifetime counter the file held.
@@ -609,6 +665,17 @@ fn usage_effects(app: &mut swamp::ui::chat::app::App) -> Vec<swamp::ui::chat::ap
         .into_iter()
         .skip(1)
         .collect()
+}
+
+/// The chat `/accounts` body, the one surface that used to format the raw pool state.
+fn accounts_commit(app: &mut swamp::ui::chat::app::App, width: u16) -> String {
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    for effect in app.command("accounts") {
+        if let swamp::ui::chat::app::Effect::Commit(body) = effect {
+            lines.extend(body);
+        }
+    }
+    screen(&lines, width)
 }
 
 fn usage_commit(app: &mut swamp::ui::chat::app::App, width: u16) -> String {
@@ -1102,6 +1169,11 @@ exec = "/opt/tooling/pnpm/global/5/node_modules/.bin/claude-main"
 /// terminal soft-wrapped each of them and the table read as two interleaved tables.
 #[test]
 fn no_rendered_line_is_wider_than_the_terminal() {
+    // The `not in config` heading is 51 columns of its own and used to escape the clamp.
+    let mut stale = row("dropped-account", Provider::Anthropic, Health::Healthy);
+    stale.provider = None;
+    stale.in_config = false;
+    stale.exec = String::new();
     let rows = vec![
         with_seven_day(
             row("claude-main", Provider::Anthropic, Health::Healthy),
@@ -1109,8 +1181,9 @@ fn no_rendered_line_is_wider_than_the_terminal() {
             true,
         ),
         row("codex-main", Provider::Openai, Health::Degraded),
+        stale,
     ];
-    for width in [30u16, 40, 50, 62, 80, 100] {
+    for width in [30u16, 40, 44, 50, 62, 80, 100] {
         let lines = usage::render(&rows, width, &Theme::plain(), MAX_AGE);
         for line in swamp::ui::chat::blocks::text_of(&lines) {
             assert!(
@@ -1120,6 +1193,58 @@ fn no_rendered_line_is_wider_than_the_terminal() {
             );
         }
     }
+}
+
+/// USAGE 2.2: a hard gate is not a timer. An account that is both cooling and refused by the
+/// provider used to advertise `until HH:MM`, a comeback `policy::score` and `capacity` never
+/// grant - `pool::block_reason` puts the hard gates first and the table has to agree.
+#[test]
+fn a_refused_account_never_advertises_a_reset_it_cannot_honour() {
+    let now = OffsetDateTime::now_utc();
+    for (reached, allowed, word) in [
+        (
+            Some(LimitReached::CreditsDepleted),
+            None,
+            "credits_depleted",
+        ),
+        (Some(LimitReached::SpendControl), None, "spend_control"),
+        (None, Some(false), "ordinary usage refused"),
+    ] {
+        let mut r = row("claude-main", Provider::Anthropic, Health::Cooling);
+        r.cooldown_until = Some(now + time::Duration::minutes(40));
+        r.quota = Some(RateLimitSnapshot {
+            reached,
+            ordinary_usage_allowed: allowed,
+            ..RateLimitSnapshot::default()
+        });
+        let body = screen(
+            &usage::render(std::slice::from_ref(&r), 100, &Theme::plain(), MAX_AGE),
+            100,
+        );
+        assert!(body.contains(word), "{body}");
+        assert!(
+            body.contains("no timer clears this"),
+            "the hard gate is not stated: {body}"
+        );
+        assert!(
+            !body.contains("until "),
+            "a refused account advertises a reset: {body}"
+        );
+    }
+
+    // A plain cooldown, with no gate behind it, still names its timer.
+    let mut cooling = row("claude-alt", Provider::Anthropic, Health::Cooling);
+    cooling.cooldown_until = Some(now + time::Duration::minutes(40));
+    let body = screen(
+        &usage::render(
+            std::slice::from_ref(&cooling),
+            100,
+            &Theme::plain(),
+            MAX_AGE,
+        ),
+        100,
+    );
+    assert!(body.contains("until "), "{body}");
 }
 
 /// USAGE 3.2: `swamp accounts` and `swamp usage` share one health word, so a `Cooling` entry
@@ -1158,6 +1283,22 @@ fn an_elapsed_cooldown_reads_healthy_on_every_surface() {
         "cooling",
         "a live timer still cools"
     );
+
+    let cfg = test_config();
+    let mut app = chat_app(&cfg, 100);
+    app.now = now;
+    app.pool = vec![(
+        Provider::Anthropic,
+        AccountId("main".into()),
+        AccountState {
+            health: Health::Cooling,
+            cooldown_until: Some(now - time::Duration::hours(1)),
+            ..AccountState::default()
+        },
+    )];
+    let body = accounts_commit(&mut app, 100);
+    assert!(body.contains("healthy"), "chat /accounts is stale: {body}");
+    assert!(!body.contains("cooling"), "{body}");
 }
 
 /// A cooldown routinely crosses midnight UTC: `cooldown.max` defaults to six hours and a
@@ -1199,6 +1340,25 @@ fn a_cooldown_that_crosses_midnight_names_its_day() {
     assert!(
         body.contains(&format!("until {}", swamp::ui::fmt::clock_day(soon, now))),
         "a reset later today stays a bare clock: {body}"
+    );
+
+    // `/accounts` in chat was the last surface still printing a bare wall clock.
+    let cfg = test_config();
+    let mut app = chat_app(&cfg, 120);
+    app.now = now;
+    app.pool = vec![(
+        Provider::Anthropic,
+        AccountId("main".into()),
+        AccountState {
+            health: Health::Cooling,
+            cooldown_until: Some(until),
+            ..AccountState::default()
+        },
+    )];
+    let body = accounts_commit(&mut app, 120);
+    assert!(
+        body.contains(&format!("until {expected}")),
+        "chat /accounts names no day: {body}"
     );
 }
 

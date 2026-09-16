@@ -176,11 +176,26 @@ fn the_brain_credits_its_node_cost_and_quota_to_its_account() {
         "the worker's account is counted exactly once"
     );
 
-    // And the operator's view agrees with the file.
-    h.swamp(&["accounts"])
-        .assert()
-        .success()
-        .stdout(predicates::str::contains("0.06"));
+    // And the operator's view agrees with the file. The recorded sample carries fixed reset
+    // instants, so both surfaces quote its windows only while they are still current.
+    let live = quota
+        .windows
+        .iter()
+        .any(|w| w.scope == LimitScope::FiveHour && w.is_current(time::OffsetDateTime::now_utc()));
+    let accounts = h.swamp(&["accounts"]).assert().success();
+    let accounts = String::from_utf8_lossy(&accounts.get_output().stdout).into_owned();
+    assert_eq!(
+        accounts.contains("0.06"),
+        live,
+        "`swamp accounts` and accounts.json disagree on the five-hour window: {accounts}"
+    );
+    let usage = h.swamp(&["usage"]).assert().success();
+    let usage = String::from_utf8_lossy(&usage.get_output().stdout).into_owned();
+    assert_eq!(
+        usage.contains("6%"),
+        live,
+        "`swamp usage` and `swamp accounts` disagree on the same window: {usage}"
+    );
 }
 
 /// UI 5: a piped chat prints what its own `/help` lists. Answering `unknown command /usage`
