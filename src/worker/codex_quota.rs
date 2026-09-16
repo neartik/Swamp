@@ -117,7 +117,7 @@ fn window_of(w: &RateWindow, now: OffsetDateTime) -> LimitWindow {
         resets_at: w
             .resets_in_seconds
             .and_then(|s| time::Duration::checked_seconds_f64(s as f64))
-            .map(|d| now + d),
+            .and_then(|d| now.checked_add(d)),
         window_minutes: w.window_minutes,
         measured: true,
     }
@@ -306,18 +306,18 @@ pub fn estimated(
     })
 }
 
-/// The bucket a display probe must bill against. `quota_model` can only resolve a tier, and
-/// `default_tier` is not the tier the node actually ran at, so the bucket dispatch already
-/// recorded wins over it: otherwise `/usage` moves the account onto a bucket dispatch never
-/// chose and reports 0% for an account that is at 32%.
+/// The bucket a display probe must bill against, resolved the way `retry.rs` resolves it:
+/// an explicit `accounts[].limit_id` first, then the bucket dispatch already recorded.
+/// `quota_model` can only resolve a tier and `default_tier` is not the tier the node actually
+/// ran at, so re-deriving from it would move the account onto a bucket dispatch never chose.
 pub fn probe_limit_id(
     cfg: &crate::config::Config,
     id: &AccountId,
     recorded: Option<&str>,
 ) -> Option<String> {
-    recorded
-        .map(str::to_owned)
-        .or_else(|| cfg.account(id).and_then(|a| a.limit_id.clone()))
+    cfg.account(id)
+        .and_then(|a| a.limit_id.clone())
+        .or_else(|| recorded.map(str::to_owned))
 }
 
 /// The model a probe resolves its bucket by when nothing has been recorded yet. Dispatch

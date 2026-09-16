@@ -623,9 +623,17 @@ pub fn json(rows: &[AccountRow]) -> Value {
     })
 }
 
+/// A window whose reset has passed measures an allowance that already rolled: the table and
+/// `swamp accounts --json` drop it, so the JSON view must not quote it as current either.
+fn current_only(q: &RateLimitSnapshot, now: OffsetDateTime) -> RateLimitSnapshot {
+    let mut q = q.clone();
+    q.windows.retain(|w| w.is_current(now));
+    q
+}
+
 fn account_json(r: &AccountRow, now: OffsetDateTime) -> Value {
     let quota = r.quota.as_ref().map(|q| {
-        let mut v = serde_json::to_value(q).unwrap_or(Value::Null);
+        let mut v = serde_json::to_value(current_only(q, now)).unwrap_or(Value::Null);
         if let Some(obj) = v.as_object_mut() {
             // The serde spelling, so the journal, accounts.json and this agree.
             obj.insert("source".to_owned(), json!(r.quota_source));
@@ -661,7 +669,10 @@ fn account_json(r: &AccountRow, now: OffsetDateTime) -> Value {
         "max_concurrency": r.max_concurrency,
         "cooldown_until": r.cooldown_until.and_then(rfc3339),
         "quota": quota,
-        "quota_buckets": r.quota_buckets,
+        "quota_buckets": r.quota_buckets
+            .iter()
+            .map(|(id, q)| (id.clone(), current_only(q, now)))
+            .collect::<BTreeMap<_, _>>(),
         "tokens": {
             "window": tokens_json(&r.window_tokens),
             "window_started_at": r.window_started_at.and_then(rfc3339),

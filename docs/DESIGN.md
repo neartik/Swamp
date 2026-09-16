@@ -1387,7 +1387,8 @@ pub struct AccountState {
     #[serde(with = "time::serde::rfc3339::option")] pub window_started_at: Option<OffsetDateTime>,
     /// The window `window_tokens` is keyed to. A change means "roll and zero".
     pub window_key: Option<WindowKey>,
-    /// Every bucket the provider reported, keyed by limit id. Display only.
+    /// Every bucket the provider reported, keyed by limit id. Display only, and empty for a
+    /// provider whose `limit_id` is a rejection label rather than an allowance (Anthropic).
     pub quota_buckets: BTreeMap<String, RateLimitSnapshot>,
     #[serde(with = "time::serde::rfc3339::option")] pub quota_observed_at: Option<OffsetDateTime>,
     pub quota_source: Option<QuotaSource>,
@@ -1670,7 +1671,9 @@ that destroys a user's quota in ten minutes:
    exactly what `claude-main` did before `claude-alt` picked it up, both raw streams preserved.
 4. **Cross-provider failover is off by default.** Silently moving an Anthropic task to a Codex model
    changes the result in ways the user did not ask for. It is a per-tier `provider_order` opt-in and
-   fires only when every account of the current provider is cooling.
+   fires only when every account of the current provider is cooling. A provider with no configured
+   account is never offered: switching to it would die with `NoCapacity::Exhausted` instead of
+   waiting for the window to roll.
 
 ### 6.7 `swamp accounts`
 
@@ -1685,8 +1688,8 @@ Account ids are unique machine-wide, not per provider: `validate::problems` reje
 `main` whatever provider it names, and `~/.swamp/accounts.json` is keyed by the bare id too.
 
 A window whose `resets_at` has passed is blank too: it measures an allowance that has already
-rolled, so `swamp accounts`, `swamp usage` and `swamp doctor` all drop it. An estimated fraction
-carries a leading `~`, as everywhere else.
+rolled, so `swamp accounts`, `swamp usage` and `swamp doctor` all drop it, `--json` included. An
+estimated fraction carries a leading `~`, as everywhere else.
 
 The 5H/7D columns are blank for OpenAI when it has no live quota source at all; `USAGE.md` §2.3's rollout
 tailer and app-server probe give it one on most setups, which is exactly what makes `QuotaAware`
@@ -2210,7 +2213,7 @@ near_exhaustion_penalty = 2.0
 
 [cooldown]
 min = "60s"
-max = "6h"
+max = "6h"                        # every duration here is capped at 365d
 default = "15m"
 breaker_threshold = 3
 quota_warn_at = 0.90

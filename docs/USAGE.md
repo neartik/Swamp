@@ -150,7 +150,10 @@ New check added under `providers.*`, one line per account:
 ```
 
 Level `WARN` only when an account has neither telemetry nor an out-of-band source, because dispatch
-is then balancing that account on token share alone (§4.4).
+is then balancing that account on token share alone (§4.4). The lines come from the last persisted
+snapshot, so an unreadable `~/.swamp/accounts.json` is reported as one `accounts/state` ERROR
+naming the file and `swamp accounts reset`, and no per-account quota line at all: every account
+would otherwise read "no quota source" and hide the fault the user came to doctor to find.
 
 ### 1.8 Documentation mentions to delete
 
@@ -202,7 +205,8 @@ pub struct AccountState {
     // new: quota provenance
     /// The bucket Swamp routes against. Was `quota`; the name and shape are unchanged.
     pub quota: Option<RateLimitSnapshot>,
-    /// Every bucket the provider reported, keyed by limit id. Display only.
+    /// Every bucket the provider reported, keyed by limit id. Display only, and empty for a
+    /// provider whose `limit_id` is a rejection label rather than an allowance (Anthropic).
     pub quota_buckets: BTreeMap<String, RateLimitSnapshot>,
     pub quota_observed_at: Option<OffsetDateTime>,
     pub quota_source: Option<QuotaSource>,
@@ -405,10 +409,13 @@ Unit and scope conversion, both mandatory:
 Bucket selection for `quota` (the one dispatch scores against): `accounts[].limit_id` when set, else
 the bucket whose `limit_name` matches the configured model for this account's tier, else `"codex"`,
 else the first. A node resolves that tier from the spec it ran at; the read-only probes behind
-`/usage` and `swamp usage --probe` cannot know it, so they reuse the bucket already recorded in
-`AccountState::quota` first (`codex_quota::probe_limit_id`) and only fall back to the
-`default_tier` mapping for an account nothing has read yet. A display command must never move an
-account onto a bucket dispatch did not choose. Every bucket is kept in `quota_buckets` for display.
+`/usage` and `swamp usage --probe` cannot know it, so `codex_quota::probe_limit_id` resolves the
+same order dispatch does: `accounts[].limit_id` first, then the bucket already recorded in
+`AccountState::quota`, and only then the `default_tier` mapping for an account nothing has read
+yet. A display command must never move an account onto a bucket dispatch did not choose - neither
+onto a re-derived one, nor back onto the stale one the pin was written to replace. Every bucket a
+provider reports buckets for is kept in `quota_buckets` for display; Anthropic reports none, since
+its `limit_id` is the event's `rateLimitType` label and not an allowance.
 `worst_utilization()` never maxes across buckets: `codex_bengalfox` at 0% on a model family this
 account never runs must not make `codex` at 32% look worse, and `codex` at 95% must not park a
 Spark-only task.
@@ -540,7 +547,10 @@ one is cooling whatever the stored word says, because `policy::score` gates on t
 and `Disabled` are not timers and no cooldown may borrow their row. `swamp accounts enable` itself
 re-derives health with `pool::health_from_quota`, exactly as `AccountPool::set_enabled` does, so a
 provider-refused account stays `auth-broken`: enabling cannot lift a gate, only advertise it
-wrongly. The `5H` / `7D` fractions
+wrongly. `swamp accounts cooldown` is bound by the same rule and guards its write with
+`pool::hard_gated`, the way `AccountPool::report` does: it may add a timer over a depleted account,
+never stamp `cooling` over the refusal, or the row would read `healthy` the moment the timer
+elapsed while dispatch went on refusing the account. The `5H` / `7D` fractions
 `swamp accounts` quotes are filtered by `LimitWindow::is_current` exactly as `/usage` filters them,
 and an estimated one carries the same leading `~` (§2.3): a window whose reset has passed measures
 an allowance that has already rolled, and dispatch ignores it too.
@@ -604,7 +614,11 @@ an allowance that has already rolled, and dispatch ignores it too.
 ```
 
 `billable` is `input + cache_write + output`, the same definition `Usage::billable()` already uses.
-Field names are snake_case and stable; new fields are additive.
+Field names are snake_case and stable; new fields are additive. `quota.windows` and every
+`quota_buckets` entry carry only windows `LimitWindow::is_current` still accepts: a window whose
+`resets_at` has passed measures an allowance that already rolled, and the table beside this JSON,
+`swamp accounts --json` and dispatch itself all drop it, so a dashboard must not read 96% for a
+window that ended hours ago.
 
 ---
 
@@ -780,9 +794,12 @@ account `None` (it contributes nothing; a credits-depleted account has no reset)
 
 It fails only when the caller's `deadline` passes (`NoCapacity::Saturated`), when the
 `CancellationToken` fires (`Failure::Cancelled { by: User }`), or when the pool has no candidate at
-all for the provider (`NoCapacity::Exhausted`, a config problem, not a quota one). Waiting an hour
-for a 5-hour window to roll is the correct behaviour for an overnight run; failing immediately is
-not. When every candidate is hard-gated with no reset, `retry_at` is absent and `acquire` returns
+all for the provider (`NoCapacity::Exhausted`, a config problem, not a quota one). Which is why
+`Config::provider_order` only offers providers that have a configured account: the built-in
+`[providers.openai]` block carries §4.8's keys on every setup, and failing over into it with no
+OpenAI account would turn this wait into `no Openai account available`. Waiting an hour for a
+5-hour window to roll is the correct behaviour for an overnight run; failing immediately is not.
+When every candidate is hard-gated with no reset, `retry_at` is absent and `acquire` returns
 `Exhausted` with the reason, because sleeping forever helps nobody.
 
 `--timeout` (default 25m per node) remains the bound on how long a node is willing to wait. A user
@@ -817,7 +834,9 @@ limit_id = "codex"                # optional: which quota bucket this account ro
 Validation (`src/config/validate.rs`): weights must be finite and non-negative; `quota_max_age >=
 10s`; `near_exhaustion_penalty >= 0`; `estimated_window_tokens` and `estimated_window` must be set
 together; `quota_warn_at < quota_stop_at` (already enforced) still holds and now also gates
-`penalised`'s denominator, which must be > 0.
+`penalised`'s denominator, which must be > 0; every `[cooldown]` duration is at most 365d, because
+`OffsetDateTime + Duration` panics once the sum runs off the calendar and a timer that long parks
+the account for good.
 
 ### 4.9 Worked examples
 

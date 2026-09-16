@@ -432,3 +432,70 @@ fn the_example_config_does_not_repeat_the_approval_override() {
         "the adapter owns the override: {argv:?}"
     );
 }
+
+/// A rollout file is appended to by another process, and the app-server's JSON is provider
+/// data too: a countdown past the end of the calendar must drop the reset, not abort the node
+/// that was tailing the file.
+#[test]
+fn an_out_of_range_reset_countdown_drops_the_reset_instead_of_panicking() {
+    use swamp::worker::codex_quota;
+
+    let line = r#"{"payload":{"type":"token_count","rate_limits":{"primary":{"used_percent":5.0,"window_minutes":10080,"resets_in_seconds":9000000000000000000}}}}"#;
+    let now = time::OffsetDateTime::now_utc();
+    let quota = codex_quota::parse_rollout(line, now)
+        .quota
+        .expect("the window still parses");
+    assert_eq!(quota.windows.len(), 1);
+    assert!(
+        quota.windows[0].resets_at.is_none(),
+        "an unrepresentable reset is no reset: {:?}",
+        quota.windows[0].resets_at
+    );
+    assert!((quota.windows[0].utilization - 0.05).abs() < 1e-9);
+}
+
+/// USAGE 4.8: `accounts[].limit_id` exists precisely because the auto-pick chose the wrong
+/// bucket, and `retry.rs` honours it first. A display probe that preferred the recorded bucket
+/// moved the account back onto the bucket the config says it must not use.
+#[test]
+fn an_explicit_limit_id_wins_over_the_recorded_bucket() {
+    use swamp::worker::codex_quota::probe_limit_id;
+
+    let config = |pin: Option<&str>| {
+        let text = format!(
+            r#"
+[providers.openai]
+models = {{ high = "a", mid = "b", low = "c" }}
+
+[[accounts]]
+id = "codex-main"
+provider = "openai"
+exec = "codex-main"
+{}
+"#,
+            pin.map(|l| format!("limit_id = \"{l}\""))
+                .unwrap_or_default()
+        );
+        let schema: swamp::config::Schema = toml::from_str(&text).expect("the config parses");
+        swamp::config::resolve::from_schema(swamp::config::load::merge(vec![
+            swamp::config::load::default_layer(),
+            swamp::config::load::Layer {
+                origin: "test".into(),
+                schema,
+            },
+        ]))
+    };
+    let id = AccountId("codex-main".into());
+
+    assert_eq!(
+        probe_limit_id(&config(Some("codex")), &id, Some("codex_bengalfox")),
+        Some("codex".to_owned()),
+        "the configured bucket is the one dispatch bills against"
+    );
+    assert_eq!(
+        probe_limit_id(&config(None), &id, Some("codex_bengalfox")),
+        Some("codex_bengalfox".to_owned()),
+        "with no pin the probe still reuses the recorded bucket"
+    );
+    assert_eq!(probe_limit_id(&config(None), &id, None), None);
+}

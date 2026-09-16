@@ -912,3 +912,40 @@ async fn a_quota_reading_never_clears_a_real_auth_failure() {
     h.pool.observe_quota(&id("main"), quota(0.1));
     assert_eq!(health_of(&h.pool, "main"), Health::AuthBroken);
 }
+
+/// `config::validate` bounds `[cooldown]`, but a `CooldownCfg` that reached the pool from
+/// anywhere else used to abort the supervisor on the first rate limit: `OffsetDateTime + Duration`
+/// panics once the sum runs off the calendar.
+#[tokio::test]
+async fn an_over_large_cooldown_is_clamped_instead_of_panicking() {
+    let (_dir, root) = tmp();
+    let schema = toml::from_str(&format!(
+        "{TWO_ACCOUNTS}\n[cooldown]\nmax = \"9999999d\"\ndefault = \"9999999d\"\n"
+    ))
+    .expect("test config parses");
+    let cfg = Arc::new(resolve::from_schema(load::merge(vec![
+        load::default_layer(),
+        load::Layer {
+            origin: "test".into(),
+            schema,
+        },
+    ])));
+    let (handle, _events) = journal(&root).await;
+    let pool = AccountPool::new(cfg, root.join("accounts.json"), handle).expect("pool");
+
+    pool.report(&id("main"), Some(&rate_limited(None)), None);
+    assert_eq!(health_of(&pool, "main"), Health::Cooling);
+
+    let until = pool
+        .snapshot()
+        .into_iter()
+        .find(|(_, a, _)| a.0 == "main")
+        .and_then(|(_, _, s)| s.cooldown_until)
+        .expect("a cooldown was set");
+    let now = time::OffsetDateTime::now_utc();
+    assert!(until > now, "the timer still cools the account");
+    assert!(
+        until - now <= time::Duration::days(366),
+        "a cooldown past the calendar is clamped, not stored: {until}"
+    );
+}

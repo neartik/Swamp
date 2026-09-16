@@ -765,6 +765,11 @@ fn a_claude_event_naming_another_limit_still_merges_the_stored_windows() {
         "the stored seven-day reading is what still gates dispatch"
     );
     assert_eq!(quota.reached, Some(LimitReached::RateLimit));
+    assert!(
+        state.quota_buckets.is_empty(),
+        "a rejection label is not a bucket, and `swamp usage --json` prints what it holds: {:?}",
+        state.quota_buckets.keys().collect::<Vec<_>>()
+    );
 }
 
 /// The other half of the same rule: for codex two `limit_id`s really are two allowances, so a

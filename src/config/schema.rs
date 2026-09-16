@@ -99,6 +99,10 @@ pub struct WeightsCfg {
     pub idle: Option<f64>,
 }
 
+/// Ceiling for every `[cooldown]` duration: past a year the timer is a typo, and
+/// `OffsetDateTime + Duration` panics once the sum runs off the calendar.
+pub const MAX_COOLDOWN: Duration = Duration::from_secs(365 * 24 * 60 * 60);
+
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CooldownCfg {

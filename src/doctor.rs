@@ -260,7 +260,21 @@ async fn accounts(cfg: &Config, paths: &Paths, probe: bool, out: &mut Vec<Check>
 /// One line per account: whether dispatch has quota telemetry to balance load on, or is
 /// reduced to token share alone. Read from the last persisted snapshot, no network.
 fn quota(cfg: &Config, paths: &Paths, out: &mut Vec<Check>) {
-    let state = crate::dispatch::persist::load_state(&paths.accounts_state()).unwrap_or_default();
+    // An empty map would read as "no quota source" on every account and hide the real fault.
+    let state = match crate::dispatch::persist::load_state(&paths.accounts_state()) {
+        Ok(state) => state,
+        Err(e) => {
+            out.push(Check::new(
+                "accounts/state",
+                Level::Error,
+                format!(
+                    "{} is unreadable: {e}; recover with `swamp accounts reset`",
+                    paths.accounts_state()
+                ),
+            ));
+            return;
+        }
+    };
     let now = time::OffsetDateTime::now_utc();
     for account in &cfg.accounts {
         let name = format!("providers/{}/quota", account.id.0);

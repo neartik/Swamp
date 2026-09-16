@@ -4,8 +4,8 @@ pub mod schema;
 pub mod validate;
 
 pub use schema::{
-    AccountCfg, BrainCfg, CooldownCfg, DispatchCfg, FailureCfg, JournalCfg, Limits, PricingCfg,
-    ProviderCfg, Schema, TierCfg, UiCfg, WeightsCfg, WorkerCfg, WorkspaceCfg,
+    AccountCfg, BrainCfg, CooldownCfg, DispatchCfg, FailureCfg, JournalCfg, Limits, MAX_COOLDOWN,
+    PricingCfg, ProviderCfg, Schema, TierCfg, UiCfg, WeightsCfg, WorkerCfg, WorkspaceCfg,
 };
 
 use crate::error::SwampError;
@@ -142,8 +142,10 @@ impl Config {
             return order.clone();
         }
         let mut order: Vec<Provider> = self.dispatch.default_provider.into_iter().collect();
+        // A provider with no account is no failover target: switching to it dies with
+        // NoCapacity instead of waiting for the current provider's window to roll.
         for p in self.providers.keys() {
-            if !order.contains(p) {
+            if !order.contains(p) && self.accounts.iter().any(|a| a.provider == *p) {
                 order.push(*p);
             }
         }

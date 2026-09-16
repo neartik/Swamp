@@ -72,6 +72,25 @@ pub fn problems(cfg: &Config) -> Vec<Problem> {
         }
     }
 
+    for (key, d) in [
+        ("cooldown.min", cfg.cooldown.min),
+        ("cooldown.max", cfg.cooldown.max),
+        ("cooldown.default", cfg.cooldown.default),
+    ] {
+        if let Some(d) = d
+            && d > crate::config::MAX_COOLDOWN
+        {
+            push(
+                key.into(),
+                format!(
+                    "{}d is past the {}d ceiling; a timer that long parks the account for good",
+                    d.as_secs() / 86_400,
+                    crate::config::MAX_COOLDOWN.as_secs() / 86_400
+                ),
+            );
+        }
+    }
+
     let (warn, stop) = (cfg.cooldown.quota_warn_at, cfg.cooldown.quota_stop_at);
     for (key, v) in [
         ("cooldown.quota_warn_at", warn),

@@ -31,7 +31,11 @@ pub async fn run(ctx: &Ctx, args: &AccountsArgs) -> anyhow::Result<i32> {
                 .with_context(|| format!("cooldown `{duration}` is too far in the future"))?;
             edit(ctx, &path, id, |s| {
                 s.cooldown_until = Some(until);
-                s.health = Health::Cooling;
+                // A hard gate is not a timer: a manual cooldown may add one, never stamp
+                // Cooling over the health a provider refusal set.
+                if !pool::hard_gated(s) {
+                    s.health = Health::Cooling;
+                }
             })?;
             println!("account {id} cooling for {duration}");
             Ok(0)

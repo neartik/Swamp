@@ -234,7 +234,11 @@ impl AccountState {
             }
         }
         let rolled = self.roll_window(WindowKey::of(&merged), now);
-        if let Some(id) = merged.limit_id.clone() {
+        // Only a source that reports buckets has one: Claude's `limit_id` is a rejection
+        // label, so recording it would leave one frozen duplicate per label it ever sent.
+        if source != QuotaSource::Telemetry
+            && let Some(id) = merged.limit_id.clone()
+        {
             self.quota_buckets.insert(id, merged.clone());
         }
         self.quota = Some(merged);

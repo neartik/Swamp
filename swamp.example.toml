@@ -56,7 +56,7 @@ near_exhaustion_penalty = 2.0
 
 [cooldown]
 min = "60s"
-max = "6h"
+max = "6h"                        # every duration here is capped at 365d
 default = "15m"
 breaker_threshold = 3
 quota_warn_at = 0.90

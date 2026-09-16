@@ -597,3 +597,32 @@ async fn config_sources_names_the_user_path_it_resolved() {
         line.detail
     );
 }
+
+/// Doctor is the command a user runs to find out why dispatch is behaving oddly. An
+/// unreadable state file used to read as an empty map, so every account was graded "no quota
+/// source" and the one real fault went unmentioned.
+#[tokio::test]
+async fn an_unreadable_state_file_is_one_error_and_not_a_quota_warning() {
+    let f = Fixture::new();
+    let cfg = healthy(&f);
+    let path = f.paths.accounts_state();
+    std::fs::create_dir_all(path.parent().expect("a parent")).expect("home dir");
+    std::fs::write(&path, "{ not json at all").expect("a corrupt state file");
+
+    let out = checks(&cfg, &f.paths, false, false).await;
+    let state = out
+        .iter()
+        .find(|c| c.name == "accounts/state")
+        .expect("the unreadable file is named");
+    assert_eq!(state.level, Level::Error);
+    assert!(state.detail.contains("accounts.json"), "{}", state.detail);
+    assert!(
+        state.detail.contains("swamp accounts reset"),
+        "the check names the recovery: {}",
+        state.detail
+    );
+    assert!(
+        !out.iter().any(|c| c.name.ends_with("/quota")),
+        "a telemetry problem that does not exist hides the real one"
+    );
+}

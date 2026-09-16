@@ -944,3 +944,68 @@ exec = "codex-main"
         .expect_err("two `main` accounts are refused");
     assert!(err_text(&err).contains("duplicate account id"), "{err}");
 }
+
+/// DESIGN 6.6 / USAGE 4.7: failover only offers providers that can serve. The built-in
+/// `[providers.openai]` defaults exist for §4.8's keys, so an account-less provider must not
+/// enter `provider_order` and turn a wait for the window into `no Openai account available`.
+#[test]
+fn provider_order_skips_a_provider_with_no_account() {
+    let sb = Sandbox::new();
+    sb.repo_config(
+        r#"
+[providers.anthropic]
+models = { high = "opus", mid = "sonnet", low = "haiku" }
+
+[[accounts]]
+id = "main"
+provider = "anthropic"
+exec = "claude-main"
+"#,
+    );
+    let cfg = sb.load(None, None).expect("config loads");
+    assert!(
+        cfg.providers.contains_key(&Provider::Openai),
+        "the defaults still carry the openai block"
+    );
+    assert_eq!(
+        cfg.provider_order(Tier::Mid),
+        vec![Provider::Anthropic],
+        "an openai with no account is no failover target"
+    );
+}
+
+/// A `[cooldown]` duration past the calendar used to panic the dispatcher on the first rate
+/// limit; the config is where a typo that large is caught.
+#[test]
+fn an_absurd_cooldown_duration_is_refused() {
+    let sb = Sandbox::new();
+    let path = sb.write(
+        "huge.toml",
+        r#"
+[cooldown]
+max = "9999999d"
+default = "9999999d"
+
+[providers.anthropic]
+models = { high = "opus", mid = "sonnet", low = "haiku" }
+
+[[accounts]]
+id = "main"
+provider = "anthropic"
+exec = "claude-main"
+"#,
+    );
+    let err = sb.load(Some(&path), None).expect_err("refused");
+    let text = err_text(&err);
+    for key in ["cooldown.max", "cooldown.default"] {
+        assert!(text.contains(key), "missing `{key}` in:\n{text}");
+    }
+    assert!(
+        sb.load(
+            Some(&sb.write("sane.toml", "[cooldown]\nmax = \"6h\"\n")),
+            None
+        )
+        .is_ok(),
+        "a normal cooldown still loads"
+    );
+}

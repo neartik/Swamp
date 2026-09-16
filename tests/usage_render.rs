@@ -1524,3 +1524,114 @@ fn the_collapsed_cell_and_the_continuation_rows_never_repeat_a_window() {
         "the named columns have no minute, so the row survives: {wide}"
     );
 }
+
+/// USAGE 3.1: a manual cooldown adds a timer, it never lifts a provider gate. Stamping
+/// `Cooling` over a depleted account made every surface read `healthy` the moment the timer
+/// elapsed, while `policy::score` and `pool::capacity` went on refusing the account.
+#[test]
+fn cooling_a_depleted_account_keeps_its_gate() {
+    let h = Harness::new();
+    let mut state = swamp::dispatch::persist::StateMap::new();
+    state.insert(
+        AccountId("main".into()),
+        AccountState {
+            health: Health::AuthBroken,
+            quota: Some(RateLimitSnapshot {
+                status: LimitStatus::Allowed,
+                reached: Some(LimitReached::CreditsDepleted),
+                ordinary_usage_allowed: Some(false),
+                ..RateLimitSnapshot::default()
+            }),
+            ..Default::default()
+        },
+    );
+    swamp::dispatch::persist::save_state(&h.paths().accounts_state(), &state)
+        .expect("writing accounts.json by hand");
+
+    h.swamp(&["accounts", "cooldown", "main", "1s"])
+        .assert()
+        .success();
+
+    let stored = swamp::dispatch::persist::load_state(&h.paths().accounts_state()).expect("state");
+    let entry = stored.get(&AccountId("main".into())).expect("the account");
+    assert!(entry.cooldown_until.is_some(), "the timer is still set");
+    assert_eq!(
+        entry.health,
+        Health::AuthBroken,
+        "the manual cooldown stamped over the provider gate"
+    );
+    assert_eq!(
+        swamp::ui::watch::shown_health(
+            entry.health,
+            entry.cooldown_until,
+            OffsetDateTime::now_utc() + time::Duration::minutes(5),
+        ),
+        Health::AuthBroken,
+        "the gate came back as healthy once the timer elapsed"
+    );
+}
+
+/// DESIGN 6.7: a window whose reset has passed measures an allowance that already rolled. The
+/// table, `swamp accounts --json` and dispatch all drop it, so `swamp usage --json` must not
+/// hand a dashboard 96% for a window that ended hours ago.
+#[test]
+fn usage_json_drops_a_window_whose_reset_has_passed() {
+    let h = Harness::new();
+    let now = OffsetDateTime::now_utc();
+    let window = |scope, utilization, resets_at| LimitWindow {
+        scope,
+        utilization,
+        resets_at: Some(resets_at),
+        window_minutes: Some(if scope == LimitScope::FiveHour {
+            300
+        } else {
+            10080
+        }),
+        measured: true,
+    };
+    let snapshot = RateLimitSnapshot {
+        status: LimitStatus::Allowed,
+        windows: vec![
+            window(LimitScope::FiveHour, 0.96, now - time::Duration::hours(3)),
+            window(LimitScope::SevenDay, 0.41, now + time::Duration::days(2)),
+        ],
+        limit_id: Some("codex".to_owned()),
+        ..RateLimitSnapshot::default()
+    };
+    let mut state = swamp::dispatch::persist::StateMap::new();
+    state.insert(
+        AccountId("main".into()),
+        AccountState {
+            quota: Some(snapshot.clone()),
+            quota_buckets: BTreeMap::from([("codex".to_owned(), snapshot)]),
+            quota_observed_at: Some(now),
+            quota_source: Some(QuotaSource::AppServer),
+            ..Default::default()
+        },
+    );
+    swamp::dispatch::persist::save_state(&h.paths().accounts_state(), &state)
+        .expect("writing accounts.json by hand");
+
+    let out = h.swamp(&["usage", "--json"]).assert().success();
+    let text = String::from_utf8_lossy(&out.get_output().stdout).into_owned();
+    let v: serde_json::Value = serde_json::from_str(&text).expect("valid json");
+    let scopes = |windows: &serde_json::Value| -> Vec<String> {
+        windows
+            .as_array()
+            .expect("an array")
+            .iter()
+            .map(|w| w["scope"].as_str().unwrap_or_default().to_owned())
+            .collect()
+    };
+    let account = &v["accounts"][0];
+    assert_eq!(
+        scopes(&account["quota"]["windows"]),
+        vec!["seven_day".to_owned()],
+        "a rolled window is still quoted as current: {text}"
+    );
+    assert_eq!(
+        scopes(&account["quota_buckets"]["codex"]["windows"]),
+        vec!["seven_day".to_owned()],
+        "the displayed buckets carry the same stale window: {text}"
+    );
+}

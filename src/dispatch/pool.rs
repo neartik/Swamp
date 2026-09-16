@@ -1,5 +1,5 @@
-use crate::config::Config;
 use crate::config::resolve::expand_env;
+use crate::config::{Config, MAX_COOLDOWN};
 use crate::dispatch::account::{Account, AccountState, Health, QuotaSource, UsageLedger};
 use crate::dispatch::cooldown::cooldown_for;
 use crate::dispatch::persist::{self, StateMap};
@@ -446,7 +446,7 @@ impl AccountPool {
                         }
                         let consecutive = entry.consecutive_infra_failures;
                         if let Some(d) = cooldown_for(f, consecutive, &self.cfg.cooldown, now) {
-                            entry.cooldown_until = Some(now + d);
+                            entry.cooldown_until = Some(cool_until(now, d));
                             // A hard gate is not a timer: cooling must not overwrite the
                             // health the provider's own refusal set.
                             if !hard_gated(entry) {
@@ -626,7 +626,7 @@ impl AccountPool {
         let health = {
             let mut state = self.state.lock();
             let entry = state.entry(id.clone()).or_default();
-            entry.cooldown_until = Some(OffsetDateTime::now_utc() + d);
+            entry.cooldown_until = Some(cool_until(OffsetDateTime::now_utc(), d));
             entry.health = Health::Cooling;
             entry.health
         };
@@ -1151,6 +1151,13 @@ pub fn health_from_quota(s: &AccountState, warn_at: f64) -> Health {
     } else {
         Health::Healthy
     }
+}
+
+/// `OffsetDateTime + Duration` panics past the calendar, and a duration reaching it can come
+/// from a `CooldownCfg` built outside `config::validate`.
+fn cool_until(now: OffsetDateTime, d: Duration) -> OffsetDateTime {
+    let d = time::Duration::try_from(d.min(MAX_COOLDOWN)).unwrap_or(time::Duration::ZERO);
+    now.checked_add(d).unwrap_or(now)
 }
 
 /// The provider's own refusals, which no timer lifts.
