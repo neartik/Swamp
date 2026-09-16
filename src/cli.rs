@@ -336,7 +336,7 @@ pub struct ConfigArgs {
 #[derive(Debug, Subcommand)]
 pub enum ConfigCmd {
     Show {
-        /// Print the merged result with the origin of every key
+        /// Print the merged result and which layers it was built from
         #[arg(long)]
         effective: bool,
     },

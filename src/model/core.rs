@@ -434,6 +434,11 @@ impl RateLimitSnapshot {
         self.named()
             .max_by(|a, b| a.utilization.total_cmp(&b.utilization))
     }
+    /// `tightest`, ignoring windows that have already rolled.
+    pub fn tightest_at(&self, now: OffsetDateTime) -> Option<&LimitWindow> {
+        self.current(now)
+            .max_by(|a, b| a.utilization.total_cmp(&b.utilization))
+    }
     pub fn soonest_reset(&self) -> Option<OffsetDateTime> {
         self.named()
             .filter_map(|w| w.resets_at)

@@ -715,3 +715,81 @@ fn the_example_readonly_args_do_not_overwrite_the_denied_tool_list() {
         );
     }
 }
+
+/// The example config is the spelling reference: every `isolation` value it offers has to be
+/// one the parser accepts. `readonly` is the CLI flag, `read-only` is the TOML value.
+#[test]
+fn every_isolation_spelling_the_example_offers_parses() {
+    let text = std::fs::read_to_string(example_config()).expect("example config");
+    let comment = text
+        .lines()
+        .find(|l| l.trim_start().starts_with("isolation"))
+        .and_then(|l| l.split_once('#'))
+        .map(|(_, c)| c.to_owned())
+        .expect("the isolation line documents its values");
+    let offered: Vec<&str> = comment
+        .split('(')
+        .next()
+        .unwrap_or_default()
+        .split('|')
+        .map(str::trim)
+        .filter(|w| !w.is_empty())
+        .collect();
+    assert_eq!(offered.len(), 3, "{comment}");
+    for word in offered {
+        let parsed: Result<IsolationMode, _> = toml::from_str(&format!("v = \"{word}\""))
+            .map(|t: toml::Table| t["v"].clone())
+            .and_then(|v| v.try_into());
+        assert!(parsed.is_ok(), "the config parser rejects `{word}`");
+    }
+}
+
+/// `tiers.<t>.provider_order` is the tier's full selection order, not a failover-only list:
+/// its head is the provider the first attempt launches on.
+#[test]
+fn a_tier_provider_order_head_overrides_the_default_provider() {
+    let sb = Sandbox::new();
+    sb.repo_config(
+        r#"
+[dispatch]
+default_provider = "anthropic"
+cross_provider_failover = false
+[providers.anthropic]
+models = { mid = "claude-sonnet-4-20250514", high = "claude-opus-4-20250514" }
+[providers.openai]
+models = { mid = "gpt-5-codex", high = "gpt-5-codex" }
+[tiers.high]
+provider_order = ["openai", "anthropic"]
+"#,
+    );
+    let cfg = sb.load(None, None).expect("config loads");
+    assert_eq!(
+        cfg.provider_order(Tier::High),
+        vec![Provider::Openai, Provider::Anthropic],
+        "the head of provider_order is where the first attempt goes"
+    );
+}
+
+/// DESIGN risk 11 listed a global semaphore as the recursion backstop. There is none: the
+/// loader refuses the key that used to mean one, so the doc must not promise it either.
+#[test]
+fn nothing_promises_a_global_parallelism_cap() {
+    let design = std::fs::read_to_string(
+        Utf8PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("docs/DESIGN.md"),
+    )
+    .expect("DESIGN.md");
+    assert!(
+        !design.contains("global semaphore"),
+        "DESIGN.md still promises a machine-wide process cap"
+    );
+    let sb = Sandbox::new();
+    let path = sb.write("capped.toml", "[limits]\nmax_parallel = 4\n");
+    let err = sb
+        .load(Some(&path), None)
+        .expect_err("max_parallel is gone");
+    assert!(
+        err_text(&err).contains("no global parallelism cap"),
+        "{}",
+        err_text(&err)
+    );
+}

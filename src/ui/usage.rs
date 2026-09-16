@@ -163,7 +163,7 @@ pub fn render(
         out.push(Line::from(theme.span(head, Role::Name)));
         out.push(header_line(&layout, theme));
         for r in group {
-            out.extend(account_lines(r, &layout, theme, now));
+            out.extend(account_lines(r, &layout, theme, now, width));
         }
     }
     if !rows.is_empty() {
@@ -210,16 +210,12 @@ fn account_lines(
     l: &Layout,
     theme: &Theme,
     now: OffsetDateTime,
+    width: u16,
 ) -> Vec<Line<'static>> {
     let shown = shown_health(r, now);
-    let parked = parked_reason(r).is_some();
-    let role = if parked {
-        Role::Err
-    } else {
-        health_role(shown)
-    };
-    let word = if parked { "parked" } else { health_cell(shown) };
-    let glyph = if parked { "x" } else { health_glyph(shown) };
+    let role = health_role(shown);
+    let word = health_cell(shown);
+    let glyph = health_glyph(shown);
     let mut cells = Vec::new();
     if l.show_health {
         cells.push(left(&r.account.0, ACCOUNT_W));
@@ -229,12 +225,12 @@ fn account_lines(
         cells.push(left(&name, ACCOUNT_W + 2));
     }
     if l.collapse_resets {
-        let w = r.quota.as_ref().and_then(RateLimitSnapshot::tightest);
+        let w = r.quota.as_ref().and_then(|q| q.tightest_at(now));
         cells.push(right(&pct_cell(w), PCT_W));
         cells.push(right(&reset_cell(w, now), RESET_W));
     } else {
-        let w5 = window_for(&r.quota, LimitScope::FiveHour);
-        let w7 = window_for(&r.quota, LimitScope::SevenDay);
+        let w5 = window_for(&r.quota, LimitScope::FiveHour, now);
+        let w7 = window_for(&r.quota, LimitScope::SevenDay, now);
         cells.push(right(&pct_cell(w5), PCT_W));
         cells.push(right(&reset_cell(w5, now), RESET_W));
         cells.push(right(&pct_cell(w7), PCT_W));
@@ -260,20 +256,21 @@ fn account_lines(
         theme.span(format!("  {}", cells.join(" ")), role),
     )];
     let indent = " ".repeat(2 + ACCOUNT_W + 1);
+    let mut push = |text: String| {
+        out.push(Line::from(theme.span(
+            fmt::truncate(&format!("{indent}{text}"), width as usize),
+            Role::Meta,
+        )));
+    };
     if let Some(cont) = status_continuation(r, now) {
-        out.push(Line::from(
-            theme.span(format!("{indent}{cont}"), Role::Meta),
-        ));
+        push(cont);
     }
-    for w in extra_windows(&r.quota) {
-        let line = format!(
+    for w in extra_windows(&r.quota, now) {
+        push(format!(
             "{} {} \u{b7} resets {}",
             window_label(w),
             pct_cell(Some(w)),
             reset_cell(Some(w), now)
-        );
-        out.push(Line::from(
-            theme.span(format!("{indent}{line}"), Role::Meta),
         ));
     }
     out
@@ -302,13 +299,18 @@ fn parked_reason(r: &AccountRow) -> Option<&'static str> {
 }
 
 fn status_continuation(r: &AccountRow, now: OffsetDateTime) -> Option<String> {
+    let refused = parked_reason(r)
+        .map(|w| format!("{w} \u{b7} "))
+        .unwrap_or_default();
     match shown_health(r, now) {
         Health::AuthBroken if r.exec.is_empty() => {
-            return Some("auth broken \u{b7} drop with swamp accounts reset <id>".to_owned());
+            return Some(format!(
+                "auth broken \u{b7} {refused}drop with swamp accounts reset <id>"
+            ));
         }
         Health::AuthBroken => {
             return Some(format!(
-                "auth broken \u{b7} re-auth {}",
+                "auth broken \u{b7} {refused}re-auth {}",
                 fmt::sanitize(&r.exec)
             ));
         }
@@ -322,7 +324,7 @@ fn status_continuation(r: &AccountRow, now: OffsetDateTime) -> Option<String> {
         }
         _ => {}
     }
-    parked_reason(r).map(|w| format!("parked \u{b7} {w} \u{b7} no timer clears this"))
+    parked_reason(r).map(|w| format!("{w} \u{b7} no timer clears this"))
 }
 
 fn reached_word(r: LimitReached) -> &'static str {
@@ -335,11 +337,12 @@ fn reached_word(r: LimitReached) -> &'static str {
 
 /// Rows the two named columns have no room for: `Minute`, or an `Unknown` window that still
 /// carries `window_minutes`.
-fn extra_windows(q: &Option<RateLimitSnapshot>) -> Vec<&LimitWindow> {
+fn extra_windows(q: &Option<RateLimitSnapshot>, now: OffsetDateTime) -> Vec<&LimitWindow> {
     q.as_ref()
         .map(|q| {
             q.windows
                 .iter()
+                .filter(|w| w.is_current(now))
                 .filter(|w| {
                     w.scope == LimitScope::Minute
                         || (w.scope == LimitScope::Unknown && w.window_minutes.is_some())
@@ -356,8 +359,17 @@ fn window_label(w: &LimitWindow) -> String {
     }
 }
 
-fn window_for(q: &Option<RateLimitSnapshot>, scope: LimitScope) -> Option<&LimitWindow> {
-    q.as_ref()?.windows.iter().find(|w| w.scope == scope)
+/// A window whose reset has passed measures an allowance that has already rolled: dispatch
+/// ignores it, so the table must not report its percentage either.
+fn window_for(
+    q: &Option<RateLimitSnapshot>,
+    scope: LimitScope,
+    now: OffsetDateTime,
+) -> Option<&LimitWindow> {
+    q.as_ref()?
+        .windows
+        .iter()
+        .find(|w| w.scope == scope && w.is_current(now))
 }
 
 /// A `~` prefix marks an estimated number; a measured one never carries it.

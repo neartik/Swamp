@@ -65,6 +65,11 @@ pub struct WindowKey {
     /// as one window even when their derived reset instants differ.
     #[serde(default)]
     pub window_minutes: Option<u32>,
+    /// True for the wall-time grid key Swamp invents for an account no snapshot reaches. It
+    /// stands in for a window nobody has measured yet, so a real reading replaces it instead
+    /// of rolling it.
+    #[serde(default)]
+    pub estimated: bool,
 }
 
 impl WindowKey {
@@ -81,6 +86,7 @@ impl WindowKey {
             scope: w.scope,
             resets_at: w.resets_at.or(snap.resets_at)?,
             window_minutes: w.window_minutes,
+            estimated: !w.measured,
         })
     }
 
@@ -146,6 +152,16 @@ impl AccountState {
         {
             return false;
         }
+        // A synthetic key only stands in for a window nobody had measured yet: the first
+        // real reading adopts it, instead of zeroing the tokens just counted against it.
+        if self
+            .window_key
+            .as_ref()
+            .is_some_and(|k| k.estimated && !key.estimated)
+        {
+            self.window_key = Some(key);
+            return false;
+        }
         self.window_tokens = Usage::default();
         self.window_started_at = Some(now);
         self.window_key = Some(key);
@@ -203,6 +219,7 @@ impl AccountState {
                 scope: crate::worker::codex_quota::scope_of(Some(minutes)),
                 resets_at,
                 window_minutes: Some(minutes),
+                estimated: true,
             }),
             now,
         )

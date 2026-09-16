@@ -64,7 +64,7 @@ quota_stop_at = 0.98
 
 # ---------------------------------------------------------------- workspace
 [workspace]
-isolation     = "worktree"        # worktree | shared | readonly
+isolation     = "worktree"        # worktree | shared | read-only (CLI flag: --isolation readonly)
 root          = "~/.swamp/worktrees"   # outside the repo on purpose
 base          = "HEAD"
 branch_prefix = "swamp"           # -> swamp/<run_short>/<node_short>-<attempt>
@@ -170,8 +170,8 @@ max_concurrency = 2
 limit_id = "codex"                # optional: which quota bucket this account routes against
 
 # ---------------------------------------------------------------- tiers
-# Cross-provider order, consulted ONLY when every account of the current provider is cooling
-# and dispatch.cross_provider_failover = true.
+# The tier's full selection order: the first entry overrides dispatch.default_provider for this
+# tier, and the rest are consulted only when dispatch.cross_provider_failover = true.
 [tiers.high]
 provider_order = ["anthropic", "openai"]
 timeout = "45m"

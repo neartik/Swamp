@@ -556,3 +556,38 @@ fn a_dirty_tree_is_refused_before_any_run_exists() {
         .success();
     assert_eq!(h.runs().len(), 1);
 }
+
+/// `--help` promised the origin of every key; `--effective` prints the merged TOML under the
+/// layers it was built from. The two have to describe the same command.
+#[test]
+fn config_show_effective_prints_what_its_help_promises() {
+    let h = Harness::new();
+    h.install();
+    let help = String::from_utf8(
+        h.swamp(&["config", "show", "--help"])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone(),
+    )
+    .expect("utf8");
+    assert!(
+        !help.contains("origin of every key"),
+        "nothing annotates a key with its layer: {help}"
+    );
+    assert!(help.contains("which layers it was built from"), "{help}");
+
+    let text = String::from_utf8(
+        h.swamp(&["config", "show", "--effective"])
+            .current_dir(&h.repo)
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone(),
+    )
+    .expect("utf8");
+    assert!(text.contains("lowest priority first"), "{text}");
+    assert!(text.contains("[dispatch]"), "{text}");
+}

@@ -302,12 +302,22 @@ fn probe_quota(
         let model = crate::worker::codex_quota::quota_model(cfg, &account.id);
         let env = crate::config::resolve::expand_env(&account.env);
         let pool = Arc::clone(disp.pool());
+        let max_age = cfg.quota_max_age();
         tokio::spawn(async move {
+            // The same single flight a terminating node takes: one subprocess per account,
+            // and a reading that landed while we waited answers for us too.
+            let Some(claim) = crate::dispatch::retry::claim_probe(&id, max_age).await else {
+                return;
+            };
+            if !stale(&pool, &id, max_age) {
+                return;
+            }
             let read = tokio::time::timeout(
                 crate::worker::codex_quota::PROBE_TIMEOUT,
                 crate::worker::codex_quota::read_rate_limits(&exec, &env),
             )
             .await;
+            claim.stamp();
             if let Ok(Ok(read)) = read
                 && let Some(snap) = read.select(limit_id.as_deref(), model.as_deref())
             {
@@ -320,6 +330,21 @@ fn probe_quota(
             }
         });
     }
+}
+
+/// Whether the cached snapshot for `id` is older than `max_age`, read after the probe gate
+/// was taken: another caller's reading may have landed while we waited for it.
+fn stale(
+    pool: &Arc<crate::dispatch::AccountPool>,
+    id: &crate::model::core::AccountId,
+    max_age: std::time::Duration,
+) -> bool {
+    let now = time::OffsetDateTime::now_utc();
+    pool.snapshot()
+        .into_iter()
+        .find(|(_, a, _)| a == id)
+        .and_then(|(_, _, s)| s.quota_observed_at)
+        .is_none_or(|at| (now - at) > max_age)
 }
 
 fn size() -> (u16, u16) {
@@ -354,10 +379,11 @@ fn workers_line(
             out.push_str(&format!(", {n} {word}"));
         }
     }
+    let now = time::OffsetDateTime::now_utc();
     let tightest = snapshot
         .iter()
         .filter_map(|(_, _, s)| s.quota.as_ref())
-        .map(|q| q.worst_utilization())
+        .map(|q| q.worst_utilization_at(now))
         .fold(0.0_f64, f64::max);
     out.push_str(&format!(
         " \u{b7} {:.0}% of the tightest window used",

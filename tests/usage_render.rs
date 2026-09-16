@@ -648,23 +648,32 @@ fn an_expired_cooldown_is_not_rendered_as_cooling() {
     assert!(narrow.contains("+ claude-main"), "{narrow}");
 }
 
-/// §3.1: a parked account gets a continuation row. `health_from_quota` reads utilization
-/// alone, so a provider-refused account rendered `healthy` with 68% headroom while every
-/// node dispatched to it was hard-blocked.
+/// §3.1: a provider-refused account says so on its continuation row, under the same health
+/// word every other surface prints. USAGE 2.2 makes that word `AuthBroken`, so the table has
+/// no word of its own to invent.
 #[test]
 fn a_provider_parked_account_says_so() {
     let mut r = with_seven_day(
-        row("codex-main", Provider::Openai, Health::Healthy),
+        row("codex-main", Provider::Openai, Health::AuthBroken),
         0.32,
         true,
     );
     let q = r.quota.as_mut().expect("quota");
     q.reached = Some(LimitReached::CreditsDepleted);
     q.ordinary_usage_allowed = Some(false);
-    let body = screen(&usage::render(&[r], 100, &Theme::plain(), MAX_AGE), 100);
-    assert!(body.contains("parked"), "{body}");
+    let body = screen(
+        &usage::render(std::slice::from_ref(&r), 100, &Theme::plain(), MAX_AGE),
+        100,
+    );
+    assert!(body.contains("no-auth"), "{body}");
     assert!(body.contains("credits_depleted"), "{body}");
+    assert!(!body.contains("parked"), "{body}");
     assert!(!body.contains("healthy"), "{body}");
+
+    // A state file written before 2.2 can still carry the refusal without the word.
+    r.health = Health::Healthy;
+    let stale = screen(&usage::render(&[r], 100, &Theme::plain(), MAX_AGE), 100);
+    assert!(stale.contains("credits_depleted"), "{stale}");
 }
 
 /// The estimated variant of a sub-hour reset was one column too wide for RESETS and came out
@@ -841,4 +850,117 @@ provider = "openai"
 exec = "codex-main"
 "#,
     )
+}
+
+/// §3.1: dispatch scores only the windows that still describe the present, so the table and
+/// the gauges must not keep reporting an allowance that has already rolled.
+#[test]
+fn a_rolled_window_is_not_reported_as_utilization() {
+    let now = OffsetDateTime::now_utc();
+    let mut r = row("claude-main", Provider::Anthropic, Health::Healthy);
+    r.quota = Some(RateLimitSnapshot {
+        status: LimitStatus::Allowed,
+        windows: vec![LimitWindow {
+            scope: LimitScope::FiveHour,
+            utilization: 0.96,
+            resets_at: Some(now - time::Duration::hours(3)),
+            window_minutes: Some(300),
+            measured: true,
+        }],
+        ..RateLimitSnapshot::default()
+    });
+    for width in [100u16, 70] {
+        let body = screen(
+            &usage::render(std::slice::from_ref(&r), width, &Theme::plain(), MAX_AGE),
+            width,
+        );
+        assert!(!body.contains("96%"), "{width}: {body}");
+        assert!(!body.contains("in 0s"), "{width}: {body}");
+    }
+}
+
+/// §3: the two surfaces render the same bytes, so every row has to respect the table width.
+/// A continuation row is a row: unbounded, the CLI wraps it and chat cuts it dead.
+#[test]
+fn continuation_rows_stay_inside_the_table_width() {
+    let mut r = with_seven_day(
+        row("claude-main", Provider::Anthropic, Health::AuthBroken),
+        0.10,
+        true,
+    );
+    r.exec = "/opt/tooling/pnpm/global/5/node_modules/.bin/claude-main-wrapper".to_owned();
+    let width = 100u16;
+    let lines = usage::render(std::slice::from_ref(&r), width, &Theme::plain(), MAX_AGE);
+    for line in swamp::ui::chat::blocks::text_of(&lines) {
+        assert!(
+            line.chars().count() <= width as usize,
+            "{} columns: {line}",
+            line.chars().count()
+        );
+    }
+    let body = screen(&lines, width);
+    assert!(body.contains("auth broken"), "{body}");
+}
+
+/// UI 3.7: `/usage --json` is output a caller copies out and parses. Clipping it to the
+/// viewport cut it mid-token and the committed block stopped being JSON.
+#[test]
+fn usage_json_in_chat_is_never_clipped_to_the_viewport() {
+    let cfg = long_exec_config();
+    let width = 60u16;
+    let mut app = chat_app(&cfg, width);
+    app.pool = vec![(
+        Provider::Anthropic,
+        AccountId("main".into()),
+        AccountState::default(),
+    )];
+    for c in "/usage --json".chars() {
+        app.reduce(key(crossterm::event::KeyCode::Char(c)));
+    }
+    let mut body: Vec<String> = Vec::new();
+    for effect in app
+        .reduce(key(crossterm::event::KeyCode::Enter))
+        .into_iter()
+        .skip(1)
+    {
+        if let swamp::ui::chat::app::Effect::Commit(lines) = effect {
+            body.extend(swamp::ui::chat::blocks::text_of(&lines));
+        }
+    }
+    let text = body.join("\n");
+    assert!(text.contains("```json"), "{text}");
+    let json = text
+        .trim()
+        .trim_start_matches("```json")
+        .trim_end_matches("```");
+    let v: serde_json::Value = serde_json::from_str(json).expect("the committed block parses");
+    assert_eq!(
+        v["accounts"][0]["exec"].as_str(),
+        Some("/opt/tooling/pnpm/global/5/node_modules/.bin/claude-main")
+    );
+}
+
+fn long_exec_config() -> swamp::config::Config {
+    let schema: swamp::config::Schema = toml::from_str(
+        r#"
+version = 1
+[providers.anthropic]
+models = { high = "claude-opus-4-20250514", mid = "claude-sonnet-4-20250514", low = "claude-haiku-4-20250514" }
+[[accounts]]
+id = "main"
+provider = "anthropic"
+exec = "/opt/tooling/pnpm/global/5/node_modules/.bin/claude-main"
+"#,
+    )
+    .expect("fixture config parses");
+    let layers = vec![
+        swamp::config::load::default_layer(),
+        swamp::config::load::Layer {
+            origin: "test".into(),
+            schema,
+        },
+    ];
+    let mut cfg = swamp::config::resolve::from_schema(swamp::config::load::merge(layers));
+    swamp::config::validate::validate(&mut cfg).expect("fixture config is valid");
+    cfg
 }

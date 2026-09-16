@@ -356,6 +356,20 @@ provider = "anthropic"
 exec = "claude-main"
 "#;
 
+/// The default `reserve_brain_slot`: the brain holds one account back from the workers.
+const TWO_RESERVING: &str = r#"
+[providers.anthropic]
+models = { mid = "tier-mid" }
+[[accounts]]
+id = "alt"
+provider = "anthropic"
+exec = "claude-alt"
+[[accounts]]
+id = "main"
+provider = "anthropic"
+exec = "claude-main"
+"#;
+
 const ONE_CAPPED: &str = r#"
 [brain]
 reserve_brain_slot = false
@@ -921,5 +935,193 @@ async fn the_app_server_probe_is_single_flight_per_account() {
     assert!(
         last.is_some_and(|t: Instant| t.elapsed() < Duration::from_secs(5)),
         "the late arrival can see how fresh the last probe was"
+    );
+}
+
+/// USAGE 2.2/3.2: a hard reason is `Health::AuthBroken`, so `swamp accounts`, the welcome box
+/// and `/usage` cannot call an account healthy that dispatch refuses.
+#[tokio::test]
+async fn a_hard_gated_account_is_auth_broken_for_every_surface() {
+    let now = OffsetDateTime::now_utc();
+    let depleted = RateLimitSnapshot {
+        windows: vec![LimitWindow {
+            scope: LimitScope::SevenDay,
+            utilization: 0.10,
+            resets_at: Some(now + Duration::from_secs(600)),
+            measured: true,
+            ..Default::default()
+        }],
+        reached: Some(LimitReached::CreditsDepleted),
+        ordinary_usage_allowed: Some(false),
+        ..Default::default()
+    };
+    let h = harness(TWO_UNCAPPED).await;
+    h.pool.observe_quota(&id("main"), depleted);
+    let health = |who: &str| {
+        h.pool
+            .snapshot()
+            .into_iter()
+            .find(|(_, a, _)| a == &id(who))
+            .map(|(_, _, s)| s.health)
+            .expect("account state")
+    };
+    assert_eq!(health("main"), Health::AuthBroken);
+    assert_eq!(health("alt"), Health::Healthy);
+
+    // The same gate, learned while the account was cooling: the timer is not the story.
+    h.pool
+        .cooldown(&id("alt"), Duration::from_secs(3600), "test");
+    h.pool.observe_quota(
+        &id("alt"),
+        RateLimitSnapshot {
+            reached: Some(LimitReached::SpendControl),
+            ..Default::default()
+        },
+    );
+    assert_eq!(health("alt"), Health::AuthBroken);
+}
+
+/// USAGE 4.7: a hard-gated account contributes no `retry_at`, even when the same terminal
+/// node also cooled it. The two conditions co-occur on every provider 429 that says
+/// `usage_limit_reached`, so the order of the gates is what decides the notice.
+#[tokio::test]
+async fn a_depleted_account_that_is_also_cooling_carries_no_retry_time() {
+    let h = harness(TWO_UNCAPPED).await;
+    let now = OffsetDateTime::now_utc();
+    for who in ["main", "alt"] {
+        h.pool.report(
+            &id(who),
+            Some(&Failure::RateLimited {
+                resets_at: Some(now + Duration::from_secs(3600)),
+                scope: LimitScope::FiveHour,
+                detected_by: Detector::Telemetry,
+                evidence: "usage limit reached".into(),
+            }),
+            None,
+        );
+        h.pool.observe_quota(
+            &id(who),
+            RateLimitSnapshot {
+                windows: vec![LimitWindow {
+                    scope: LimitScope::FiveHour,
+                    utilization: 0.20,
+                    resets_at: Some(now + Duration::from_secs(3600)),
+                    measured: true,
+                    ..Default::default()
+                }],
+                reached: Some(LimitReached::CreditsDepleted),
+                ..Default::default()
+            },
+        );
+    }
+    let Some(NoCapacity::Exhausted { reason }) =
+        h.pool.all_exhausted(Provider::Anthropic, &HashSet::new())
+    else {
+        panic!("a credits-depleted account needs a human, not a timer");
+    };
+    assert!(reason.contains("has no credits left"), "{reason}");
+}
+
+/// The cooldown and the health word are two independent gates: `swamp accounts enable`
+/// rewrites one and leaves the other, and dispatch must still honour the live timer.
+#[test]
+fn a_live_cooldown_gates_whatever_the_health_word_says() {
+    let now = OffsetDateTime::now_utc();
+    let a = account("main", None);
+    let s = AccountState {
+        health: Health::Healthy,
+        cooldown_until: Some(now + Duration::from_secs(4 * 3600)),
+        ..idle_state(0, 0, now)
+    };
+    assert_eq!(
+        score(
+            SelectionPolicy::QuotaAware,
+            &a,
+            &s,
+            0,
+            &Scoring::default(),
+            now
+        ),
+        None,
+        "a cooling account is out of rotation whatever its health field says"
+    );
+}
+
+/// DESIGN 139: the reservation is re-read on every selection. A peer that degrades after the
+/// brain acquired must not strand every worker on an account the pool is holding back.
+#[tokio::test]
+async fn a_reservation_is_dropped_when_it_would_leave_the_workers_with_none() {
+    let h = harness(TWO_RESERVING).await;
+    let reserved = h
+        .pool
+        .reserve_for_brain(Provider::Anthropic)
+        .expect("two accounts reserve one");
+    let peer = if reserved == id("main") {
+        "alt"
+    } else {
+        "main"
+    };
+    let lease = acquire(&h.pool, 200)
+        .await
+        .expect("the peer takes the node");
+    assert_eq!(lease.account, id(peer));
+    drop(lease);
+
+    h.pool
+        .cooldown(&id(peer), Duration::from_secs(5 * 3600), "rate limited");
+    let lease = acquire(&h.pool, 200)
+        .await
+        .expect("holding back the only usable account helps nobody");
+    assert_eq!(lease.account, reserved);
+}
+
+/// A finished or failed brain holds nothing back: the reservation ends with its lease.
+#[tokio::test]
+async fn the_brain_reservation_ends_with_the_brain_lease() {
+    let h = harness(TWO_RESERVING).await;
+    let brain = h
+        .pool
+        .acquire_brain(
+            Provider::Anthropic,
+            None,
+            Instant::now() + Duration::from_millis(200),
+        )
+        .await
+        .expect("the brain acquires");
+    let held = brain.account.clone();
+    drop(brain);
+
+    // The account the brain used is now the worst candidate; a stale reservation would
+    // still name it.
+    h.pool
+        .observe_usage(&held, NodeId::new(), tokens(5_000_000));
+    let again = h
+        .pool
+        .reserve_for_brain(Provider::Anthropic)
+        .expect("a new brain reserves again");
+    assert_ne!(again, held, "the reservation did not survive its lease");
+}
+
+/// USAGE 2.3: the chat `/usage` probe takes the same per-account single flight a terminating
+/// node takes, so one question never spawns two app-server subprocesses.
+#[tokio::test]
+async fn the_chat_probe_waits_on_the_account_probe_gate() {
+    let account = AccountId("codex-usage".into());
+    let max_age = Duration::from_secs(60);
+    let claim = swamp::dispatch::retry::claim_probe(&account, max_age)
+        .await
+        .expect("the first caller probes");
+    assert!(
+        swamp::dispatch::retry::probe_gate(&account)
+            .try_lock()
+            .is_err(),
+        "a second caller waits for the answer instead of probing too"
+    );
+    claim.stamp();
+    assert!(
+        swamp::dispatch::retry::claim_probe(&account, max_age)
+            .await
+            .is_none(),
+        "a fresh reading answers for everyone"
     );
 }

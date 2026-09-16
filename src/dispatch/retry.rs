@@ -553,6 +553,26 @@ async fn observe_codex_quota(cx: &NodeCtx, lease: &Lease, model: &str, thread: O
 /// When an account was last probed, held under the lock that serialises its probes.
 pub type ProbeGate = Arc<tokio::sync::Mutex<Option<Instant>>>;
 
+/// The right to run one `account/rateLimits/read` for an account. Holding it is what keeps
+/// a second probe from starting; `stamp` records the reading the next caller may reuse.
+pub struct ProbeClaim(tokio::sync::OwnedMutexGuard<Option<Instant>>);
+
+impl ProbeClaim {
+    pub fn stamp(mut self) {
+        *self.0 = Some(Instant::now());
+    }
+}
+
+/// Waits for whatever probe is already in flight for `id`, then answers whether this caller
+/// still has to probe: a reading younger than `max_age` answers for everyone.
+pub async fn claim_probe(id: &AccountId, max_age: std::time::Duration) -> Option<ProbeClaim> {
+    let last = probe_gate(id).lock_owned().await;
+    if last.is_some_and(|t: Instant| t.elapsed() < max_age) {
+        return None;
+    }
+    Some(ProbeClaim(last))
+}
+
 /// The per-account app-server single flight.
 pub fn probe_gate(id: &AccountId) -> ProbeGate {
     static GATES: std::sync::OnceLock<Mutex<std::collections::HashMap<AccountId, ProbeGate>>> =

@@ -119,6 +119,7 @@ fn account_usage_folds_into_the_run_view() {
         scope: LimitScope::SevenDay,
         resets_at: at + time::Duration::days(7),
         window_minutes: Some(10_080),
+        estimated: false,
     };
     let mut view = RunView::default();
     view.apply(&JournalLine {
@@ -166,11 +167,13 @@ fn a_merge_keeps_the_larger_lifetime_and_never_resurrects_a_rolled_window() {
         scope: LimitScope::SevenDay,
         resets_at: now,
         window_minutes: Some(10_080),
+        estimated: false,
     };
     let new_key = WindowKey {
         scope: LimitScope::SevenDay,
         resets_at: now + time::Duration::days(7),
         window_minutes: Some(10_080),
+        estimated: false,
     };
 
     let mut theirs = StateMap::new();
@@ -458,4 +461,101 @@ fn a_concurrent_run_cannot_erase_another_processes_cost() {
     );
     let merged = merge_state(&path, &ours).expect("our write");
     assert_eq!(merged[&account].lifetime_cost_usd, 12.40);
+}
+
+/// WP-B acceptance 7 again, from the other side: a newer entry in the file wins the
+/// last-writer-wins fields, but never carries away the counters this process kept.
+#[test]
+fn a_newer_entry_in_the_file_still_reconciles_our_counters() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = Utf8PathBuf::from_path_buf(dir.path().join("accounts.json")).expect("utf8");
+    let account = AccountId("codex-main".into());
+    let now = OffsetDateTime::now_utc();
+    let key = WindowKey {
+        scope: LimitScope::SevenDay,
+        resets_at: now + time::Duration::days(3),
+        window_minutes: Some(10_080),
+        estimated: false,
+    };
+
+    let mut theirs = StateMap::new();
+    theirs.insert(
+        account.clone(),
+        AccountState {
+            lifetime_nodes: 1,
+            lifetime_tokens: tokens(1_950_000),
+            window_tokens: tokens(40),
+            window_key: Some(key.clone()),
+            cooldown_until: Some(now + std::time::Duration::from_secs(600)),
+            // Written while we were blocked on the lock.
+            updated_at: Some(now + std::time::Duration::from_secs(1)),
+            ..Default::default()
+        },
+    );
+    merge_state(&path, &theirs).expect("their write");
+
+    let mut mine = StateMap::new();
+    mine.insert(
+        account.clone(),
+        AccountState {
+            lifetime_nodes: 9,
+            lifetime_tokens: tokens(2_000_000),
+            window_tokens: tokens(60),
+            window_key: Some(key),
+            updated_at: Some(now),
+            ..Default::default()
+        },
+    );
+    let merged = merge_state(&path, &mine).expect("my write");
+    let got = &merged[&account];
+    assert_eq!(
+        got.lifetime_tokens.input_tokens, 2_000_000,
+        "per field, the larger"
+    );
+    assert_eq!(got.lifetime_nodes, 9);
+    assert_eq!(got.window_tokens.billable(), 60);
+    assert_eq!(
+        got.cooldown_until,
+        Some(now + std::time::Duration::from_secs(600)),
+        "the newer entry still wins what only it can know"
+    );
+}
+
+/// USAGE 2.1: the wall-time grid key is a stand-in for a window nobody has measured. The
+/// first real reading adopts it, instead of zeroing the tokens the node just spent.
+#[test]
+fn the_first_measured_reading_adopts_the_estimated_window() {
+    let now = OffsetDateTime::now_utc();
+    let mut state = AccountState::default();
+    assert!(
+        state.roll_elapsed_window(std::time::Duration::from_secs(5 * 3600), now),
+        "an account with no key starts one"
+    );
+    state.credit_tokens(&tokens(50_000));
+
+    let rolled = state.apply_quota(
+        snapshot(now + time::Duration::days(7)),
+        QuotaSource::Rollout,
+        now,
+    );
+    assert!(!rolled, "adopting a measured window is not a roll");
+    assert_eq!(
+        state.window_tokens.billable(),
+        50_000,
+        "the tokens this window already counted survive"
+    );
+    assert_eq!(
+        state.window_key.as_ref().map(|k| k.estimated),
+        Some(false),
+        "and the key is the measured one from here on"
+    );
+
+    // A measured window really rolling still zeroes the counter.
+    let rolled = state.apply_quota(
+        snapshot(now + time::Duration::days(14)),
+        QuotaSource::Rollout,
+        now,
+    );
+    assert!(rolled, "a measured window moving on is a roll");
+    assert_eq!(state.window_tokens.billable(), 0);
 }

@@ -117,10 +117,13 @@ pub fn score(
     cfg: &Scoring,
     now: OffsetDateTime,
 ) -> Option<f64> {
-    match s.health {
-        Health::Disabled | Health::AuthBroken => return None,
-        Health::Cooling if s.cooldown_until.is_some_and(|t| t > now) => return None,
-        _ => {}
+    if matches!(s.health, Health::Disabled | Health::AuthBroken) {
+        return None;
+    }
+    // Two independent gates, never one nested inside the other: `swamp accounts enable`
+    // rewrites health without touching the timer, and a live cooldown still means wait.
+    if s.cooldown_until.is_some_and(|t| t > now) {
+        return None;
     }
     // The provider's own authoritative gate: a client must not infer recovery from
     // percentages or reset times, so this outranks both.

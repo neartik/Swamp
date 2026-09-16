@@ -2034,7 +2034,7 @@ one that accepts one belongs to a live run and is kept. The two counts are repor
 
 Layered, lowest to highest: built-in defaults, `~/.config/swamp/config.toml`,
 `<repo>/.swamp/config.toml`, `SWAMP_*` env, `--config`, CLI flags.
-`swamp config show --effective` prints the merged result with the origin of every key.
+`swamp config show --effective` prints the merged result and which layers it was built from.
 
 ```toml
 # ~/.config/swamp/config.toml  (or <repo>/.swamp/config.toml)
@@ -2103,7 +2103,7 @@ quota_stop_at = 0.98
 
 # ---------------------------------------------------------------- workspace
 [workspace]
-isolation     = "worktree"        # worktree | shared | readonly
+isolation     = "worktree"        # worktree | shared | read-only (CLI flag: --isolation readonly)
 root          = "~/.swamp/worktrees"   # outside the repo on purpose
 base          = "HEAD"
 branch_prefix = "swamp"           # -> swamp/<run_short>/<node_short>-<attempt>
@@ -2209,8 +2209,8 @@ max_concurrency = 2
 limit_id = "codex"                # optional: which quota bucket this account routes against
 
 # ---------------------------------------------------------------- tiers
-# Cross-provider order, consulted ONLY when every account of the current provider is cooling
-# and dispatch.cross_provider_failover = true.
+# The tier's full selection order: the first entry overrides dispatch.default_provider for this
+# tier, and the rest are consulted only when dispatch.cross_provider_failover = true.
 [tiers.high]
 provider_order = ["anthropic", "openai"]
 timeout = "45m"
@@ -2507,8 +2507,8 @@ and deterministic.
 
 11. **Unbounded recursion.** A worker whose PATH contains `swamp` can invoke `swamp run`. Guarded
     three ways: `SWAMP_DEPTH` exported into every worker env and refused above `max_depth`; the
-    dispatcher rejects `swamp_dispatch` from a node at the depth limit; the global semaphore caps
-    total live processes regardless.
+    dispatcher rejects `swamp_dispatch` from a node at the depth limit; per-account
+    `max_concurrency`, when set, caps the processes one subscription can carry at once.
 
 12. **Nested subagents are invisible.** A claude worker can spawn its own subagents; Swamp records
     the worker as one node. `--forward-subagent-text` exists and would surface them, but it changes

@@ -60,6 +60,7 @@ pub struct Lease {
     pub exec: String,
     pub env: BTreeMap<String, String>,
     _permit: Option<OwnedSemaphorePermit>,
+    brain: bool,
     pool: Arc<AccountPool>,
 }
 
@@ -72,6 +73,9 @@ impl Lease {
 
 impl Drop for Lease {
     fn drop(&mut self) {
+        if self.brain {
+            self.pool.release_reservation();
+        }
         {
             let mut state = self.pool.state.lock();
             let entry = state.entry(self.account.clone()).or_default();
@@ -339,11 +343,15 @@ impl AccountPool {
         {
             Ok(Ok(p)) => p,
             Ok(Err(_)) => {
+                self.release_reservation();
                 return Err(NoCapacity::Exhausted {
                     reason: "dispatch pool is shutting down".into(),
                 });
             }
-            Err(_) => return Err(NoCapacity::Saturated),
+            Err(_) => {
+                self.release_reservation();
+                return Err(NoCapacity::Saturated);
+            }
         };
         // The permit is held for the whole wait: a cooling account comes back on a timer, and
         // failing the command instead of waiting for it throws the run away.
@@ -360,6 +368,7 @@ impl AccountPool {
                     match self.take_from(provider, &exclude, chosen.as_ref(), None) {
                         Some(mut lease) => {
                             lease._permit = permit.take();
+                            lease.brain = true;
                             return Ok(lease);
                         }
                         None => {
@@ -380,9 +389,13 @@ impl AccountPool {
                     Some(retry_at)
                 }
                 // No timer will rescue this: disabled, auth-broken, or out of credits.
-                Capacity::Exhausted { reason } => return Err(NoCapacity::Exhausted { reason }),
+                Capacity::Exhausted { reason } => {
+                    self.release_reservation();
+                    return Err(NoCapacity::Exhausted { reason });
+                }
             };
             if Instant::now() >= deadline {
+                self.release_reservation();
                 return Err(NoCapacity::Saturated);
             }
             let until = wake_at
@@ -483,10 +496,12 @@ impl AccountPool {
             let mut state = self.state.lock();
             let entry = state.entry(id.clone()).or_default();
             let rolled = entry.apply_quota(snap, source, now);
-            if !matches!(
-                entry.health,
-                Health::AuthBroken | Health::Disabled | Health::Cooling
-            ) {
+            if hard_gated(entry)
+                || !matches!(
+                    entry.health,
+                    Health::AuthBroken | Health::Disabled | Health::Cooling
+                )
+            {
                 entry.health = health_from_quota(entry, self.quota_warn_at());
             }
             (
@@ -660,16 +675,27 @@ impl AccountPool {
 
     /// Accounts of `p` that could take a node right now, reservation ignored.
     fn usable(&self, p: Provider) -> usize {
-        let now = OffsetDateTime::now_utc();
         let candidates: Vec<&Account> =
             self.accounts.values().filter(|a| a.provider == p).collect();
+        self.scorable(&candidates)
+    }
+
+    /// How many of `candidates` `score` would dispatch to right now.
+    fn scorable(&self, candidates: &[&Account]) -> usize {
+        let now = OffsetDateTime::now_utc();
         let state = self.state.lock();
         let ledger = self.ledger.lock();
-        let live = live_states(&state, &ledger, &candidates);
+        let live = live_states(&state, &ledger, candidates);
         let pool_window = pool_window(&live);
         live.iter()
             .filter(|(a, s)| score(self.policy, a, s, pool_window, &self.scoring, now).is_some())
             .count()
+    }
+
+    /// The brain's reservation is dropped when its lease ends or its acquire fails: an
+    /// account held for a brain that is not running is an account nobody can use.
+    fn release_reservation(&self) {
+        *self.reserved.lock() = None;
     }
 
     /// Accounts the shared state file remembers but this repo's config no longer names.
@@ -709,13 +735,20 @@ impl AccountPool {
     }
 
     fn candidates(&self, provider: Provider, exclude: &HashSet<AccountId>) -> Vec<&Account> {
-        let reserved = self.reserved.lock().clone();
-        self.accounts
+        let all: Vec<&Account> = self
+            .accounts
             .values()
             .filter(|a| a.provider == provider)
             .filter(|a| !exclude.contains(&a.id))
-            .filter(|a| reserved.as_ref() != Some(&a.id))
-            .collect()
+            .collect();
+        let reserved = self.reserved.lock().clone();
+        let Some(reserved) = reserved else {
+            return all;
+        };
+        let rest: Vec<&Account> = all.iter().copied().filter(|a| a.id != reserved).collect();
+        // The reservation is honoured only while the workers still have someone else to use:
+        // a peer that degrades later must not strand every node on an idle reserved account.
+        if self.scorable(&rest) > 0 { rest } else { all }
     }
 
     fn capacity(&self, provider: Provider, exclude: &HashSet<AccountId>) -> Capacity {
@@ -780,25 +813,12 @@ impl AccountPool {
     /// Why one ineligible candidate is ineligible, in the order `score` gates it.
     fn block_reason(&self, a: &Account, s: &AccountState, now: OffsetDateTime) -> Block {
         let who = &a.id.0;
-        // Health first, exactly as `score` gates it: a human-gated account carrying a
-        // cooldown must not advertise a retry time that cannot help.
-        match s.health {
-            Health::Disabled => {
-                return Block::Hard {
-                    why: format!("{who} disabled"),
-                };
-            }
-            Health::AuthBroken => {
-                return Block::Hard {
-                    why: format!("{who} needs re-authentication"),
-                };
-            }
-            _ => {}
-        }
-        if let Some(t) = s.cooldown_until.filter(|t| *t > now) {
-            return Block::Wait {
-                at: t,
-                why: format!("{who} cooling until {}", crate::ui::fmt::clock_hm(t)),
+        // Every hard gate first, exactly as `score` gates them: a human-gated account
+        // carrying a cooldown must not advertise a retry time that cannot help. The
+        // provider's own reason outranks the health word it produced.
+        if s.health == Health::Disabled {
+            return Block::Hard {
+                why: format!("{who} disabled"),
             };
         }
         if s.quota.as_ref().and_then(|q| q.ordinary_usage_allowed) == Some(false) {
@@ -818,6 +838,19 @@ impl AccountPool {
                 };
             }
             _ => {}
+        }
+        if s.health == Health::AuthBroken {
+            return Block::Hard {
+                why: format!("{who} needs re-authentication"),
+            };
+        }
+        // After the hard gates, never before: a depleted account also carrying a cooldown
+        // must not advertise a retry time that brings nobody back.
+        if let Some(t) = s.cooldown_until.filter(|t| *t > now) {
+            return Block::Wait {
+                at: t,
+                why: format!("{who} cooling until {}", crate::ui::fmt::clock_hm(t)),
+            };
         }
         if a.max_concurrency.is_some_and(|c| s.inflight >= c) {
             return Block::Busy;
@@ -912,6 +945,7 @@ impl AccountPool {
             exec,
             env,
             _permit: permit,
+            brain: false,
             pool: Arc::clone(self),
         })
     }
@@ -1076,6 +1110,11 @@ async fn cancelled(token: Option<&CancellationToken>) {
 }
 
 fn health_from_quota(s: &AccountState, warn_at: f64) -> Health {
+    // USAGE 2.2: depleted credits or a spend control is not a timer, so the health every
+    // surface reads has to say a human must act.
+    if hard_gated(s) {
+        return Health::AuthBroken;
+    }
     let now = OffsetDateTime::now_utc();
     let util = s
         .quota
@@ -1086,6 +1125,18 @@ fn health_from_quota(s: &AccountState, warn_at: f64) -> Health {
     } else {
         Health::Healthy
     }
+}
+
+/// The provider's own refusals, which no timer lifts.
+pub fn hard_gated(s: &AccountState) -> bool {
+    let Some(q) = s.quota.as_ref() else {
+        return false;
+    };
+    q.ordinary_usage_allowed == Some(false)
+        || matches!(
+            q.reached,
+            Some(LimitReached::CreditsDepleted | LimitReached::SpendControl)
+        )
 }
 
 /// Wall-clock instants come from the provider; the runtime schedules on monotonic ones.

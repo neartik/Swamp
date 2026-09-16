@@ -50,6 +50,9 @@ pub enum Block {
     Slash {
         title: String,
         body: Vec<String>,
+        /// Machine-readable output is rendered verbatim: clipping a JSON line to the
+        /// viewport cuts it mid-token and the committed block no longer parses.
+        raw: bool,
     },
     Notice {
         glyph: String,
@@ -101,15 +104,15 @@ impl Block {
             Block::Usage { rows, max_age, .. } => {
                 crate::ui::usage::render(rows, cx.width, t, *max_age)
             }
-            Block::Slash { title, body } => {
+            Block::Slash { title, body, raw } => {
                 let mut out = Vec::new();
                 if !title.is_empty() {
                     out.push(Line::from(t.span(title.clone(), Role::Name)));
                 }
-                out.extend(
-                    body.iter()
-                        .map(|l| Line::from(t.span(clip(l, cx.width), Role::Meta))),
-                );
+                out.extend(body.iter().map(|l| {
+                    let text = if *raw { l.clone() } else { clip(l, cx.width) };
+                    Line::from(t.span(text, Role::Meta))
+                }));
                 out
             }
             Block::Notice {

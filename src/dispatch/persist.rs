@@ -32,21 +32,28 @@ pub fn merge_state(path: &Utf8Path, mine: &StateMap) -> anyhow::Result<StateMap>
     let _guard = lock(path)?;
     let mut merged = read_unlocked(path).unwrap_or_default();
     for (id, ours) in mine {
-        let theirs = match merged.get(id) {
-            Some(theirs) if theirs.updated_at > ours.updated_at => continue,
-            other => other.cloned(),
+        let theirs = merged.get(id).cloned();
+        // The newer entry wins the last-writer-wins fields; the counters are still
+        // reconciled both ways, because the two processes count independently.
+        let newer_is_theirs = theirs
+            .as_ref()
+            .is_some_and(|t| t.updated_at > ours.updated_at);
+        let mut entry = match (&theirs, newer_is_theirs) {
+            (Some(theirs), true) => theirs.clone(),
+            _ => ours.clone(),
         };
-        let mut entry = ours.clone();
         if let Some(theirs) = &theirs {
             entry.lifetime_nodes = theirs.lifetime_nodes.max(ours.lifetime_nodes);
             entry.lifetime_tokens.take_max(&theirs.lifetime_tokens);
+            entry.lifetime_tokens.take_max(&ours.lifetime_tokens);
             // Cost accumulates per process from whatever the file held at startup, so our
             // own total does not include what the other process has spent since.
-            entry.lifetime_cost_usd = entry.lifetime_cost_usd.max(theirs.lifetime_cost_usd);
+            entry.lifetime_cost_usd = theirs.lifetime_cost_usd.max(ours.lifetime_cost_usd);
             // A rolled window starts at zero: only the SAME window may keep the other
             // process's count, or a reset window comes straight back from the file.
             if same_window(theirs.window_key.as_ref(), ours.window_key.as_ref()) {
                 entry.window_tokens.take_max(&theirs.window_tokens);
+                entry.window_tokens.take_max(&ours.window_tokens);
             }
         }
         // inflight is this process's runtime state and means nothing to anyone else.

@@ -987,6 +987,16 @@ impl App {
         self.commit(Block::Slash {
             title: title.to_owned(),
             body,
+            raw: false,
+        })
+    }
+
+    /// Output a caller copies out and parses: never clipped to the viewport.
+    fn output_raw(&mut self, body: Vec<String>) -> Effect {
+        self.commit(Block::Slash {
+            title: String::new(),
+            body,
+            raw: true,
         })
     }
 
@@ -1061,7 +1071,10 @@ impl App {
         self.pool
             .iter()
             .map(|(provider, id, state)| {
-                let util = state.quota.as_ref().map_or(0.0, |q| q.worst_utilization());
+                let util = state
+                    .quota
+                    .as_ref()
+                    .map_or(0.0, |q| q.worst_utilization_at(self.now));
                 let cooldown = state
                     .cooldown_until
                     .filter(|t| *t > self.now)
@@ -1091,7 +1104,7 @@ impl App {
             let mut body: Vec<String> = vec!["```json".to_owned()];
             body.extend(text.lines().map(str::to_owned));
             body.push("```".to_owned());
-            return vec![self.output("", body)];
+            return vec![self.output_raw(body)];
         }
         // Anthropic telemetry only arrives inside a worker stream, so only OpenAI accounts
         // have anything to probe.

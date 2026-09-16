@@ -103,11 +103,17 @@ impl App {
 
     /// Per-account utilization, health and cooldown, in a stable order.
     pub fn gauges(&self) -> Vec<(AccountId, f64, Health, Option<OffsetDateTime>)> {
+        // Dispatch scores the windows that still describe the present, so a gauge must not
+        // draw a bar for an allowance that has already rolled.
+        let now = OffsetDateTime::now_utc();
         self.view
             .accounts
             .iter()
             .map(|(id, s): (&AccountId, &AccountState)| {
-                let util = s.quota.as_ref().map_or(0.0, |q| q.worst_utilization());
+                let util = s
+                    .quota
+                    .as_ref()
+                    .map_or(0.0, |q| q.worst_utilization_at(now));
                 (id.clone(), util, s.health, s.cooldown_until)
             })
             .collect()
