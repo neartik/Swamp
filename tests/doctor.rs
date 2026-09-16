@@ -487,8 +487,30 @@ fn the_design_doc_doctor_sample_matches_what_the_code_emits() {
         "the header is `swamp <version> - <os> <arch>`: {sample}"
     );
     assert!(
-        sample.trim_end().ends_with("2 warnings, 1 error."),
-        "the sample has two WARN lines and one ERROR line: {sample}"
+        sample.contains("/quota") && sample.contains("no quota source"),
+        "§9 has to show the per-account `providers/<id>/quota` check doctor emits: {sample}"
+    );
+    assert!(
+        !sample.contains("no cost and no quota telemetry"),
+        "an openai account does get quota telemetry, from the rollout or the app-server: {sample}"
+    );
+    // Counted, not spelled: the tally has to follow the sample whenever a check is added.
+    let count = |label: &str| {
+        sample
+            .lines()
+            .filter(|l| l.trim_start().starts_with(label))
+            .count()
+    };
+    let warnings = count(Level::Warn.label());
+    let errors = count(Level::Error.label());
+    let plural = |n: usize, w: &str| format!("{n} {w}{}", if n == 1 { "" } else { "s" });
+    assert!(
+        sample.trim_end().ends_with(&format!(
+            "{}, {}.",
+            plural(warnings, "warning"),
+            plural(errors, "error")
+        )),
+        "the tally has to match the {warnings} WARN and {errors} ERROR lines: {sample}"
     );
 }
 

@@ -288,6 +288,78 @@ fn swamp_accounts_drops_an_expired_window_and_marks_an_estimated_one() {
     assert_eq!(rows[0]["five_hour"], serde_json::Value::Null, "{text}");
 }
 
+/// USAGE 3.1: enabling an account cannot lift a provider gate, so `swamp accounts enable`
+/// re-derives health instead of stamping `healthy` over a depleted one. The table also has to
+/// fit `auth-broken`, eleven columns wide, or that row alone shifts every later column.
+#[test]
+fn enabling_a_depleted_account_keeps_its_gate_and_its_columns() {
+    let h = Harness::new();
+    let mut state = swamp::dispatch::persist::StateMap::new();
+    state.insert(
+        AccountId("main".into()),
+        AccountState {
+            health: Health::AuthBroken,
+            quota: Some(RateLimitSnapshot {
+                status: LimitStatus::Allowed,
+                reached: Some(LimitReached::CreditsDepleted),
+                ordinary_usage_allowed: Some(false),
+                ..RateLimitSnapshot::default()
+            }),
+            ..Default::default()
+        },
+    );
+    swamp::dispatch::persist::save_state(&h.paths().accounts_state(), &state)
+        .expect("writing accounts.json by hand");
+
+    h.swamp(&["accounts", "enable", "main"]).assert().success();
+    let out = h.swamp(&["accounts"]).assert().success();
+    let stdout = String::from_utf8_lossy(&out.get_output().stdout).into_owned();
+    assert!(
+        stdout.contains("auth-broken"),
+        "enable stamped over the gate: {stdout}"
+    );
+    assert!(!stdout.contains("healthy"), "{stdout}");
+
+    let mut lines = stdout.lines();
+    let header = lines.next().expect("a header");
+    let row = lines.next().expect("a row");
+    let at = header.find("INFLIGHT").expect("an INFLIGHT header");
+    assert!(
+        row[at..].starts_with("0/"),
+        "`auth-broken` shifted the row:\n{header}\n{row}"
+    );
+
+    let json = h.swamp(&["--json", "accounts"]).assert().success();
+    let text = String::from_utf8_lossy(&json.get_output().stdout).into_owned();
+    let rows: serde_json::Value = serde_json::from_str(&text).expect("json rows");
+    assert_eq!(rows[0]["health"], "auth_broken", "{text}");
+}
+
+/// A duration the clock cannot represent is an ordinary error: `OffsetDateTime + Duration`
+/// panics on overflow, and nothing bounds what the user types. The timestamp the JSON surface
+/// prints is RFC 3339, the spelling `swamp usage --json` already uses for the same field.
+#[test]
+fn an_unrepresentable_cooldown_is_an_error_and_a_real_one_is_rfc_3339() {
+    let h = Harness::new();
+    let out = h
+        .swamp(&["accounts", "cooldown", "main", "999999999d"])
+        .assert()
+        .failure();
+    let stderr = String::from_utf8_lossy(&out.get_output().stderr).into_owned();
+    assert!(!stderr.contains("panicked"), "{stderr}");
+    assert!(stderr.contains("999999999d"), "{stderr}");
+
+    h.swamp(&["accounts", "cooldown", "main", "30m"])
+        .assert()
+        .success();
+    let json = h.swamp(&["--json", "accounts"]).assert().success();
+    let text = String::from_utf8_lossy(&json.get_output().stdout).into_owned();
+    let rows: serde_json::Value = serde_json::from_str(&text).expect("json rows");
+    let until = rows[0]["cooldown_until"].as_str().expect("a timestamp");
+    OffsetDateTime::parse(until, &time::format_description::well_known::Rfc3339)
+        .expect("`swamp accounts --json` spells the instant the way `swamp usage --json` does");
+}
+
 /// An unreadable state file is the one case `load_state` reports: rendering it as zeros
 /// reads as "nothing was spent", and `--probe` would then overwrite it with the probed
 /// accounts alone, losing every lifetime counter the file held.
@@ -1299,6 +1371,49 @@ fn an_elapsed_cooldown_reads_healthy_on_every_surface() {
     let body = accounts_commit(&mut app, 100);
     assert!(body.contains("healthy"), "chat /accounts is stale: {body}");
     assert!(!body.contains("cooling"), "{body}");
+}
+
+/// The other direction of the same rule: `swamp accounts enable` rewrites health without
+/// touching the timer, and `score` gates on the timer alone. A row reading `healthy` while no
+/// node can lease the account hid the cooldown on every surface but `swamp accounts`.
+#[test]
+fn a_live_cooldown_reads_cooling_whatever_the_stored_word_says() {
+    let now = OffsetDateTime::now_utc();
+    let mut enabled = row("claude-main", Provider::Anthropic, Health::Healthy);
+    enabled.cooldown_until = Some(now + time::Duration::minutes(30));
+
+    let body = screen(
+        &usage::render(
+            std::slice::from_ref(&enabled),
+            100,
+            &Theme::plain(),
+            MAX_AGE,
+        ),
+        100,
+    );
+    assert!(body.contains("cooling"), "{body}");
+    assert!(body.contains("until "), "the timer has to be named: {body}");
+    assert_eq!(
+        usage::json(std::slice::from_ref(&enabled))["accounts"][0]["health"],
+        "cooling"
+    );
+    assert_eq!(
+        swamp::ui::watch::health_word(swamp::ui::watch::shown_health(
+            enabled.health,
+            enabled.cooldown_until,
+            now
+        )),
+        "cooling",
+        "`swamp accounts` reads the same normalisation"
+    );
+
+    // A hard gate is not a timer: no cooldown may borrow its word.
+    for gated in [Health::AuthBroken, Health::Disabled] {
+        assert_eq!(
+            swamp::ui::watch::shown_health(gated, enabled.cooldown_until, now),
+            gated
+        );
+    }
 }
 
 /// A cooldown routinely crosses midnight UTC: `cooldown.max` defaults to six hours and a

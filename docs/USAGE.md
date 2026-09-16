@@ -245,9 +245,11 @@ on a new snapshot S for account A:
 codex reports its reset as a countdown, so the absolute instant Swamp derives from it moves forward
 with the age of the reading: `same_window` compares two keys with half a window of tolerance, so
 only a move of about a whole window counts as a roll. An
-account with no quota source at all keys its window to
-`WindowKey { scope: estimated_scope, resets_at: window_started_at + estimated_window }` and rolls on
-wall time.
+account with no quota source at all keys its window to `WindowKey { scope: estimated_scope,
+resets_at: <the next boundary of a fixed estimated_window grid on the epoch> }` and rolls on wall
+time. The grid, and never `window_started_at`: that field is written by the roll the estimate
+triggers, so anchoring on it would make every observation a fresh window and zero the counter it
+just read.
 
 ### 2.2 Quota shape changes
 
@@ -341,7 +343,10 @@ currently discards (`overageStatus`, `overageDisabledReason`, `isUsingOverage`) 
 `reached: Some(CreditsDepleted)` when `overageStatus == "rejected"` with a hard
 `overageDisabledReason`. The window key set varies between two events of the same run
 (`five_hour` + `seven_day`, then `seven_day_overage_included` appears); a snapshot merges into the
-stored one per scope rather than replacing it, so a key dropping out does not erase a window.
+stored one per scope rather than replacing it, so a key dropping out does not erase a window. For
+Anthropic that merge is unconditional: `rateLimitType` is the limit the event reports on, a label
+and not a bucket, and it changes on a rejection. Only the codex sources, where two `limit_id`s are
+two real allowances, key the merge on the bucket matching.
 
 `result.usage` is the **main model only**. The fixture's haiku side-calls (899 in / 12 out) appear
 only in `modelUsage` and inside `total_cost_usd`. `FinalSummary` gains
@@ -376,15 +381,16 @@ number.
 
 ```
 utilization = window_tokens.billable() / providers.openai.estimated_window_tokens
-resets_at   = window_started_at + providers.openai.estimated_window
+resets_at   = next boundary of a providers.openai.estimated_window grid on the epoch
 measured    = false
 source      = Estimated
 ```
 
 `[providers.openai] estimated_window = "7d"`, `estimated_window_tokens = 0` (meaning: no estimate,
-render `-`). An estimated window is rendered with a leading `~`, is reported as `est` in
-`swamp usage --json`, and **can only deprioritise an account, never exclude it** (§4.3). Swamp does
-not know an OpenAI plan's real ceiling and must not park a working subscription on a guess.
+render `-`). An estimated window is rendered with a leading `~`, is reported as
+`"source": "estimated"` in `swamp usage --json`, and **can only deprioritise an account, never
+exclude it** (§4.3). Swamp does not know an OpenAI plan's real ceiling and must not park a working
+subscription on a guess.
 
 Unit and scope conversion, both mandatory:
 
@@ -398,9 +404,14 @@ Unit and scope conversion, both mandatory:
 
 Bucket selection for `quota` (the one dispatch scores against): `accounts[].limit_id` when set, else
 the bucket whose `limit_name` matches the configured model for this account's tier, else `"codex"`,
-else the first. Every bucket is kept in `quota_buckets` for display. `worst_utilization()` never
-maxes across buckets: `codex_bengalfox` at 0% on a model family this account never runs must not
-make `codex` at 32% look worse, and `codex` at 95% must not park a Spark-only task.
+else the first. A node resolves that tier from the spec it ran at; the read-only probes behind
+`/usage` and `swamp usage --probe` cannot know it, so they reuse the bucket already recorded in
+`AccountState::quota` first (`codex_quota::probe_limit_id`) and only fall back to the
+`default_tier` mapping for an account nothing has read yet. A display command must never move an
+account onto a bucket dispatch did not choose. Every bucket is kept in `quota_buckets` for display.
+`worst_utilization()` never maxes across buckets: `codex_bengalfox` at 0% on a model family this
+account never runs must not make `codex` at 32% look worse, and `codex` at 95% must not park a
+Spark-only task.
 
 Also in this pass: `thread.failed` is unhandled in `src/worker/codex.rs` (it exists in the 0.154.0
 event enum and today falls to `CodexLine::Other` -> `WorkerEvent::Unknown`, producing no `Final`, so
@@ -522,7 +533,14 @@ per-account timeout; a timeout renders the cached row with its age, never an err
 `/accounts` and `swamp accounts` are unchanged and keep their role: health, cooldown, exec
 resolution, admin subcommands. `/usage` is the token and quota view. The split is deliberate; they
 share `watch::health_word(watch::shown_health(..))`, `watch::health_color` and `fmt::clock_day`, so
-the two can disagree on neither health nor the day a cooldown ends. The `5H` / `7D` fractions
+the two can disagree on neither health nor the day a cooldown ends. `shown_health` derives the word
+from the timer in both directions: an elapsed `cooldown_until` is not cooling any more, and a live
+one is cooling whatever the stored word says, because `policy::score` gates on the timer alone and
+`swamp accounts enable` rewrites health without touching it. The hard gates still win: `AuthBroken`
+and `Disabled` are not timers and no cooldown may borrow their row. `swamp accounts enable` itself
+re-derives health with `pool::health_from_quota`, exactly as `AccountPool::set_enabled` does, so a
+provider-refused account stays `auth-broken`: enabling cannot lift a gate, only advertise it
+wrongly. The `5H` / `7D` fractions
 `swamp accounts` quotes are filtered by `LimitWindow::is_current` exactly as `/usage` filters them,
 and an estimated one carries the same leading `~` (§2.3): a window whose reset has passed measures
 an allowance that has already rolled, and dispatch ignores it too.

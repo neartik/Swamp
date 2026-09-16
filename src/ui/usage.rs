@@ -682,7 +682,7 @@ fn tokens_json(u: &Usage) -> Value {
     v
 }
 
-fn rfc3339(t: OffsetDateTime) -> Option<String> {
+pub fn rfc3339(t: OffsetDateTime) -> Option<String> {
     t.format(&time::format_description::well_known::Rfc3339)
         .ok()
 }

@@ -708,3 +708,88 @@ fn a_probed_reading_re_derives_health_the_way_the_pool_does() {
     swamp::dispatch::pool::health_after_quota(&mut entry, was_gated, 0.9);
     assert_eq!(entry.health, swamp::dispatch::account::Health::Healthy);
 }
+
+/// USAGE 2.3: claude's `limit_id` is the event's `rateLimitType`, a label and not a bucket -
+/// a rejection names whichever limit was hit. Keying the per-scope merge on it let one such
+/// event replace the stored snapshot wholesale, erasing a 99% window and routing the pool
+/// straight back into a near-exhausted account.
+#[test]
+fn a_claude_event_naming_another_limit_still_merges_the_stored_windows() {
+    let now = OffsetDateTime::from_unix_timestamp(1_789_400_000).expect("now");
+    let mut state = AccountState::default();
+    state.apply_quota(
+        RateLimitSnapshot {
+            status: LimitStatus::Allowed,
+            windows: vec![
+                LimitWindow {
+                    scope: LimitScope::FiveHour,
+                    utilization: 0.06,
+                    resets_at: Some(now + time::Duration::hours(2)),
+                    window_minutes: Some(300),
+                    measured: true,
+                },
+                LimitWindow {
+                    scope: LimitScope::SevenDay,
+                    utilization: 0.99,
+                    resets_at: Some(now + time::Duration::days(3)),
+                    window_minutes: Some(10_080),
+                    measured: true,
+                },
+            ],
+            limit_id: Some("five_hour".to_owned()),
+            ..Default::default()
+        },
+        QuotaSource::Telemetry,
+        now,
+    );
+
+    // The rejection names the seven-day limit and carries no `unifiedWindows` at all.
+    state.apply_quota(
+        RateLimitSnapshot {
+            status: LimitStatus::Rejected,
+            windows: Vec::new(),
+            resets_at: Some(now + time::Duration::days(3)),
+            limit_id: Some("seven_day".to_owned()),
+            reached: Some(LimitReached::RateLimit),
+            ..Default::default()
+        },
+        QuotaSource::Telemetry,
+        now + time::Duration::minutes(1),
+    );
+
+    let quota = state.quota.as_ref().expect("a snapshot");
+    assert_eq!(quota.windows.len(), 2, "both windows survive the rejection");
+    assert_eq!(
+        quota.measured_utilization(),
+        Some(0.99),
+        "the stored seven-day reading is what still gates dispatch"
+    );
+    assert_eq!(quota.reached, Some(LimitReached::RateLimit));
+}
+
+/// The other half of the same rule: for codex two `limit_id`s really are two allowances, so a
+/// reading of one bucket must never inherit the other's windows.
+#[test]
+fn a_codex_reading_of_another_bucket_does_not_inherit_its_windows() {
+    let now = OffsetDateTime::from_unix_timestamp(1_789_400_000).expect("now");
+    let mut state = AccountState::default();
+    let mut first = snapshot(now + time::Duration::days(3));
+    first.limit_id = Some("codex".to_owned());
+    state.apply_quota(first, QuotaSource::AppServer, now);
+
+    let other = RateLimitSnapshot {
+        status: LimitStatus::Allowed,
+        windows: Vec::new(),
+        limit_id: Some("codex_bengalfox".to_owned()),
+        ..Default::default()
+    };
+    state.apply_quota(
+        other,
+        QuotaSource::AppServer,
+        now + time::Duration::minutes(1),
+    );
+    assert!(
+        state.quota.as_ref().is_some_and(|q| q.windows.is_empty()),
+        "a second bucket starts from its own reading"
+    );
+}

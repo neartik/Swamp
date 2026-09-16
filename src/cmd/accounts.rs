@@ -5,6 +5,7 @@ use crate::dispatch::persist::{self, StateMap};
 use crate::dispatch::policy::Scoring;
 use crate::dispatch::pool;
 use crate::model::core::{AccountId, LimitScope, LimitWindow, Provider};
+use anyhow::Context;
 use serde_json::json;
 use time::OffsetDateTime;
 
@@ -21,9 +22,15 @@ pub async fn run(ctx: &Ctx, args: &AccountsArgs) -> anyhow::Result<i32> {
         AccountsCmd::List => list(ctx),
         AccountsCmd::Check { account } => check(ctx, account.as_deref()).await,
         AccountsCmd::Cooldown { id, duration } => {
-            let d = parse_duration(duration)?;
+            // `OffsetDateTime + Duration` panics on overflow, and nothing bounds the input.
+            let d: time::Duration = parse_duration(duration)?
+                .try_into()
+                .with_context(|| format!("cooldown `{duration}` is too large"))?;
+            let until = OffsetDateTime::now_utc()
+                .checked_add(d)
+                .with_context(|| format!("cooldown `{duration}` is too far in the future"))?;
             edit(ctx, &path, id, |s| {
-                s.cooldown_until = Some(OffsetDateTime::now_utc() + d);
+                s.cooldown_until = Some(until);
                 s.health = Health::Cooling;
             })?;
             println!("account {id} cooling for {duration}");
@@ -39,7 +46,12 @@ pub async fn run(ctx: &Ctx, args: &AccountsArgs) -> anyhow::Result<i32> {
             Ok(0)
         }
         AccountsCmd::Enable { id } => {
-            edit(ctx, &path, id, |s| s.health = Health::Healthy)?;
+            // Re-derived, never stamped: enabling cannot lift a provider gate, so claiming
+            // Healthy over a depleted account would only make every surface lie about it.
+            let warn_at = Scoring::from_config(&ctx.cfg).warn_at;
+            edit(ctx, &path, id, |s| {
+                s.health = pool::health_from_quota(s, warn_at);
+            })?;
             println!("account {id} enabled");
             Ok(0)
         }
@@ -72,7 +84,7 @@ fn list(ctx: &Ctx) -> anyhow::Result<i32> {
                     "max_concurrency": a.max_concurrency,
                     "five_hour": window(&s, LimitScope::FiveHour, now).map(|w| w.utilization),
                     "seven_day": window(&s, LimitScope::SevenDay, now).map(|w| w.utilization),
-                    "cooldown_until": s.cooldown_until.map(|t| t.to_string()),
+                    "cooldown_until": s.cooldown_until.and_then(crate::ui::usage::rfc3339),
                     "nodes": s.lifetime_nodes,
                     "cost_usd": s.lifetime_cost_usd,
                     "in_config": true,
@@ -84,7 +96,7 @@ fn list(ctx: &Ctx) -> anyhow::Result<i32> {
                 "account": id,
                 "health": crate::ui::watch::shown_health(s.health, s.cooldown_until, now),
                 "consecutive_infra_failures": s.consecutive_infra_failures,
-                "cooldown_until": s.cooldown_until.map(|t| t.to_string()),
+                "cooldown_until": s.cooldown_until.and_then(crate::ui::usage::rfc3339),
                 "nodes": s.lifetime_nodes,
                 "cost_usd": s.lifetime_cost_usd,
                 "in_config": false,
@@ -95,7 +107,7 @@ fn list(ctx: &Ctx) -> anyhow::Result<i32> {
     }
 
     let mut text = format!(
-        "{:<10} {:<13} {:<14} {:<10} {:<9} {:<6} {:<6} {:<10} {:<6} {}\n",
+        "{:<10} {:<13} {:<14} {:<11} {:<9} {:<6} {:<6} {:<10} {:<6} {}\n",
         "PROVIDER", "ACCOUNT", "EXEC", "HEALTH", "INFLIGHT", "5H", "7D", "COOLDOWN", "NODES", "$"
     );
     for a in &ctx.cfg.accounts {
@@ -105,7 +117,7 @@ fn list(ctx: &Ctx) -> anyhow::Result<i32> {
             .map(|c| c.to_string())
             .unwrap_or_else(|| "-".to_owned());
         text.push_str(&format!(
-            "{:<10} {:<13} {:<14} {:<10} {:<9} {:<6} {:<6} {:<10} {:<6} ~{:.2}{}\n",
+            "{:<10} {:<13} {:<14} {:<11} {:<9} {:<6} {:<6} {:<10} {:<6} ~{:.2}{}\n",
             // `Display for Provider` ignores the formatter's width, so pad the &str instead.
             a.provider.as_str(),
             crate::ui::fmt::truncate(&a.id.0, ACCOUNT_W),
@@ -136,7 +148,7 @@ fn list(ctx: &Ctx) -> anyhow::Result<i32> {
         text.push_str("\nnot in config (state kept; drop with `swamp accounts reset <id>`):\n");
         for (id, s) in stale {
             text.push_str(&format!(
-                "{:<10} {:<13} {:<14} {:<10} {:<9} {:<6} {:<6} {:<10} {:<6} ~{:.2}\n",
+                "{:<10} {:<13} {:<14} {:<11} {:<9} {:<6} {:<6} {:<10} {:<6} ~{:.2}\n",
                 "-",
                 crate::ui::fmt::truncate(&id.0, ACCOUNT_W),
                 "-",

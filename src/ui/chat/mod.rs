@@ -306,7 +306,15 @@ fn probe_quota(
         let Some(account) = cfg.accounts.iter().find(|a| a.id == id) else {
             continue;
         };
-        let (exec, limit_id) = (account.exec.clone(), account.limit_id.clone());
+        let exec = account.exec.clone();
+        let recorded = disp
+            .pool()
+            .snapshot()
+            .into_iter()
+            .find(|(_, a, _)| a == &id)
+            .and_then(|(_, _, s)| s.quota.and_then(|q| q.limit_id));
+        let limit_id =
+            crate::worker::codex_quota::probe_limit_id(cfg, &account.id, recorded.as_deref());
         let model = crate::worker::codex_quota::quota_model(cfg, &account.id);
         let env = crate::config::resolve::expand_env(&account.env);
         let pool = Arc::clone(disp.pool());
@@ -371,7 +379,16 @@ fn workers_line(
     )],
 ) -> String {
     let accounts = snapshot.len();
-    let count = |h: Health| snapshot.iter().filter(|(_, _, s)| s.health == h).count();
+    let now = OffsetDateTime::now_utc();
+    // The same word every other surface shows: a live timer is a cooldown, not readiness.
+    let count = |h: Health| {
+        snapshot
+            .iter()
+            .filter(|(_, _, s)| {
+                crate::ui::watch::shown_health(s.health, s.cooldown_until, now) == h
+            })
+            .count()
+    };
     let mut out = format!(
         "{accounts} account{} \u{b7} {} ready",
         if accounts == 1 { "" } else { "s" },
@@ -387,7 +404,6 @@ fn workers_line(
             out.push_str(&format!(", {n} {word}"));
         }
     }
-    let now = time::OffsetDateTime::now_utc();
     let tightest = snapshot
         .iter()
         .filter_map(|(_, _, s)| s.quota.as_ref())
@@ -486,6 +502,9 @@ mod tests {
             AccountId(id.to_owned()),
             AccountState {
                 health,
+                // Every surface derives the word from the timer, so a cooling account has one.
+                cooldown_until: (health == Health::Cooling)
+                    .then(|| OffsetDateTime::now_utc() + time::Duration::minutes(5)),
                 ..Default::default()
             },
         )
@@ -504,6 +523,19 @@ mod tests {
             "{line}"
         );
         assert_eq!(line.matches("cooling").count(), 1, "{line}");
+    }
+
+    /// `swamp accounts enable` rewrites health without touching the timer, and `score` gates
+    /// on the timer alone: an account no node can lease must not be counted as ready.
+    #[test]
+    fn a_live_cooldown_is_never_counted_as_ready() {
+        let mut cooling = entry("b", Health::Healthy);
+        cooling.2.cooldown_until = Some(OffsetDateTime::now_utc() + time::Duration::minutes(30));
+        let line = workers_line(&[entry("a", Health::Healthy), cooling]);
+        assert!(
+            line.starts_with("2 accounts \u{b7} 1 ready, 1 cooling"),
+            "{line}"
+        );
     }
 
     #[test]

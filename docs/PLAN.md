@@ -586,8 +586,9 @@ holds; WP3 provides the real impl, WP4's tests provide a scripted one.
 - **Proactive quota stop:** `observe_quota` at `0.99` with `quota_stop_at = 0.98` makes the account
   ineligible for new leases while a running lease is untouched.
 - **Selection:** with identical state, `RoundRobin` alternates; `LeastLoaded` picks the account with
-  fewer inflight; `QuotaAware` prefers `util 0.1` over `util 0.9` at equal load, and degrades to
-  `LeastLoaded` when no quota is known. Default policy is `QuotaAware`.
+  fewer inflight; `QuotaAware` prefers `util 0.1` over `util 0.9` at equal load, and with no quota
+  source at all is ranked by `load` and `share`, so two untelemetered accounts still alternate
+  instead of tying to map order. Default policy is `QuotaAware`.
 - **Concurrency:** `max_concurrency = 2` never yields a third simultaneous lease; an account with
   no `max_concurrency` is bounded by its own headroom, not by a machine-wide count. `acquire` does
   not busy-spin (assert bounded wakeups).

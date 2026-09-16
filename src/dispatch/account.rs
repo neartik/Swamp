@@ -209,9 +209,16 @@ impl AccountState {
         now: OffsetDateTime,
     ) -> bool {
         // Two buckets are two allowances: merging across them lets one bucket inherit the
-        // other's windows and park a model family that has no limit at all.
+        // other's windows and park a model family that has no limit at all. Claude has one
+        // allowance per account, and its `limit_id` is the `rateLimitType` of the event -
+        // a label that changes on a rejection, so keying the merge on it erases every window.
+        let same_bucket = source == QuotaSource::Telemetry
+            || self
+                .quota
+                .as_ref()
+                .is_some_and(|prev| prev.limit_id == snap.limit_id);
         let mut merged = match &self.quota {
-            Some(prev) if prev.limit_id == snap.limit_id => snap.merged_over(prev, now),
+            Some(prev) if same_bucket => snap.merged_over(prev, now),
             _ => snap,
         };
         // Only a source that can report the provider's gate may clear it: a rollout tail or

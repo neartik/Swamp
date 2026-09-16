@@ -323,16 +323,21 @@ pub fn gauge_bar(util: f64) -> String {
     format!("[{}{}]", "#".repeat(filled), "-".repeat(10 - filled))
 }
 
-/// The health word a surface shows. A `Cooling` entry whose timer has already elapsed is not
-/// cooling any more: `score` dispatches to it, nothing on the reading side resets the stored
-/// field, and "cooling" with no `until` is a state the user cannot act on.
+/// The health word a surface shows, derived from the timer in both directions. A `Cooling`
+/// entry whose timer has elapsed is not cooling any more, and a live `cooldown_until` is a
+/// cooldown whatever the stored word says: `score` gates on the timer alone, so a row reading
+/// `healthy` while no node can lease the account is a state the user cannot act on. The hard
+/// gates win: no timer lifts them.
 pub fn shown_health(
     h: Health,
     cooldown_until: Option<OffsetDateTime>,
     now: OffsetDateTime,
 ) -> Health {
+    let cooling = cooldown_until.is_some_and(|t| t > now);
     match h {
-        Health::Cooling if !cooldown_until.is_some_and(|t| t > now) => Health::Healthy,
+        Health::Cooling if !cooling => Health::Healthy,
+        Health::AuthBroken | Health::Disabled => h,
+        _ if cooling => Health::Cooling,
         h => h,
     }
 }

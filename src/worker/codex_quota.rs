@@ -306,9 +306,23 @@ pub fn estimated(
     })
 }
 
-/// The model a probe must resolve its bucket by. Dispatch scores whatever a probe stores, so
-/// `/usage` and `swamp usage --probe` have to agree with `retry.rs` on which bucket an
-/// account bills against, or a display command silently reroutes the pool.
+/// The bucket a display probe must bill against. `quota_model` can only resolve a tier, and
+/// `default_tier` is not the tier the node actually ran at, so the bucket dispatch already
+/// recorded wins over it: otherwise `/usage` moves the account onto a bucket dispatch never
+/// chose and reports 0% for an account that is at 32%.
+pub fn probe_limit_id(
+    cfg: &crate::config::Config,
+    id: &AccountId,
+    recorded: Option<&str>,
+) -> Option<String> {
+    recorded
+        .map(str::to_owned)
+        .or_else(|| cfg.account(id).and_then(|a| a.limit_id.clone()))
+}
+
+/// The model a probe resolves its bucket by when nothing has been recorded yet. Dispatch
+/// scores whatever a probe stores, so `/usage` and `swamp usage --probe` have to agree with
+/// `retry.rs` on which bucket an account bills against.
 pub fn quota_model(cfg: &crate::config::Config, id: &AccountId) -> Option<String> {
     let a = cfg.account(id)?;
     let tier = cfg
@@ -745,11 +759,27 @@ models = { mid = "gpt-5.1-codex-mini" }
         let value: serde_json::Value =
             serde_json::from_str(&fixture("codex-ratelimits-sample.json")).expect("json");
         let read = parse_rate_limits(&value, now());
-        let snap = read.select(None, model.as_deref()).expect("bucket");
+        let id = AccountId("codex-main".into());
+        let pinned = probe_limit_id(&cfg, &id, None);
+        let snap = read
+            .select(pinned.as_deref(), model.as_deref())
+            .expect("bucket");
         assert_eq!(
             snap.limit_id.as_deref(),
             Some("codex_bengalfox"),
             "the probe must bill the same bucket dispatch does"
+        );
+
+        // `default_tier` is not the tier the node ran at: a high-tier node billed `codex`, so
+        // the display probe has to stay on it instead of re-deriving the mid-tier bucket.
+        let pinned = probe_limit_id(&cfg, &id, Some("codex"));
+        let snap = read
+            .select(pinned.as_deref(), model.as_deref())
+            .expect("bucket");
+        assert_eq!(
+            snap.limit_id.as_deref(),
+            Some("codex"),
+            "a read-only probe must never move an account onto another bucket"
         );
     }
 

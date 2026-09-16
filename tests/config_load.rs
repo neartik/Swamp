@@ -664,6 +664,46 @@ estimated_window_tokens = 100
     }
 }
 
+/// `NaN < 0.0` is false, so a NaN penalty used to validate clean and then made every score
+/// tie: `penalised` returns NaN and `Rank::compare` reads it as "equal".
+#[test]
+fn a_non_finite_near_exhaustion_penalty_is_refused() {
+    for value in ["nan", "inf", "-inf"] {
+        let sb = Sandbox::new();
+        let path = sb.write(
+            "penalty.toml",
+            &format!("[dispatch]\nnear_exhaustion_penalty = {value}\n"),
+        );
+        let text = err_text(
+            &sb.load(Some(&path), None)
+                .expect_err(&format!("{value} must be refused")),
+        );
+        assert!(
+            text.contains("dispatch.near_exhaustion_penalty"),
+            "{value} missing from:\n{text}"
+        );
+        assert!(text.contains("finite"), "{value} has no reason:\n{text}");
+    }
+}
+
+/// Profiles are the layer most likely to carry an old tuning knob, so the redirect the file
+/// and env layers print has to reach them too.
+#[test]
+fn a_removed_key_inside_a_profile_gets_the_same_redirect() {
+    let sb = Sandbox::new();
+    let path = sb.write(
+        "profile_removed.toml",
+        "[profiles.big]\n\"limits.max_parallel\" = 8\n",
+    );
+    let text = err_text(
+        &sb.load(Some(&path), Some("big"))
+            .expect_err("a removed key in a profile is refused"),
+    );
+    assert!(text.contains("profiles.big"), "{text}");
+    assert!(text.contains("max_parallel"), "{text}");
+    assert!(text.contains("accounts[].max_concurrency"), "{text}");
+}
+
 /// A config that only sets the new §4.8 keys within their valid ranges loads clean.
 #[test]
 fn new_dispatch_and_provider_keys_accept_valid_values() {

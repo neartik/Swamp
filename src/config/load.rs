@@ -234,9 +234,9 @@ pub fn apply_profile(s: &mut Schema, profile: &str) -> Result<(), SwampError> {
         let path: Vec<String> = dotted.split('.').map(str::to_owned).collect();
         set_path(table, &path, v);
     }
-    *s = value
-        .try_into()
-        .map_err(|e| SwampError::ConfigInvalid(format!("  profiles.{profile}: {e}")))?;
+    *s = value.try_into().map_err(|e| {
+        SwampError::ConfigInvalid(format!("  profiles.{profile}: {e}{}", removed_key_hint(&e)))
+    })?;
     Ok(())
 }
 

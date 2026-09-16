@@ -1357,7 +1357,8 @@ pub struct Account {
     pub exec: String,                    // claude-main, codex-alt, ...
     pub env: BTreeMap<String, String>,   // e.g. CLAUDE_CONFIG_DIR; never a credential
     pub weight: u32,
-    pub max_concurrency: usize,
+    /// Unset is unlimited: the only real ceiling is the one a subscription imposes.
+    pub max_concurrency: Option<usize>,
 }
 
 /// Every field is `#[serde(default)]`: a hand-written or older `~/.swamp/accounts.json` has to
@@ -1785,7 +1786,13 @@ pub enum JournalEvent {
                    files: Vec<FileChange>, unparsed_lines: u32 },
     AccountHealth { account: AccountId, health: Health,
                     #[serde(with = "time::serde::rfc3339::option")] cooldown_until: Option<OffsetDateTime>,
-                    quota: Option<RateLimitSnapshot> },
+                    quota: Option<RateLimitSnapshot>,
+                    #[serde(with = "time::serde::rfc3339::option")] quota_observed_at: Option<OffsetDateTime>,
+                    quota_source: Option<QuotaSource> },
+    /// Emitted on every commit_usage and on every window roll, so `swamp replay --reparse`
+    /// re-derives token counters from the journal like everything else.
+    AccountUsage { account: AccountId, window: Usage, lifetime: Usage,
+                   window_key: Option<WindowKey>, rolled: bool, source: Option<QuotaSource> },
     BrainTurn { role: TurnRole, text: String },
     BrainToolCall { tool: String, args_sha256: String, args_path: Utf8PathBuf },
     Adopted { into: String, commit: String, conflicts: Vec<Utf8PathBuf> },
@@ -2084,8 +2091,11 @@ providers.anthropic (claude-cli)
 providers.openai (codex-cli)
   ok    codex-main  -> ~/bin/codex-main    wrapper -> codex-cli 0.15.x
           auth: ChatGPT subscription   CODEX_HOME=~/.codex-main
-  note  codex exec reports no cost and no quota telemetry.
-          [pricing] is set, so OpenAI node costs render as estimates.
+
+quota (one line per account, from the last persisted snapshot; no network)
+  ok    providers/claude-main/quota   quota telemetry live  5h 13%  7d 5%  observed 57s ago
+  WARN  providers/claude-alt/quota    no quota source; tokens only, utilization is estimated
+  note  providers/codex-main/quota    quota via app-server  7d 32%  observed 57s ago
 
 protocol
   ok    claude stream-json fixtures parse   (5/5 golden lines)
@@ -2102,7 +2112,7 @@ config
           providers.anthropic.worker.allow_tools. ("auto" is not the fix: it denies
           the file writes instead.) The same check covers [brain].
 
-2 warnings, 1 error.
+3 warnings, 1 error.
 ```
 
 The most valuable check is `accounts/collision`. Two "accounts" that are one subscription is silent,
@@ -2111,6 +2121,13 @@ canonicalizes each `exec` and pairs it with that account's own `env` map, then e
 accounts share the pair. It does not execute the wrapper, so a config dir exported *inside* a
 wrapper script is invisible to it: declare the config dir in the account's `env` map as well, or the
 check has nothing to compare.
+
+`providers/<account>/quota` is one check per configured account, read from the last persisted
+snapshot with no network: it names the provenance of that snapshot (`Telemetry` is `ok`, `Rollout`
+and `AppServer` are `note`), quotes the 5h and 7d percentages still current, and says how long ago
+the reading landed. An account with neither telemetry nor an out-of-band source WARNs, because
+dispatch is then balancing it on token share alone and every percentage it shows is Swamp's own
+arithmetic.
 
 `--probe` sends a one-token prompt through each configured account and asserts the stream still
 yields a terminal `Final` the adapter classifies as success. Run it after every CLI upgrade; it is the
@@ -2373,7 +2390,8 @@ duplicate account ids; `brain.account` not belonging to `brain.provider`; a tier
 any provider that could serve it; unparseable regex; `max_concurrency = 0`;
 `quota_warn_at >= quota_stop_at` (which must also hold for `penalised`'s denominator to be > 0);
 `workspace.root` inside `.swamp`; `dispatch.weights.*` finite and non-negative;
-`dispatch.quota_max_age >= 10s`; `dispatch.near_exhaustion_penalty >= 0`;
+`dispatch.quota_max_age >= 10s`; `dispatch.near_exhaustion_penalty` finite and non-negative (NaN
+would make `penalised` NaN and tie every score);
 `providers.*.estimated_window` and `estimated_window_tokens` set together; any `--dangerously-*` in
 `worker.args` without `limits.unsafe_ack = true`.
 

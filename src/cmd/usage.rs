@@ -21,7 +21,7 @@ pub async fn run(ctx: &Ctx, args: &UsageArgs) -> anyhow::Result<i32> {
     let mut state = persist::load_state(&path)?;
 
     if args.probe {
-        let probed = probe_all(ctx).await;
+        let probed = probe_all(ctx, &state).await;
         if !probed.is_empty() {
             let now = OffsetDateTime::now_utc();
             let warn_at = Scoring::from_config(&ctx.cfg).warn_at;
@@ -93,7 +93,7 @@ type Probed = (
 /// error. Anthropic has no out-of-band source: its telemetry only arrives inside a worker
 /// stream, so it is not probed here. Returns the readings rather than writing them, so the
 /// caller can apply them to the file's own entries instead of to a pre-probe copy.
-async fn probe_all(ctx: &Ctx) -> Vec<Probed> {
+async fn probe_all(ctx: &Ctx, state: &persist::StateMap) -> Vec<Probed> {
     let mut out = Vec::new();
     // `providers.openai.quota_source` is not a dispatch-only setting: "none" and "rollout"
     // both mean "do not spawn an app-server", whoever is asking.
@@ -108,6 +108,11 @@ async fn probe_all(ctx: &Ctx) -> Vec<Probed> {
     {
         let env = expand_env(&a.env);
         let model = codex_quota::quota_model(&ctx.cfg, &a.id);
+        let recorded = state
+            .get(&a.id)
+            .and_then(|s| s.quota.as_ref())
+            .and_then(|q| q.limit_id.clone());
+        let pinned = codex_quota::probe_limit_id(&ctx.cfg, &a.id, recorded.as_deref());
         match tokio::time::timeout(
             codex_quota::PROBE_TIMEOUT,
             codex_quota::read_rate_limits(&a.exec, &env),
@@ -115,7 +120,7 @@ async fn probe_all(ctx: &Ctx) -> Vec<Probed> {
         .await
         {
             Ok(Ok(read)) => {
-                if let Some(snap) = read.select(a.limit_id.as_deref(), model.as_deref()) {
+                if let Some(snap) = read.select(pinned.as_deref(), model.as_deref()) {
                     out.push((a.id.clone(), read.buckets.clone(), snap));
                 }
             }

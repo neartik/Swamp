@@ -121,11 +121,11 @@ pub fn problems(cfg: &Config) -> Vec<Problem> {
     if cfg
         .dispatch
         .near_exhaustion_penalty
-        .is_some_and(|p| p < 0.0)
+        .is_some_and(|p| !(p.is_finite() && p >= 0.0))
     {
         push(
             "dispatch.near_exhaustion_penalty".into(),
-            "must be non-negative".to_string(),
+            "must be finite and non-negative".to_string(),
         );
     }
     if let Some(fsync) = cfg.journal.fsync.as_deref()
