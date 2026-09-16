@@ -86,6 +86,8 @@ fsync         = "barrier"         # always | barrier | interval:250ms | never
 max_line_bytes = 8388608          # a base64 blob on one line must truncate, not OOM
 keep_runs     = 200
 keep_runs_for = "30d"
+# These two ship as built-in defaults; listing them here replaces that list rather than adding
+# to it, and an empty list cannot clear it.
 redact = [
   '(?i)(api[_-]?key|authorization|bearer|secret|password)\s*[:=]\s*\S+',
   'sk-[A-Za-z0-9_\-]{20,}',
@@ -133,8 +135,9 @@ estimated_window_tokens = 0        # 0 = no estimate, render "-"
   # `codex exec` has no --append-system-prompt: the worker role, and this file if it is set,
   # ride at the head of the prompt on stdin instead.
   # system_prompt_file = ".swamp/worker.md"
-  # `codex exec` has NO -a/--ask-for-approval; that is top-level only. Use the config override.
-  args = ["-c", "approval_policy=\"never\""]
+  # `codex exec` has NO -a/--ask-for-approval; that is top-level only, so Swamp always passes
+  # `-c approval_policy="never"` itself (src/worker/codex.rs). Do not repeat it here.
+  args = []
   readonly_args = ["-s", "read-only"]
 
 # ---------------------------------------------------------------- accounts

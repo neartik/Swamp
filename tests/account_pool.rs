@@ -808,3 +808,86 @@ async fn persisting_from_a_runtime_thread_does_not_park_it() {
     let state = load_state(&h.state_path).expect("state file");
     assert!(state[&id("main")].quota.is_some());
 }
+
+/// The brain holds exactly one slot. Excusing every in-flight slot on its account turned a
+/// momentarily full pool into a permanent `Exhausted`, which fires a provider switch.
+#[tokio::test]
+async fn a_worker_held_slot_on_the_brains_account_still_reads_as_busy() {
+    let h = harness(
+        r#"
+[brain]
+reserve_brain_slot = false
+[providers.anthropic]
+models = { mid = "tier-mid" }
+[[accounts]]
+id = "main"
+provider = "anthropic"
+exec = "claude-main"
+max_concurrency = 2
+"#,
+    )
+    .await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let _brain = h
+        .pool
+        .acquire_brain(Provider::Anthropic, Some(&id("main")), deadline)
+        .await
+        .expect("a brain lease");
+    let worker = acquire(&h.pool).await.expect("a worker lease");
+
+    let started = std::time::Instant::now();
+    let got = h
+        .pool
+        .acquire(Provider::Anthropic, &HashSet::new(), soon())
+        .await;
+    let why = got.as_ref().err().map(|e| format!("{e:?}"));
+    assert!(
+        matches!(got, Err(NoCapacity::Saturated)),
+        "a slot a worker is about to return is busy, not exhausted: {why:?}"
+    );
+    assert!(started.elapsed() >= Duration::from_millis(100), "it waited");
+    assert!(
+        h.pool
+            .all_exhausted(Provider::Anthropic, &HashSet::new())
+            .is_none(),
+        "a busy pool is not a reason to switch provider"
+    );
+    drop(worker);
+}
+
+/// A provider gate stamps `AuthBroken`, which `score` honours on its own. A later reading
+/// that lifts the gate has to lift the health word too, or a topped-up account never returns.
+#[tokio::test]
+async fn a_lifted_provider_gate_puts_the_account_back_in_rotation() {
+    let h = harness(TWO_ACCOUNTS).await;
+    h.pool.set_enabled(&id("alt"), false);
+    let mut depleted = quota(0.1);
+    depleted.reached = Some(swamp::model::core::LimitReached::CreditsDepleted);
+    depleted.ordinary_usage_allowed = Some(false);
+    h.pool.observe_quota(&id("main"), depleted);
+    assert_eq!(health_of(&h.pool, "main"), Health::AuthBroken);
+
+    let mut refilled = quota(0.1);
+    refilled.ordinary_usage_allowed = Some(true);
+    h.pool.observe_quota(&id("main"), refilled);
+    assert_eq!(health_of(&h.pool, "main"), Health::Healthy);
+    assert_eq!(acquire(&h.pool).await.expect("lease").account, id("main"));
+}
+
+/// A real `AuthExpired` was never gated by the provider, so a clean quota reading must not
+/// talk the pool out of it.
+#[tokio::test]
+async fn a_quota_reading_never_clears_a_real_auth_failure() {
+    let h = harness(TWO_ACCOUNTS).await;
+    h.pool.report(
+        &id("main"),
+        Some(&Failure::AuthExpired {
+            detail: "run claude login".into(),
+            detected_by: Detector::Pattern,
+        }),
+        None,
+    );
+    assert_eq!(health_of(&h.pool, "main"), Health::AuthBroken);
+    h.pool.observe_quota(&id("main"), quota(0.1));
+    assert_eq!(health_of(&h.pool, "main"), Health::AuthBroken);
+}

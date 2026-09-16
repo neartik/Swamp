@@ -1043,3 +1043,155 @@ exec = "/opt/tooling/pnpm/global/5/node_modules/.bin/claude-main"
     swamp::config::validate::validate(&mut cfg).expect("fixture config is valid");
     cfg
 }
+
+/// The header and the account row were the only lines the renderer never bounded, so a narrow
+/// terminal soft-wrapped each of them and the table read as two interleaved tables.
+#[test]
+fn no_rendered_line_is_wider_than_the_terminal() {
+    let rows = vec![
+        with_seven_day(
+            row("claude-main", Provider::Anthropic, Health::Healthy),
+            0.64,
+            true,
+        ),
+        row("codex-main", Provider::Openai, Health::Degraded),
+    ];
+    for width in [30u16, 40, 50, 62, 80, 100] {
+        let lines = usage::render(&rows, width, &Theme::plain(), MAX_AGE);
+        for line in swamp::ui::chat::blocks::text_of(&lines) {
+            assert!(
+                line.chars().count() <= width as usize,
+                "at width {width} a line is {} columns: {line:?}",
+                line.chars().count()
+            );
+        }
+    }
+}
+
+/// USAGE 3.2: `swamp accounts` and `swamp usage` share one health word, so a `Cooling` entry
+/// whose timer has elapsed cannot read `cooling` on one surface and `healthy` on the other.
+#[test]
+fn an_elapsed_cooldown_reads_healthy_on_every_surface() {
+    let now = OffsetDateTime::now_utc();
+    let mut cooling = row("claude-alt", Provider::Anthropic, Health::Cooling);
+    cooling.cooldown_until = Some(now - time::Duration::hours(1));
+
+    let body = screen(
+        &usage::render(
+            std::slice::from_ref(&cooling),
+            100,
+            &Theme::plain(),
+            MAX_AGE,
+        ),
+        100,
+    );
+    assert!(body.contains("healthy"), "{body}");
+    assert_eq!(
+        swamp::ui::watch::health_word(swamp::ui::watch::shown_health(
+            cooling.health,
+            cooling.cooldown_until,
+            now
+        )),
+        "healthy",
+        "`swamp accounts` reads the same normalisation"
+    );
+    assert_eq!(
+        swamp::ui::watch::health_word(swamp::ui::watch::shown_health(
+            Health::Cooling,
+            Some(now + time::Duration::minutes(5)),
+            now
+        )),
+        "cooling",
+        "a live timer still cools"
+    );
+}
+
+/// A cooldown routinely crosses midnight UTC: `cooldown.max` defaults to six hours and a
+/// provider reset is adopted verbatim. A bare HH:MM then reads as a time in the past.
+#[test]
+fn a_cooldown_that_crosses_midnight_names_its_day() {
+    let now = OffsetDateTime::now_utc();
+    let until = now + time::Duration::hours(26);
+    let mut cooling = row("claude-main", Provider::Anthropic, Health::Cooling);
+    cooling.cooldown_until = Some(until);
+    cooling.quota = Some(RateLimitSnapshot {
+        reached: Some(LimitReached::RateLimit),
+        ..RateLimitSnapshot::default()
+    });
+
+    let body = screen(
+        &usage::render(
+            std::slice::from_ref(&cooling),
+            100,
+            &Theme::plain(),
+            MAX_AGE,
+        ),
+        100,
+    );
+    let expected = swamp::ui::fmt::clock_day(until, now);
+    assert!(
+        expected.contains(" on "),
+        "the fixture crosses a day: {expected}"
+    );
+    assert!(body.contains(&format!("until {expected}")), "{body}");
+
+    let soon = now + time::Duration::minutes(5);
+    let mut near = row("claude-alt", Provider::Anthropic, Health::Cooling);
+    near.cooldown_until = Some(soon);
+    let body = screen(
+        &usage::render(std::slice::from_ref(&near), 100, &Theme::plain(), MAX_AGE),
+        100,
+    );
+    assert!(
+        body.contains(&format!("until {}", swamp::ui::fmt::clock_day(soon, now))),
+        "a reset later today stays a bare clock: {body}"
+    );
+}
+
+/// Below 78 columns the single percentage cell is the tightest window, which can be the
+/// minute one; the continuation rows must not then state it a second time.
+#[test]
+fn the_collapsed_cell_and_the_continuation_rows_never_repeat_a_window() {
+    let now = OffsetDateTime::now_utc();
+    let mut r = row("claude-main", Provider::Anthropic, Health::Degraded);
+    r.quota = Some(RateLimitSnapshot {
+        status: LimitStatus::Allowed,
+        windows: vec![
+            LimitWindow {
+                scope: LimitScope::Minute,
+                utilization: 0.95,
+                resets_at: Some(now + time::Duration::seconds(38)),
+                window_minutes: Some(1),
+                measured: true,
+            },
+            LimitWindow {
+                scope: LimitScope::SevenDay,
+                utilization: 0.10,
+                resets_at: Some(now + time::Duration::days(3)),
+                window_minutes: Some(10080),
+                measured: true,
+            },
+        ],
+        ..RateLimitSnapshot::default()
+    });
+
+    let collapsed = screen(
+        &usage::render(std::slice::from_ref(&r), 70, &Theme::plain(), MAX_AGE),
+        70,
+    );
+    assert_eq!(
+        collapsed.matches("95%").count(),
+        1,
+        "the minute window is the collapsed cell, not a row as well: {collapsed}"
+    );
+    assert!(!collapsed.contains("minute"), "{collapsed}");
+
+    let wide = screen(
+        &usage::render(std::slice::from_ref(&r), 100, &Theme::plain(), MAX_AGE),
+        100,
+    );
+    assert!(
+        wide.contains("minute 95%"),
+        "the named columns have no minute, so the row survives: {wide}"
+    );
+}

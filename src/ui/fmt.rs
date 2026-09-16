@@ -162,7 +162,7 @@ pub fn short_sha(s: &str) -> String {
 
 /// "02:30", or "02:30 on 2026-09-22" once the reset is not on today's UTC date: a seven-day
 /// window resets days out, and a bare wall clock names no day at all.
-fn clock_day(at: OffsetDateTime, now: OffsetDateTime) -> String {
+pub fn clock_day(at: OffsetDateTime, now: OffsetDateTime) -> String {
     let at = at.to_offset(time::UtcOffset::UTC);
     if at.date() == now.to_offset(time::UtcOffset::UTC).date() {
         return clock_hm(at);

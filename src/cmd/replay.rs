@@ -147,6 +147,7 @@ fn from_result(ctx: &Ctx, paths: &RunPaths, r: &serde_json::Value) -> Option<Nod
 /// raw streams instead of losing it.
 async fn rewrite(ctx: &Ctx, paths: &RunPaths, records: Vec<NodeRecord>) -> anyhow::Result<u32> {
     let journal = paths.journal();
+    let carried = account_lines(&journal);
     if journal.is_file() {
         std::fs::rename(&journal, journal.with_extension("jsonl.prev"))?;
     }
@@ -169,6 +170,11 @@ async fn rewrite(ctx: &Ctx, paths: &RunPaths, records: Vec<NodeRecord>) -> anyho
         },
     );
     writer.append(&header).await?;
+    for mut l in carried {
+        l.seq = seq;
+        seq += 1;
+        writer.append(&l).await?;
+    }
 
     let mut count = 0;
     let mut totals = Usage::default();
@@ -292,6 +298,34 @@ async fn rewrite(ctx: &Ctx, paths: &RunPaths, records: Vec<NodeRecord>) -> anyho
     writer.append(&done).await?;
     writer.sync().await?;
     Ok(count)
+}
+
+/// Account history no raw stream carries: which account served the run, its health and
+/// cooldown, and the pool's token counters. The rewrite replaces the journal, so these lines
+/// are copied across it verbatim instead of being dropped with it.
+fn account_lines(journal: &camino::Utf8Path) -> Vec<JournalLine> {
+    #[derive(Default)]
+    struct Accounts(Vec<JournalLine>);
+    impl crate::journal::fold::Projection for Accounts {
+        type Out = Vec<JournalLine>;
+        fn apply(&mut self, l: &JournalLine) {
+            if matches!(
+                l.event,
+                JournalEvent::AccountSelected { .. }
+                    | JournalEvent::AccountHealth { .. }
+                    | JournalEvent::AccountUsage { .. }
+            ) {
+                self.0.push(l.clone());
+            }
+        }
+        fn finish(self) -> Vec<JournalLine> {
+            self.0
+        }
+    }
+    if !journal.is_file() {
+        return Vec::new();
+    }
+    crate::journal::reader::replay(journal, Accounts::default()).unwrap_or_default()
 }
 
 fn line(

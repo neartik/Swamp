@@ -79,6 +79,8 @@ async fn dispatch(cli: &Cli, root: &Utf8Path) -> Result<i32> {
         paths: Arc::new(paths),
         color: !cli.no_color,
         json: cli.json,
+        config_arg: cli.config.clone(),
+        profile: cli.profile.clone(),
     };
 
     let default_chat = ChatArgs::default();

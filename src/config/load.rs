@@ -32,6 +32,8 @@ reserve_brain_slot = true
 permission_mode = "acceptEdits"
 include_partial_messages = true
 system_prompt_file = ".swamp/brain.md"
+allow_tools = ["Read", "Grep", "Glob", "Bash"]
+deny_tools = ["Edit", "Write", "MultiEdit", "NotebookEdit"]
 
 [dispatch]
 policy = "quota-aware"
@@ -79,6 +81,10 @@ fsync = "barrier"
 max_line_bytes = 8388608
 keep_runs = 200
 keep_runs_for = "30d"
+redact = [
+  '(?i)(api[_-]?key|authorization|bearer|secret|password)\s*[:=]\s*\S+',
+  'sk-[A-Za-z0-9_\-]{20,}',
+]
 
 [ui]
 refresh_hz = 20

@@ -399,3 +399,36 @@ fn a_codex_rate_limits_payload_is_one_seven_day_window() {
         Some(quota.worst_utilization())
     );
 }
+
+/// swamp.example.toml used to hand the user the same `-c approval_policy="never"` the adapter
+/// already emits, so copying it doubled the override on every codex argv.
+#[test]
+fn the_example_config_does_not_repeat_the_approval_override() {
+    let path = Utf8PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("swamp.example.toml");
+    let text = std::fs::read_to_string(&path).expect("swamp.example.toml");
+    let schema: swamp::config::Schema = toml::from_str(&text).expect("the example parses");
+    let cfg = swamp::config::resolve::from_schema(swamp::config::load::merge(vec![
+        swamp::config::load::default_layer(),
+        swamp::config::load::Layer {
+            origin: "example".into(),
+            schema,
+        },
+    ]));
+    let worker = &cfg
+        .providers
+        .get(&Provider::Openai)
+        .expect("the example configures the openai provider")
+        .worker;
+
+    let (_tmp, repo) = common::tmp_repo();
+    let mut s = spec(repo.as_str());
+    s.extra_args = worker.args.clone();
+    let argv = argv_of(&s);
+    assert_eq!(
+        argv.iter()
+            .filter(|a| a.starts_with("approval_policy="))
+            .count(),
+        1,
+        "the adapter owns the override: {argv:?}"
+    );
+}

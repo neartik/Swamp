@@ -1595,8 +1595,11 @@ that destroys a user's quota in ten minutes:
 PROVIDER   ACCOUNT  EXEC         HEALTH    INFLIGHT  5H    7D    COOLDOWN  NODES   $
 anthropic  main     claude-main  degraded     2/3    0.06  0.91  -          214  ~12.40
 anthropic  alt      claude-alt   cooling      0/2    1.00  0.72  in 41m      88   ~4.10
-openai     main     codex-main   healthy      0/2     -     -    -           31  ~1.90 est
+openai     codex    codex-main   healthy      0/2     -     -    -           31  ~1.90 est
 ```
+
+Account ids are unique machine-wide, not per provider: `validate::problems` rejects a second
+`main` whatever provider it names, and `~/.swamp/accounts.json` is keyed by the bare id too.
 
 The 5H/7D columns are blank for OpenAI when it has no live quota source at all; `USAGE.md` §2.3's rollout
 tailer and app-server probe give it one on most setups, which is exactly what makes `QuotaAware`
@@ -1984,10 +1987,13 @@ providers.anthropic (claude-cli)
           auth: subscription (apiKeySource=none)   CLAUDE_CONFIG_DIR=~/.claude
           tiers: high=opus  mid=sonnet  low=haiku   probe 1.4s
   ok    claude-alt  -> ~/bin/claude-alt    CLAUDE_CONFIG_DIR=~/.claude-alt
-  ERROR claude-work -> /opt/homebrew/bin/claude
-          not a wrapper and CLAUDE_CONFIG_DIR is unset: this is the SAME account as
-          claude-main. Dispatch would double-spend one quota while reporting two
-          healthy accounts, and failover between them would be a silent no-op.
+  ok    claude-work -> ~/bin/claude-alt     CLAUDE_CONFIG_DIR=~/.claude-alt
+  ERROR accounts/collision
+          accounts claude-alt and claude-work resolve to the same binary with the same
+          effective config dir (~/bin/claude-alt env CLAUDE_CONFIG_DIR=~/.claude-alt):
+          they are ONE subscription, so dispatch would double-spend one quota and
+          failover between them is a silent no-op. Give each account a wrapper that
+          sets its own config dir.
 
 providers.openai (codex-cli)
   ok    codex-main  -> ~/bin/codex-main    wrapper -> codex-cli 0.15.x
@@ -2013,10 +2019,12 @@ config
 2 warnings, 1 error.
 ```
 
-The most valuable check is the third provider line. Two "accounts" that resolve to the same config
-dir is silent, expensive, and otherwise only discovered when one quota dies twice as fast as
-expected. `doctor` resolves each `exec`, runs it with a probe, compares effective config dirs, and
-errors when two accounts collide.
+The most valuable check is `accounts/collision`. Two "accounts" that are one subscription is silent,
+expensive, and otherwise only discovered when one quota dies twice as fast as expected. `doctor`
+canonicalizes each `exec` and pairs it with that account's own `env` map, then errors when two
+accounts share the pair. It does not execute the wrapper, so a config dir exported *inside* a
+wrapper script is invisible to it: declare the config dir in the account's `env` map as well, or the
+check has nothing to compare.
 
 `--probe` sends a one-token prompt through each configured account and asserts the stream still
 yields a terminal `Final` the adapter classifies as success. Run it after every CLI upgrade; it is the
@@ -2032,8 +2040,12 @@ one that accepts one belongs to a live run and is kept. The two counts are repor
 
 ## 10. Config format
 
-Layered, lowest to highest: built-in defaults, `~/.config/swamp/config.toml`,
-`<repo>/.swamp/config.toml`, `SWAMP_*` env, `--config`, CLI flags.
+Layered, lowest to highest: built-in defaults, the user config file,
+`<repo>/.swamp/config.toml`, `SWAMP_*` env, `--config`, CLI flags. The user config file is
+`$SWAMP_CONFIG_DIR/config.toml` if that variable is set, else `$XDG_CONFIG_HOME/swamp/config.toml`,
+else `~/.config/swamp/config.toml` (`load::user_config_path`). Neither variable is a config key:
+they redirect which file is read, which is why `swamp config path` and `doctor`'s `config/sources`
+line both name the resolved path.
 `swamp config show --effective` prints the merged result and which layers it was built from.
 
 ```toml
@@ -2125,6 +2137,8 @@ fsync         = "barrier"         # always | barrier | interval:250ms | never
 max_line_bytes = 8388608          # a base64 blob on one line must truncate, not OOM
 keep_runs     = 200
 keep_runs_for = "30d"
+# These two ship as built-in defaults; listing them here replaces that list rather than adding
+# to it, and an empty list cannot clear it.
 redact = [
   '(?i)(api[_-]?key|authorization|bearer|secret|password)\s*[:=]\s*\S+',
   'sk-[A-Za-z0-9_\-]{20,}',
@@ -2172,8 +2186,9 @@ estimated_window_tokens = 0        # 0 = no estimate, render "-"
   # `codex exec` has no --append-system-prompt: the worker role, and this file if it is set,
   # ride at the head of the prompt on stdin instead.
   # system_prompt_file = ".swamp/worker.md"
-  # `codex exec` has NO -a/--ask-for-approval; that is top-level only. Use the config override.
-  args = ["-c", "approval_policy=\"never\""]
+  # `codex exec` has NO -a/--ask-for-approval; that is top-level only, so Swamp always passes
+  # `-c approval_policy="never"` itself (src/worker/codex.rs). Do not repeat it here.
+  args = []
   readonly_args = ["-s", "read-only"]
 
 # ---------------------------------------------------------------- accounts
@@ -2305,7 +2320,6 @@ clap_complete = "4.5"
 serde        = { version = "1.0", features = ["derive", "rc"] }
 serde_json   = { version = "1.0", features = ["raw_value", "preserve_order"] }
 toml         = "0.9"
-toml_edit    = "0.23"                                         # span-accurate config errors
 humantime-serde = "1.1"                                       # "25m" / "6h" in TOML
 
 # errors and logging
@@ -2333,12 +2347,10 @@ shell-words = "1.1"
 # matching and text
 regex         = "1.11"                                        # RegexSet for failure patterns + redaction
 smallvec      = { version = "1.13", features = ["union", "serde"] }
-indexmap      = { version = "2.7", features = ["serde"] }
 parking_lot   = "0.12"
 rand          = "0.9"                                         # retry jitter
 unicode-width = "0.2"
 textwrap      = "0.16"
-owo-colors    = "4.1"
 
 # TUI
 ratatui   = { version = "0.29", features = ["crossterm"] }
@@ -2523,8 +2535,10 @@ and deterministic.
 
 14. **Secrets in the journal.** Worker output can echo `.env` contents or a token from a shell
     command. `journal.redact` regexes are applied at the single writer, covering both `journal.jsonl`
-    and the raw sink, so there is one place to audit. Not airtight against a novel secret format;
-    `.swamp/` should be treated as sensitive and is git-excluded on first run.
+    and the raw sink, so there is one place to audit. Two patterns ship in the built-in defaults
+    (`src/config/load.rs`), so redaction is on before any config file exists; a user's own
+    `journal.redact` replaces them. Not airtight against a novel secret format; `.swamp/` should be
+    treated as sensitive and is git-excluded on first run.
 
 15. **Unix only in v1.** Process groups, `killpg`, `setsid`, UDS and `kill(pid, 0)` are POSIX. The
     platform-specific code is confined to three files, so a Windows port is bounded, but it is out of

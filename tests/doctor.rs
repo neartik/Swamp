@@ -475,8 +475,8 @@ fn the_design_doc_doctor_sample_matches_what_the_code_emits() {
         .and_then(|rest| rest.split("```").next())
         .expect("the §9 doctor sample");
     assert!(
-        sample.contains(&format!("{} claude-work", Level::Error.label())),
-        "the collision is an Error in src/doctor.rs: {sample}"
+        sample.contains(&format!("{} accounts/collision", Level::Error.label())),
+        "the collision is an Error on `accounts/collision` in src/doctor.rs: {sample}"
     );
     assert!(
         !sample.contains("rustc"),
@@ -489,5 +489,89 @@ fn the_design_doc_doctor_sample_matches_what_the_code_emits() {
     assert!(
         sample.trim_end().ends_with("2 warnings, 1 error."),
         "the sample has two WARN lines and one ERROR line: {sample}"
+    );
+}
+
+/// A window whose reset has passed measures an allowance that already rolled: `score` and the
+/// usage table both drop it, so doctor must not quote it as evidence the account is spent.
+#[tokio::test]
+async fn doctor_never_quotes_a_window_whose_reset_has_passed() {
+    use swamp::dispatch::account::{AccountState, QuotaSource};
+    use swamp::dispatch::persist::{StateMap, save_state};
+    use swamp::model::core::{AccountId, LimitScope, LimitStatus, LimitWindow, RateLimitSnapshot};
+    use time::OffsetDateTime;
+
+    let f = Fixture::new();
+    let cfg = healthy(&f);
+    let now = OffsetDateTime::now_utc();
+    let window = |resets_at| LimitWindow {
+        scope: LimitScope::SevenDay,
+        utilization: 0.98,
+        resets_at: Some(resets_at),
+        window_minutes: Some(10_080),
+        measured: true,
+    };
+    let snapshot = |resets_at| RateLimitSnapshot {
+        status: LimitStatus::Allowed,
+        windows: vec![window(resets_at)],
+        ..RateLimitSnapshot::default()
+    };
+
+    let mut state = StateMap::new();
+    let mut stale = AccountState::default();
+    stale.apply_quota(
+        snapshot(now - time::Duration::days(2)),
+        QuotaSource::Telemetry,
+        now,
+    );
+    state.insert(AccountId("main".into()), stale);
+    let mut live = AccountState::default();
+    live.apply_quota(
+        snapshot(now + time::Duration::days(2)),
+        QuotaSource::Telemetry,
+        now,
+    );
+    state.insert(AccountId("alt".into()), live);
+    std::fs::create_dir_all(&f.paths.home_swamp).expect("home dir");
+    save_state(&f.paths.accounts_state(), &state).expect("state file");
+
+    let out = checks(&cfg, &f.paths, false, false).await;
+    let line = |id: &str| {
+        out.iter()
+            .find(|c| c.name == format!("providers/{id}/quota"))
+            .map(|c| c.detail.clone())
+            .expect("a quota line")
+    };
+    assert!(
+        !line("main").contains("98%"),
+        "a rolled window is not evidence: {}",
+        line("main")
+    );
+    assert!(
+        line("alt").contains("7d 98%"),
+        "a live window is still reported: {}",
+        line("alt")
+    );
+}
+
+/// SWAMP_CONFIG_DIR and XDG_CONFIG_HOME move the user layer somewhere the docs never name, so
+/// "no config file was found" has to say which paths were tried.
+#[tokio::test]
+async fn config_sources_names_the_user_path_it_resolved() {
+    let f = Fixture::new();
+    let cfg = healthy(&f);
+    assert!(cfg.sources.is_empty(), "the fixture loads no file");
+
+    let out = checks(&cfg, &f.paths, false, false).await;
+    let line = out
+        .iter()
+        .find(|c| c.name == "config/sources")
+        .expect("the config/sources check");
+    let expected = swamp::config::load::user_config_path().expect("a user config path");
+    assert!(line.detail.contains(expected.as_str()), "{}", line.detail);
+    assert!(
+        line.detail.contains("<repo>/.swamp/config.toml"),
+        "{}",
+        line.detail
     );
 }

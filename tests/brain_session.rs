@@ -427,3 +427,76 @@ fn one_shot_mode_asks_for_a_decision_and_a_command() {
         "the interactive prompt is unchanged"
     );
 }
+
+/// codex's `turn.completed.usage` is a thread total, not this turn's delta. Absorbing it every
+/// turn re-counted every earlier turn, so a long chat credited its account several times over.
+#[tokio::test]
+async fn a_codex_thread_total_is_never_added_to_itself() {
+    let f = Fixture::new(Provider::Openai, FAKE_CODEX, "codex-stream-sample.jsonl").await;
+    let mut brain = f.brain(Provider::Openai).await;
+    brain.start().await.expect("start");
+    for text in ["first", "second", "third"] {
+        brain.send(text).await.expect("a turn");
+        turn(&mut brain).await;
+    }
+
+    let mut usage = Vec::new();
+    for _ in 0..100 {
+        usage = f
+            .journal_lines()
+            .into_iter()
+            .filter(|l| l["ev"] == "node_usage")
+            .collect();
+        if usage.len() >= 3 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(usage.len(), 3, "one per turn: {usage:#?}");
+    assert_eq!(
+        usage[0]["usage"], usage[2]["usage"],
+        "three replays of one thread total are still that total: {usage:#?}"
+    );
+
+    Box::new(brain).shutdown().await.expect("shutdown");
+}
+
+/// The claude brain's `result` line carries that turn's own totals, so they still accumulate.
+#[tokio::test]
+async fn a_claude_turn_total_still_accumulates_across_turns() {
+    let f = Fixture::new(
+        Provider::Anthropic,
+        FAKE_CLAUDE,
+        "claude-stream-sample.jsonl",
+    )
+    .await;
+    let mut brain = f.brain(Provider::Anthropic).await;
+    brain.start().await.expect("start");
+    for text in ["first", "second"] {
+        brain.send(text).await.expect("a turn");
+        turn(&mut brain).await;
+    }
+
+    let mut usage = Vec::new();
+    for _ in 0..100 {
+        usage = f
+            .journal_lines()
+            .into_iter()
+            .filter(|l| l["ev"] == "node_usage")
+            .collect();
+        if usage.len() >= 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(usage.len(), 2, "one per turn: {usage:#?}");
+    let first = usage[0]["usage"]["output_tokens"].as_u64().expect("tokens");
+    let second = usage[1]["usage"]["output_tokens"].as_u64().expect("tokens");
+    assert_eq!(
+        second,
+        first * 2,
+        "two turns of the same stream: {usage:#?}"
+    );
+
+    Box::new(brain).shutdown().await.expect("shutdown");
+}

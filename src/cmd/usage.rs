@@ -3,6 +3,8 @@ use crate::cmd::Ctx;
 use crate::config::resolve::expand_env;
 use crate::dispatch::account::{AccountState, QuotaSource};
 use crate::dispatch::persist;
+use crate::dispatch::policy::Scoring;
+use crate::dispatch::pool;
 use crate::model::core::{AccountId, Provider, RateLimitSnapshot};
 use crate::ui::chat::theme::Theme;
 use crate::ui::usage;
@@ -22,13 +24,18 @@ pub async fn run(ctx: &Ctx, args: &UsageArgs) -> anyhow::Result<i32> {
         let probed = probe_all(ctx).await;
         if !probed.is_empty() {
             let now = OffsetDateTime::now_utc();
+            let warn_at = Scoring::from_config(&ctx.cfg).warn_at;
             let ids: Vec<AccountId> = probed.iter().map(|(id, ..)| id.clone()).collect();
             state = persist::update_state(&path, &ids, |id, entry| {
                 let Some((_, buckets, snap)) = probed.iter().find(|(p, ..)| p == id) else {
                     return;
                 };
+                let was_gated = pool::hard_gated(entry);
                 entry.apply_buckets(buckets);
                 entry.apply_quota(snap.clone(), QuotaSource::AppServer, now);
+                // The pool re-derives health on every reading it ingests; a probe that skipped
+                // it would print a health word the snapshot under it contradicts.
+                pool::health_after_quota(entry, was_gated, warn_at);
                 entry.updated_at = Some(now);
             })
             .unwrap_or(state);

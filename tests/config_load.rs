@@ -818,3 +818,89 @@ fn nothing_promises_a_global_parallelism_cap() {
         err_text(&err)
     );
 }
+
+/// README "Configure" and DESIGN 13.14 both describe the defaults, not swamp.example.toml: the
+/// brain ships the acceptEdits pair that works, and journal redaction is on before any config.
+#[test]
+fn the_built_in_defaults_are_the_policy_the_docs_promise() {
+    let sb = Sandbox::new();
+    let cfg = sb
+        .load(None, None)
+        .expect("defaults alone are a valid config");
+
+    assert!(
+        cfg.brain.allow_tools.iter().any(|t| t == "Bash"),
+        "acceptEdits denies every Bash call unless Bash is allowed: {:?}",
+        cfg.brain.allow_tools
+    );
+    for tool in ["Edit", "Write", "MultiEdit", "NotebookEdit"] {
+        assert!(
+            cfg.brain.deny_tools.iter().any(|t| t == tool),
+            "the brain plans and reads; workers write: {:?}",
+            cfg.brain.deny_tools
+        );
+    }
+
+    let redactor =
+        swamp::journal::Redactor::new(&cfg.journal.redact).expect("the default patterns compile");
+    assert!(!redactor.is_empty(), "redaction is off out of the box");
+    for secret in [
+        "api_key: hunter2-hunter2-hunter2",
+        "Authorization=Bearer abcdefghijklmnopqrst",
+        "token sk-abcdefghijklmnopqrstuvwxyz",
+    ] {
+        let masked = redactor.apply(secret);
+        assert!(masked.contains("[redacted]"), "{secret} -> {masked}");
+    }
+    assert_eq!(
+        redactor.apply("a plain worker line"),
+        "a plain worker line",
+        "ordinary output is untouched"
+    );
+}
+
+/// Account ids are machine-wide unique, not per provider: `~/.swamp/accounts.json` is keyed by
+/// the bare id. DESIGN 6.7's sample table has to stay a configuration swamp would accept.
+#[test]
+fn the_design_accounts_sample_uses_ids_validation_accepts() {
+    let design = std::fs::read_to_string(
+        Utf8PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("docs/DESIGN.md"),
+    )
+    .expect("docs/DESIGN.md");
+    let sample = design
+        .split("PROVIDER   ACCOUNT  EXEC")
+        .nth(1)
+        .and_then(|rest| rest.split("```").next())
+        .expect("the 6.7 accounts sample");
+    let ids: Vec<&str> = sample
+        .lines()
+        .filter_map(|l| l.split_whitespace().nth(1))
+        .collect();
+    assert!(ids.len() >= 3, "the sample has rows: {sample}");
+    let unique: std::collections::BTreeSet<&&str> = ids.iter().collect();
+    assert_eq!(unique.len(), ids.len(), "duplicate account id in {ids:?}");
+
+    let sb = Sandbox::new();
+    sb.repo_config(
+        r#"
+[providers.anthropic]
+models = { high = "opus", mid = "sonnet", low = "haiku" }
+[providers.openai]
+models = { high = "a", mid = "b", low = "c" }
+
+[[accounts]]
+id = "main"
+provider = "anthropic"
+exec = "claude-main"
+
+[[accounts]]
+id = "main"
+provider = "openai"
+exec = "codex-main"
+"#,
+    );
+    let err = sb
+        .load(None, None)
+        .expect_err("two `main` accounts are refused");
+    assert!(err_text(&err).contains("duplicate account id"), "{err}");
+}

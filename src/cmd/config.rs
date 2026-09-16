@@ -56,8 +56,13 @@ pub async fn run(ctx: &Ctx, args: &ConfigArgs) -> anyhow::Result<i32> {
             Ok(0)
         }
         ConfigCmd::Validate => {
-            // Reload from scratch: the in-memory config is already known good.
-            let cfg = Config::load(&ctx.paths.repo, None, None)?;
+            // Reload from scratch, with the invocation's own --config and --profile: a count
+            // and a warning list from a different layer stack describe a different config.
+            let cfg = Config::load(
+                &ctx.paths.repo,
+                ctx.config_arg.as_deref(),
+                ctx.profile.as_deref(),
+            )?;
             let mut text = format!("ok: {} layers\n", cfg.sources.len() + 1);
             for w in &cfg.warnings {
                 text.push_str(&format!("warning: {w}\n"));

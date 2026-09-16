@@ -44,6 +44,10 @@ pub struct Ctx {
     pub paths: Arc<Paths>,
     pub color: bool,
     pub json: bool,
+    /// The invocation's `--config` and `--profile`, so a command that reloads the config
+    /// reloads the same layer stack the rest of the process runs on.
+    pub config_arg: Option<Utf8PathBuf>,
+    pub profile: Option<String>,
 }
 
 impl Ctx {

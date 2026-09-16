@@ -312,6 +312,13 @@ pub async fn run_node(cx: &NodeCtx, mut spec: LaunchSpec, task: &TaskRequest) ->
         if let Some(s) = out.session.as_mut() {
             s.account = lease.account.clone();
         }
+        // A cancelled node was killed by us: the classifier only sees SIGTERM and would retry.
+        // Before the pool hears about it, or our own SIGTERM cools a healthy account.
+        if cx.cancel.is_cancelled() {
+            out.failure = Some(Failure::Cancelled {
+                by: crate::model::core::CancelSource::User,
+            });
+        }
         cx.pool
             .report(&lease.account, out.failure.as_ref(), out.cost);
         // Live telemetry the account pool needs to stop routing BEFORE the provider says no.
@@ -324,12 +331,6 @@ pub async fn run_node(cx: &NodeCtx, mut spec: LaunchSpec, task: &TaskRequest) ->
         if provider == Provider::Openai {
             let thread = out.session.as_ref().map(|s| s.id.clone());
             observe_codex_quota(cx, &lease, &spec.model, thread).await;
-        }
-        // A cancelled node was killed by us: the classifier only sees SIGTERM and would retry.
-        if cx.cancel.is_cancelled() {
-            out.failure = Some(Failure::Cancelled {
-                by: crate::model::core::CancelSource::User,
-            });
         }
 
         record.usage = out.usage;
@@ -419,7 +420,11 @@ pub async fn run_node(cx: &NodeCtx, mut spec: LaunchSpec, task: &TaskRequest) ->
                     spec.session = SessionPlan::Resume(h);
                 }
                 held = Some(lease);
-                tokio::time::sleep(jitter(backoff)).await;
+                tokio::select! {
+                    _ = tokio::time::sleep(jitter(backoff)) => {}
+                    // Holding the account's slot through a backoff nobody is waiting for.
+                    _ = cx.cancel.cancelled() => held = None,
+                }
                 backoff = (backoff * 2).min(MAX_BACKOFF);
                 continue;
             }

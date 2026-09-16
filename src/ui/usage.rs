@@ -161,7 +161,7 @@ pub fn render(
             None => "not in config (drop with swamp accounts reset <id>)".to_owned(),
         };
         out.push(Line::from(theme.span(head, Role::Name)));
-        out.push(header_line(&layout, theme));
+        out.push(header_line(&layout, theme, width));
         for r in group {
             out.extend(account_lines(r, &layout, theme, now, width));
         }
@@ -174,7 +174,7 @@ pub fn render(
     out
 }
 
-fn header_line(l: &Layout, theme: &Theme) -> Line<'static> {
+fn header_line(l: &Layout, theme: &Theme, width: u16) -> Line<'static> {
     let mut cells = Vec::new();
     let account_w = if l.show_health {
         ACCOUNT_W
@@ -202,7 +202,10 @@ fn header_line(l: &Layout, theme: &Theme) -> Line<'static> {
         cells.push(right("COST", COST_W));
     }
     cells.push(right("FLIGHT", FLIGHT_W));
-    Line::from(theme.span(format!("  {}", cells.join(" ")), Role::Meta))
+    Line::from(theme.span(
+        fmt::truncate(&format!("  {}", cells.join(" ")), width as usize),
+        Role::Meta,
+    ))
 }
 
 fn account_lines(
@@ -224,8 +227,10 @@ fn account_lines(
         let name = format!("{glyph} {}", r.account.0);
         cells.push(left(&name, ACCOUNT_W + 2));
     }
+    let mut collapsed = None;
     if l.collapse_resets {
         let w = r.quota.as_ref().and_then(|q| q.tightest_at(now));
+        collapsed = w;
         cells.push(right(&pct_cell(w), PCT_W));
         cells.push(right(&reset_cell(w, now), RESET_W));
     } else {
@@ -252,9 +257,10 @@ fn account_lines(
         .unwrap_or_else(|| "-".to_owned());
     cells.push(right(&format!("{}/{cap}", r.inflight), FLIGHT_W));
 
-    let mut out = vec![Line::from(
-        theme.span(format!("  {}", cells.join(" ")), role),
-    )];
+    let mut out = vec![Line::from(theme.span(
+        fmt::truncate(&format!("  {}", cells.join(" ")), width as usize),
+        role,
+    ))];
     let indent = " ".repeat(2 + ACCOUNT_W + 1);
     let mut push = |text: String| {
         out.push(Line::from(theme.span(
@@ -265,7 +271,7 @@ fn account_lines(
     if let Some(cont) = status_continuation(r, now) {
         push(cont);
     }
-    for w in extra_windows(&r.quota, now) {
+    for w in extra_windows(&r.quota, now, collapsed) {
         push(format!(
             "{} {} \u{b7} resets {}",
             window_label(w),
@@ -276,14 +282,9 @@ fn account_lines(
     out
 }
 
-/// The health word the row shows. A `Cooling` entry whose timer has already elapsed is not
-/// cooling any more: `score` dispatches to it, nothing on the reading side resets the stored
-/// field, and "cooling" with no `until` row is a state the user cannot act on.
+/// The health word the row shows, shared with `swamp accounts` so the two cannot disagree.
 fn shown_health(r: &AccountRow, now: OffsetDateTime) -> Health {
-    match r.health {
-        Health::Cooling if !r.cooldown_until.is_some_and(|t| t > now) => Health::Healthy,
-        h => h,
-    }
+    crate::ui::watch::shown_health(r.health, r.cooldown_until, now)
 }
 
 /// The gates `block_reason` applies that `Health` cannot express: the account is refused by
@@ -317,9 +318,10 @@ fn status_continuation(r: &AccountRow, now: OffsetDateTime) -> Option<String> {
         Health::Cooling => {
             let until = r.cooldown_until?;
             let reason = r.quota.as_ref().and_then(|q| q.reached).map(reached_word);
+            // A cooldown that crosses midnight is a bare HH:MM the user reads as the past.
             return Some(match reason {
-                Some(w) => format!("until {} \u{b7} {w}", fmt::clock_hm(until)),
-                None => format!("until {}", fmt::clock_hm(until)),
+                Some(w) => format!("until {} \u{b7} {w}", fmt::clock_day(until, now)),
+                None => format!("until {}", fmt::clock_day(until, now)),
             });
         }
         _ => {}
@@ -336,13 +338,19 @@ fn reached_word(r: LimitReached) -> &'static str {
 }
 
 /// Rows the two named columns have no room for: `Minute`, or an `Unknown` window that still
-/// carries `window_minutes`.
-fn extra_windows(q: &Option<RateLimitSnapshot>, now: OffsetDateTime) -> Vec<&LimitWindow> {
+/// carries `window_minutes`. `shown` is the window the collapsed layout already put in the
+/// percentage cell, which must not be stated twice.
+fn extra_windows<'a>(
+    q: &'a Option<RateLimitSnapshot>,
+    now: OffsetDateTime,
+    shown: Option<&LimitWindow>,
+) -> Vec<&'a LimitWindow> {
     q.as_ref()
         .map(|q| {
             q.windows
                 .iter()
                 .filter(|w| w.is_current(now))
+                .filter(|w| !shown.is_some_and(|s| std::ptr::eq(s, *w)))
                 .filter(|w| {
                     w.scope == LimitScope::Minute
                         || (w.scope == LimitScope::Unknown && w.window_minutes.is_some())

@@ -907,3 +907,67 @@ async fn a_provider_switch_does_not_burn_an_attempt() {
     assert_eq!(calls[0].attempt, 1);
     assert!(out.failure.is_none(), "{:?}", out.failure);
 }
+
+/// Cancelling a worker kills its process group, so the classifier yields `Crashed { signal }`.
+/// Reporting that to the pool before the reclassification cooled a healthy subscription
+/// machine-wide for fifteen minutes because the user pressed esc esc.
+#[tokio::test]
+async fn cancelling_a_node_is_never_reported_to_the_pool_as_an_infra_failure() {
+    let f = fixture(TWO_ACCOUNTS).await;
+    let runner = Scripted::slow(&f.root, Duration::from_millis(150));
+    runner
+        .outcomes
+        .lock()
+        .expect("outcomes")
+        .push_back(failed(Failure::Crashed { signal: Some(15) }));
+    let cx = f.ctx(runner.clone(), Duration::from_secs(30));
+    let token = cx.cancel.clone();
+    let request = task("cancelled");
+    let (out, ()) = tokio::join!(run_node(&cx, spec(), &request), async {
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        token.cancel();
+    });
+
+    assert!(matches!(out.failure, Some(Failure::Cancelled { .. })));
+    for (_, id, s) in f.pool.snapshot() {
+        assert_eq!(
+            s.consecutive_infra_failures, 0,
+            "{} counted the user's own cancellation",
+            id.0
+        );
+        assert_eq!(s.health, Health::Healthy, "{} was cooled", id.0);
+        assert!(s.cooldown_until.is_none(), "{} carries a cooldown", id.0);
+    }
+}
+
+/// The same-account backoff holds the account's slot. Ignoring the token there kept a node
+/// "running" and the slot occupied for the whole backoff after the user cancelled.
+#[tokio::test]
+async fn a_cancelled_same_account_backoff_returns_at_once() {
+    let f = fixture(TWO_ACCOUNTS).await;
+    let runner = Scripted::new(
+        &f.root,
+        vec![failed(Failure::Overloaded {
+            detail: "529".into(),
+        })],
+    );
+    let cx = f.ctx(runner.clone(), Duration::from_secs(30));
+    let token = cx.cancel.clone();
+    let request = task("overloaded");
+    let started = std::time::Instant::now();
+    let (out, ()) = tokio::join!(run_node(&cx, spec(), &request), async {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        token.cancel();
+    });
+    let elapsed = started.elapsed();
+
+    assert!(matches!(out.failure, Some(Failure::Cancelled { .. })));
+    assert!(
+        elapsed < Duration::from_millis(1500),
+        "the backoff ignored the cancellation: {elapsed:?}"
+    );
+    assert_eq!(runner.calls().len(), 1, "the retry never ran");
+    for (_, id, s) in f.pool.snapshot() {
+        assert_eq!(s.inflight, 0, "{} still holds the backoff's slot", id.0);
+    }
+}

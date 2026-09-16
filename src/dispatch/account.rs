@@ -141,6 +141,23 @@ impl QuotaSource {
 }
 
 impl AccountState {
+    /// Everything `swamp accounts clear` lifts. The provider gates are in here too: a misread
+    /// `credits_depleted` carries no timer, so nothing else would ever bring the account back.
+    pub fn clear_gates(&mut self) {
+        self.cooldown_until = None;
+        self.consecutive_infra_failures = 0;
+        if let Some(q) = self.quota.as_mut() {
+            q.reached = None;
+            q.ordinary_usage_allowed = None;
+            q.windows.clear();
+        }
+        for q in self.quota_buckets.values_mut() {
+            q.reached = None;
+            q.ordinary_usage_allowed = None;
+            q.windows.clear();
+        }
+    }
+
     /// The ONLY place `window_tokens` resets. `resets_at` moving forward is what a rolled
     /// window looks like on the wire, for both providers.
     pub fn roll_window(&mut self, key: Option<WindowKey>, now: OffsetDateTime) -> bool {

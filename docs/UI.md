@@ -452,9 +452,9 @@ including estimated windows. There is no parallelism cap and no budget to show: 
 The placeholder after the cursor is `meta`, truncated with `fmt::truncate` to `width - 4`, and
 disappears on the first keypress.
 
-Status line: three zones on one `meta` row. Left `? for shortcuts`, centre the mode marker, right
-the run context. Under 80 columns the centre zone is dropped; the right zone then drops the cost
-first, then the worker count.
+Status line: three zones on one `meta` row. Left `? for shortcuts`, centre the mode marker and the
+running count, right the run context `run X · state · ~$N`. Under 80 columns the centre zone is
+dropped and the right zone loses the cost; under 50 it keeps the run id alone.
 
 ### 3.2 Brain streaming text
 
@@ -541,7 +541,7 @@ parses as JSON, per-tool rules apply - `swamp_dispatch` -> `"{n} tasks"`, `swamp
 ────────────────────────────────────────────────────────────────────────────────────────────────────
 > while those run, check whether the index already exists█
 ────────────────────────────────────────────────────────────────────────────────────────────────────
-  ? for shortcuts              ⏵⏵ dispatch mid · 2/4 workers      run 4x4kj6 · 2 running · ~$0.19
+  ? for shortcuts            ⏵⏵ dispatch mid · 2 running           run 4x4kj6 · 2 running · ~$0.19
 ```
 
 The headline row is the batch summary and is what survives collapse. Row layout from the body

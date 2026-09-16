@@ -2,6 +2,8 @@ use crate::cli::{AccountsArgs, AccountsCmd};
 use crate::cmd::{Ctx, parse_duration};
 use crate::dispatch::account::{AccountState, Health};
 use crate::dispatch::persist::{self, StateMap};
+use crate::dispatch::policy::Scoring;
+use crate::dispatch::pool;
 use crate::model::core::{AccountId, LimitScope, Provider};
 use serde_json::json;
 use time::OffsetDateTime;
@@ -23,10 +25,10 @@ pub async fn run(ctx: &Ctx, args: &AccountsArgs) -> anyhow::Result<i32> {
             Ok(0)
         }
         AccountsCmd::Clear { id } => {
+            let warn_at = Scoring::from_config(&ctx.cfg).warn_at;
             edit(ctx, &path, id, |s| {
-                s.cooldown_until = None;
-                s.consecutive_infra_failures = 0;
-                s.health = Health::Healthy;
+                s.clear_gates();
+                s.health = pool::health_from_quota(s, warn_at);
             })?;
             println!("account {id} cleared");
             Ok(0)
@@ -60,7 +62,7 @@ fn list(ctx: &Ctx) -> anyhow::Result<i32> {
                     "provider": a.provider,
                     "account": a.id,
                     "exec": a.exec,
-                    "health": s.health,
+                    "health": crate::ui::watch::shown_health(s.health, s.cooldown_until, now),
                     "inflight": s.inflight,
                     "max_concurrency": a.max_concurrency,
                     "five_hour": window(&s, LimitScope::FiveHour),
@@ -75,7 +77,7 @@ fn list(ctx: &Ctx) -> anyhow::Result<i32> {
         for (id, s) in stale(ctx, &state) {
             rows.push(json!({
                 "account": id,
-                "health": s.health,
+                "health": crate::ui::watch::shown_health(s.health, s.cooldown_until, now),
                 "consecutive_infra_failures": s.consecutive_infra_failures,
                 "cooldown_until": s.cooldown_until.map(|t| t.to_string()),
                 "nodes": s.lifetime_nodes,
@@ -102,7 +104,11 @@ fn list(ctx: &Ctx) -> anyhow::Result<i32> {
             a.provider,
             a.id.0,
             a.exec,
-            crate::ui::watch::health_word(s.health),
+            crate::ui::watch::health_word(crate::ui::watch::shown_health(
+                s.health,
+                s.cooldown_until,
+                now,
+            )),
             format!("{}/{cap}", s.inflight),
             util(window(&s, LimitScope::FiveHour)),
             util(window(&s, LimitScope::SevenDay)),
@@ -128,7 +134,11 @@ fn list(ctx: &Ctx) -> anyhow::Result<i32> {
                 "-",
                 id.0,
                 "-",
-                crate::ui::watch::health_word(s.health),
+                crate::ui::watch::health_word(crate::ui::watch::shown_health(
+                    s.health,
+                    s.cooldown_until,
+                    now,
+                )),
                 "-",
                 util(window(&s, LimitScope::FiveHour)),
                 util(window(&s, LimitScope::SevenDay)),

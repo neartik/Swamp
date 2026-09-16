@@ -29,7 +29,9 @@ Swamp never sees a credential. A Swamp account is a name plus an executable on P
 executable is a wrapper script that points the vendor CLI at one subscription's config directory.
 Two accounts that exec the same binary with the same config dir are one subscription: dispatch
 would double-spend a single quota and failover between them would be a silent no-op. `swamp
-doctor` refuses that setup by name.
+doctor` refuses that setup by name, comparing each account's resolved executable together with its
+own `env` map. It never runs the wrapper, so a config dir exported only inside a wrapper script is
+invisible to the check: declare it in the account's `env` map too.
 
 `~/bin/claude-main`:
 
@@ -63,7 +65,8 @@ CODEX_HOME=~/.codex-main         codex
 ```
 
 The env map in `[[accounts]]` sets the same variables at launch, so the wrapper and the config
-agree. Keep both: the wrapper is what you use by hand, the env map is what Swamp guarantees.
+agree. Keep both: the wrapper is what you use by hand, the env map is what Swamp guarantees and the
+only config dir `swamp doctor` can see. Account ids are unique machine-wide, not per provider.
 
 ## Configure
 
@@ -111,10 +114,11 @@ no diff at all, while `acceptEdits` (like `plan`, `manual` and `dontAsk`) writes
 every Bash call, so the worker cannot run the tests it was sent to run and comes back with a
 confident summary of work it never verified. The pair that works is `permission_mode =
 "acceptEdits"` plus `Bash` in `allow_tools`, for anthropic workers and for `[brain]`. The
-trade-off is real: an allowed Bash runs commands in the worktree without asking, which is the
+built-in defaults ship that pair for `[brain]`, so a fresh `swamp config init` inherits it;
+workers get it from your own `providers.<p>.worker` block. The trade-off is real: an allowed Bash runs commands in the worktree without asking, which is the
 same trust you extend to a CLI agent in your own shell, and a worktree is a directory, not a
-sandbox. The brain keeps `deny_tools = ["Edit", "Write", "MultiEdit", "NotebookEdit"]`, so it
-still cannot edit files, and `swamp doctor` warns when a worker or the brain runs in a
+sandbox. The brain also keeps `deny_tools = ["Edit", "Write", "MultiEdit", "NotebookEdit"]` by
+default, so it still cannot edit files, and `swamp doctor` warns when a worker or the brain runs in a
 Bash-denying mode without Bash allowed.
 
 `allow_tools` and `deny_tools` are tool names, not flags: Swamp merges each list into the single
@@ -128,9 +132,12 @@ one worker, in this worktree, unattended; do the task yourself; do not spawn sub
 ask a question; finish with what you changed and how you verified it. Append your own text with
 `providers.<p>.worker.system_prompt_file`.
 
-Layers, lowest priority first: built-in defaults, `~/.config/swamp/config.toml`,
+Layers, lowest priority first: built-in defaults, the user config file,
 `<repo>/.swamp/config.toml`, `SWAMP_*` environment, `--config <file>`, command-line flags.
-`swamp config show --effective` prints the merged result and where each layer came from.
+The user config file is `$SWAMP_CONFIG_DIR/config.toml` if that variable is set, else
+`$XDG_CONFIG_HOME/swamp/config.toml`, else `~/.config/swamp/config.toml`; `swamp config path`
+and `swamp doctor` both print the path in force. `swamp config show --effective` prints the
+merged result and where each layer came from.
 `swamp.example.toml` documents every key.
 
 ## First run

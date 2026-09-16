@@ -591,3 +591,35 @@ fn config_show_effective_prints_what_its_help_promises() {
     assert!(text.contains("lowest priority first"), "{text}");
     assert!(text.contains("[dispatch]"), "{text}");
 }
+
+/// `--config` is a global flag and the highest-priority layer, so the command that counts the
+/// layers must count the stack this invocation actually ran on.
+#[test]
+fn config_validate_counts_the_layer_the_invocation_added() {
+    let h = Harness::new();
+    h.install();
+    let extra = h.repo.join("candidate.toml");
+    std::fs::write(&extra, "[limits]\nworker_timeout = \"3m\"\n").expect("candidate layer");
+
+    let plain = String::from_utf8(
+        h.swamp(&["config", "validate"])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone(),
+    )
+    .expect("utf8");
+    assert!(plain.contains("ok: 2 layers"), "{plain}");
+
+    let with_extra = String::from_utf8(
+        h.swamp(&["--config", extra.as_str(), "config", "validate"])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone(),
+    )
+    .expect("utf8");
+    assert!(with_extra.contains("ok: 3 layers"), "{with_extra}");
+}

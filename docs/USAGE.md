@@ -420,8 +420,9 @@ AccountUsage { account: AccountId, window: Usage, lifetime: Usage,
 
 `RunView` (`src/journal/fold.rs`) folds `AccountUsage` into `accounts: BTreeMap<AccountId,
 AccountState>`, which it already carries, so `swamp trace --json` and `/status` see usage without a
-new fold. `swamp replay --reparse` therefore re-derives usage from retained raw streams like
-everything else.
+new fold. `swamp replay --reparse` re-derives every node's usage from the retained raw streams; no
+raw stream carries an account's health or the pool's counters, so the rewrite copies the
+`AccountSelected`, `AccountHealth` and `AccountUsage` lines across from the journal it replaces.
 
 No secrets: `accounts.json` and the journal hold an account **id**, an exec name, counters and
 percentages. No token, no config-dir path beyond what the user put in `accounts[].env`, no email.

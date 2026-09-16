@@ -580,3 +580,64 @@ fn the_first_measured_reading_adopts_the_estimated_window() {
     assert!(rolled, "a measured window moving on is a roll");
     assert_eq!(state.window_tokens.billable(), 0);
 }
+
+/// `swamp accounts clear` and `AccountPool::clear` share this mutation: clearing only the
+/// cooldown left the provider gates, which carry no timer, in place forever.
+#[test]
+fn clearing_an_account_lifts_the_provider_gates_and_the_stale_windows() {
+    let now = OffsetDateTime::now_utc();
+    let mut gated = snapshot(now - time::Duration::hours(1));
+    gated.limit_id = Some("codex".into());
+    gated.reached = Some(swamp::model::core::LimitReached::CreditsDepleted);
+    gated.ordinary_usage_allowed = Some(false);
+
+    let mut entry = AccountState {
+        health: swamp::dispatch::account::Health::AuthBroken,
+        cooldown_until: Some(now + time::Duration::minutes(5)),
+        consecutive_infra_failures: 3,
+        ..AccountState::default()
+    };
+    entry.apply_quota(gated, QuotaSource::AppServer, now);
+    assert!(swamp::dispatch::pool::hard_gated(&entry));
+
+    entry.clear_gates();
+    assert!(!swamp::dispatch::pool::hard_gated(&entry));
+    assert!(entry.cooldown_until.is_none());
+    assert_eq!(entry.consecutive_infra_failures, 0);
+    let quota = entry.quota.as_ref().expect("the reading is kept");
+    assert!(
+        quota.windows.is_empty(),
+        "a rolled window still gates score"
+    );
+    assert!(
+        entry
+            .quota_buckets
+            .values()
+            .all(|q| q.reached.is_none() && q.windows.is_empty()),
+        "every displayed bucket is cleared too"
+    );
+    entry.health = swamp::dispatch::pool::health_from_quota(&entry, 0.9);
+    assert_eq!(entry.health, swamp::dispatch::account::Health::Healthy);
+}
+
+/// `swamp usage --probe` writes a reading straight onto the file; without this the stored
+/// health word contradicts the snapshot printed under it.
+#[test]
+fn a_probed_reading_re_derives_health_the_way_the_pool_does() {
+    let now = OffsetDateTime::now_utc();
+    let mut entry = AccountState::default();
+
+    let mut refused = snapshot(now + time::Duration::hours(1));
+    refused.ordinary_usage_allowed = Some(false);
+    let was_gated = swamp::dispatch::pool::hard_gated(&entry);
+    entry.apply_quota(refused, QuotaSource::AppServer, now);
+    swamp::dispatch::pool::health_after_quota(&mut entry, was_gated, 0.9);
+    assert_eq!(entry.health, swamp::dispatch::account::Health::AuthBroken);
+
+    let mut allowed = snapshot(now + time::Duration::hours(1));
+    allowed.ordinary_usage_allowed = Some(true);
+    let was_gated = swamp::dispatch::pool::hard_gated(&entry);
+    entry.apply_quota(allowed, QuotaSource::AppServer, now);
+    swamp::dispatch::pool::health_after_quota(&mut entry, was_gated, 0.9);
+    assert_eq!(entry.health, swamp::dispatch::account::Health::Healthy);
+}

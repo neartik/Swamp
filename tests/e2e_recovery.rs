@@ -217,3 +217,41 @@ fn worker_pid(h: &Harness) -> i32 {
         .and_then(|p| p.parse().ok())
         .expect("a pid")
 }
+
+/// `swamp replay --reparse` rewrites the journal from the raw streams. No raw stream carries an
+/// account's health or the pool's token counters, so the rewrite carries those lines across or
+/// the accounts pane of that run is empty for good.
+#[test]
+fn a_reparse_keeps_the_account_rows_no_raw_stream_can_rebuild() {
+    let h = Harness::new().scenario("main", Scenario::claude().edits("fixed.txt", "patched\n"));
+    h.swamp(&["run", "--no-brain", TASK]).assert().success();
+
+    let account = swamp::model::core::AccountId("main".into());
+    let before = h.last_view();
+    let recorded = before
+        .accounts
+        .get(&account)
+        .expect("the run journalled its account")
+        .clone();
+    assert!(
+        recorded.lifetime_tokens.billable() > 0,
+        "the fixture spends tokens: {recorded:?}"
+    );
+
+    h.swamp(&["replay", "--reparse", "last"]).assert().success();
+
+    let run = h.last_run();
+    assert!(
+        run.dir.join("journal.jsonl.prev").is_file(),
+        "the replaced journal is kept"
+    );
+    let after = h.last_view();
+    let kept = after
+        .accounts
+        .get(&account)
+        .expect("the account row survived the rewrite");
+    assert_eq!(kept.lifetime_tokens, recorded.lifetime_tokens);
+    assert_eq!(kept.window_tokens, recorded.window_tokens);
+    assert_eq!(kept.health, recorded.health);
+    assert_eq!(after.nodes.len(), before.nodes.len(), "the nodes reparsed");
+}

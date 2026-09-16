@@ -617,6 +617,8 @@ exec = "{exec}"
             paths: Arc::new(paths),
             color: false,
             json: false,
+            config_arg: None,
+            profile: None,
         };
         Fixture {
             _tmp: tmp,

@@ -500,15 +500,9 @@ impl AccountPool {
         let (health, rolled, window, lifetime, window_key) = {
             let mut state = self.state.lock();
             let entry = state.entry(id.clone()).or_default();
+            let was_gated = hard_gated(entry);
             let rolled = entry.apply_quota(snap, source, now);
-            if hard_gated(entry)
-                || !matches!(
-                    entry.health,
-                    Health::AuthBroken | Health::Disabled | Health::Cooling
-                )
-            {
-                entry.health = health_from_quota(entry, self.quota_warn_at());
-            }
+            health_after_quota(entry, was_gated, self.quota_warn_at());
             (
                 entry.health,
                 rolled,
@@ -614,14 +608,7 @@ impl AccountPool {
         let health = {
             let mut state = self.state.lock();
             let entry = state.entry(id.clone()).or_default();
-            entry.cooldown_until = None;
-            entry.consecutive_infra_failures = 0;
-            // The hard gates too: a misread `credits_depleted` has no timer, so without this
-            // the only way back into rotation is editing accounts.json by hand.
-            if let Some(q) = entry.quota.as_mut() {
-                q.reached = None;
-                q.ordinary_usage_allowed = None;
-            }
+            entry.clear_gates();
             entry.health = health_from_quota(entry, self.quota_warn_at());
             entry.health
         };
@@ -793,8 +780,9 @@ impl AccountPool {
             }
             match self.block_reason(a, s, now) {
                 // A slot the brain holds for the whole run comes back to nobody, so it must
-                // not look like a lease that is about to be returned.
-                Block::Busy if brain_held.as_ref() == Some(&a.id) => {
+                // not look like a lease that is about to be returned. Its siblings are
+                // ordinary worker leases and do come back, so they still read as busy.
+                Block::Busy if brain_held.as_ref() == Some(&a.id) && s.inflight <= 1 => {
                     why.push(format!("{} is held by the brain", a.id.0));
                 }
                 Block::Busy => busy = true,
@@ -860,7 +848,7 @@ impl AccountPool {
         if let Some(t) = s.cooldown_until.filter(|t| *t > now) {
             return Block::Wait {
                 at: t,
-                why: format!("{who} cooling until {}", crate::ui::fmt::clock_hm(t)),
+                why: format!("{who} cooling until {}", crate::ui::fmt::clock_day(t, now)),
             };
         }
         if a.max_concurrency.is_some_and(|c| s.inflight >= c) {
@@ -886,7 +874,7 @@ impl AccountPool {
                 at,
                 why: format!(
                     "{who} at {pct}% of its {scope} window until {}",
-                    crate::ui::fmt::clock_hm(at)
+                    crate::ui::fmt::clock_day(at, now)
                 ),
             },
             _ if util >= stop => Block::Hard {
@@ -1120,7 +1108,23 @@ async fn cancelled(token: Option<&CancellationToken>) {
     }
 }
 
-fn health_from_quota(s: &AccountState, warn_at: f64) -> Health {
+/// Re-derives health after a fresh quota reading. A gate that has just been lifted also
+/// clears the `AuthBroken` it stamped; a real auth failure, which was never gated, stays,
+/// and so do the words a human set.
+pub fn health_after_quota(entry: &mut AccountState, was_gated: bool, warn_at: f64) {
+    let lifted = was_gated && !hard_gated(entry) && entry.health == Health::AuthBroken;
+    if hard_gated(entry)
+        || lifted
+        || !matches!(
+            entry.health,
+            Health::AuthBroken | Health::Disabled | Health::Cooling
+        )
+    {
+        entry.health = health_from_quota(entry, warn_at);
+    }
+}
+
+pub fn health_from_quota(s: &AccountState, warn_at: f64) -> Health {
     // USAGE 2.2: depleted credits or a spend control is not a timer, so the health every
     // surface reads has to say a human must act.
     if hard_gated(s) {

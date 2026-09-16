@@ -243,11 +243,21 @@ impl Launch {
             .observe_usage(&self.account, self.node(), cumulative);
     }
 
+    /// True when a `Final` line carries the whole thread's totals rather than one turn's, so
+    /// folding it in would re-count every earlier turn.
+    pub fn cumulative_turns(&self) -> bool {
+        self.adapter.brain_transport() == BrainTransport::ResumePerTurn
+    }
+
     /// A turn's result line carries that turn's totals and replaces what its deltas summed to.
     pub fn observe_turn(&self, turn: &Usage) {
         let cumulative = {
             let mut t = self.totals.lock();
-            t.account_tokens.absorb(turn);
+            if self.cumulative_turns() {
+                t.account_tokens.take_max(turn);
+            } else {
+                t.account_tokens.absorb(turn);
+            }
             t.turn_tokens = Usage::default();
             t.account_tokens
         };
@@ -429,9 +439,17 @@ pub(crate) async fn drive<R: AsyncRead + Unpin>(
                     .or_else(|| launch.cfg.estimate_cost(&launch.model, &f.usage));
                 let totals = {
                     let mut t = launch.totals.lock();
-                    t.usage.absorb(&f.usage);
+                    if launch.cumulative_turns() {
+                        t.usage.take_max(&f.usage);
+                    } else {
+                        t.usage.absorb(&f.usage);
+                    }
                     if let Some(c) = cost {
-                        t.usd += c.usd;
+                        t.usd = if launch.cumulative_turns() {
+                            t.usd.max(c.usd)
+                        } else {
+                            t.usd + c.usd
+                        };
                         t.basis = Some(c.basis);
                     }
                     *t

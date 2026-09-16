@@ -323,6 +323,20 @@ pub fn gauge_bar(util: f64) -> String {
     format!("[{}{}]", "#".repeat(filled), "-".repeat(10 - filled))
 }
 
+/// The health word a surface shows. A `Cooling` entry whose timer has already elapsed is not
+/// cooling any more: `score` dispatches to it, nothing on the reading side resets the stored
+/// field, and "cooling" with no `until` is a state the user cannot act on.
+pub fn shown_health(
+    h: Health,
+    cooldown_until: Option<OffsetDateTime>,
+    now: OffsetDateTime,
+) -> Health {
+    match h {
+        Health::Cooling if !cooldown_until.is_some_and(|t| t > now) => Health::Healthy,
+        h => h,
+    }
+}
+
 pub fn health_word(h: Health) -> &'static str {
     match h {
         Health::Healthy => "healthy",

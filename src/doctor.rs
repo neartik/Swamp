@@ -278,11 +278,17 @@ fn quota(cfg: &Config, paths: &Paths, out: &mut Vec<Check>) {
         };
         let mut detail = head.to_owned();
         if let Some(snapshot) = entry.and_then(|s| s.quota.as_ref()) {
+            // A window whose reset has passed measures an allowance that already rolled:
+            // dispatch ignores it, so doctor must not quote it as evidence either.
             let window = |scope| {
-                snapshot.windows.iter().find(|w| w.scope == scope).map(|w| {
-                    let tilde = if w.measured { "" } else { "~" };
-                    format!("{tilde}{:.0}%", w.utilization * 100.0)
-                })
+                snapshot
+                    .windows
+                    .iter()
+                    .find(|w| w.scope == scope && w.is_current(now))
+                    .map(|w| {
+                        let tilde = if w.measured { "" } else { "~" };
+                        format!("{tilde}{:.0}%", w.utilization * 100.0)
+                    })
             };
             if let Some(u) = window(LimitScope::FiveHour) {
                 detail.push_str(&format!("  5h {u}"));
@@ -586,8 +592,15 @@ fn config_sources(cfg: &Config, out: &mut Vec<Check>) {
     } else {
         Level::Ok
     };
+    // SWAMP_CONFIG_DIR and XDG_CONFIG_HOME move the user layer: without the resolved path
+    // here, a file written to ~/.config/swamp is simply never mentioned again.
     let detail = if cfg.sources.is_empty() {
-        "built-in defaults only; no config file was found".to_owned()
+        match crate::config::load::user_config_path() {
+            Some(p) => format!(
+                "built-in defaults only; no config file was found (looked for {p} and <repo>/.swamp/config.toml)"
+            ),
+            None => "built-in defaults only; no config file was found".to_owned(),
+        }
     } else {
         cfg.sources
             .iter()
