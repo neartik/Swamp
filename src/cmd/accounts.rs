@@ -8,6 +8,11 @@ use crate::model::core::{AccountId, LimitScope, Provider};
 use serde_json::json;
 use time::OffsetDateTime;
 
+/// Column widths every row is padded and clipped to: an over-long id or exec used to push
+/// every later column out of line.
+const ACCOUNT_W: usize = 13;
+const EXEC_W: usize = 14;
+
 /// Account health and rotation state. Cross-run and cross-repo: the state file is the
 /// authority, not this process.
 pub async fn run(ctx: &Ctx, args: &AccountsArgs) -> anyhow::Result<i32> {
@@ -90,7 +95,7 @@ fn list(ctx: &Ctx) -> anyhow::Result<i32> {
     }
 
     let mut text = format!(
-        "{:<10} {:<8} {:<14} {:<10} {:<9} {:<6} {:<6} {:<10} {:<6} {}\n",
+        "{:<10} {:<13} {:<14} {:<10} {:<9} {:<6} {:<6} {:<10} {:<6} {}\n",
         "PROVIDER", "ACCOUNT", "EXEC", "HEALTH", "INFLIGHT", "5H", "7D", "COOLDOWN", "NODES", "$"
     );
     for a in &ctx.cfg.accounts {
@@ -100,10 +105,11 @@ fn list(ctx: &Ctx) -> anyhow::Result<i32> {
             .map(|c| c.to_string())
             .unwrap_or_else(|| "-".to_owned());
         text.push_str(&format!(
-            "{:<10} {:<8} {:<14} {:<10} {:<9} {:<6} {:<6} {:<10} {:<6} ~{:.2}{}\n",
-            a.provider,
-            a.id.0,
-            a.exec,
+            "{:<10} {:<13} {:<14} {:<10} {:<9} {:<6} {:<6} {:<10} {:<6} ~{:.2}{}\n",
+            // `Display for Provider` ignores the formatter's width, so pad the &str instead.
+            a.provider.as_str(),
+            crate::ui::fmt::truncate(&a.id.0, ACCOUNT_W),
+            crate::ui::fmt::truncate(&a.exec, EXEC_W),
             crate::ui::watch::health_word(crate::ui::watch::shown_health(
                 s.health,
                 s.cooldown_until,
@@ -130,9 +136,9 @@ fn list(ctx: &Ctx) -> anyhow::Result<i32> {
         text.push_str("\nnot in config (state kept; drop with `swamp accounts reset <id>`):\n");
         for (id, s) in stale {
             text.push_str(&format!(
-                "{:<10} {:<8} {:<14} {:<10} {:<9} {:<6} {:<6} {:<10} {:<6} ~{:.2}\n",
+                "{:<10} {:<13} {:<14} {:<10} {:<9} {:<6} {:<6} {:<10} {:<6} ~{:.2}\n",
                 "-",
-                id.0,
+                crate::ui::fmt::truncate(&id.0, ACCOUNT_W),
                 "-",
                 crate::ui::watch::health_word(crate::ui::watch::shown_health(
                     s.health,

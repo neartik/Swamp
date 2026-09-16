@@ -289,6 +289,61 @@ fn state_for_an_account_that_left_the_config_is_listed_and_droppable() {
         .stderr(predicates::str::contains("no recorded state"));
 }
 
+/// `Display for Provider` ignores the formatter's width, so every row used to sit shifted
+/// against the header, and rows of two providers shifted against each other.
+#[test]
+fn the_accounts_table_columns_line_up_under_their_headers() {
+    let h = Harness::new().with_accounts(1, 1);
+    let out = h
+        .swamp(&["accounts"])
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    let mut lines = stdout.lines().filter(|l| !l.trim().is_empty());
+    let header = field_starts(lines.next().expect("a header row"));
+    for line in lines {
+        assert_eq!(
+            field_starts(line)[..4],
+            header[..4],
+            "row is shifted against the header: {stdout}"
+        );
+    }
+}
+
+/// Where each whitespace-separated field begins, which is what "the columns line up" means.
+fn field_starts(line: &str) -> Vec<usize> {
+    let mut out = Vec::new();
+    let mut after_space = true;
+    for (i, c) in line.char_indices() {
+        if after_space && !c.is_whitespace() {
+            out.push(i);
+        }
+        after_space = c.is_whitespace();
+    }
+    out
+}
+
+/// A pool no timer can rescue fails immediately, and the pool already knows why. Saying
+/// "0 cooling down" instead names nothing a user could act on.
+#[test]
+fn a_node_that_finds_every_account_parked_reports_the_pool_reason() {
+    let h = Harness::new().with_accounts(2, 0);
+    for who in ["main", "alt"] {
+        h.swamp(&["accounts", "disable", who]).assert().success();
+    }
+
+    h.swamp(&["run", "--no-brain", TASK])
+        .assert()
+        .code(3)
+        .stderr(predicates::str::contains("main disabled"))
+        .stderr(predicates::str::contains("alt disabled"))
+        .stderr(predicates::str::contains("cooling down").not());
+
+    assert!(h.invocations("main").is_empty());
+}
+
 /// USAGE 4.7: a pool with nothing left is a wait, not a silent stall. The node blocks until
 /// its own `--timeout`, and `swamp run` says so on stderr before it starts waiting.
 #[test]

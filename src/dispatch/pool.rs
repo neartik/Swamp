@@ -278,7 +278,10 @@ impl AccountPool {
                     }
                     Some(retry_at)
                 }
-                Capacity::Exhausted { reason } => return Err(NoCapacity::Exhausted { reason }),
+                Capacity::Exhausted { reason } => {
+                    tracing::warn!("no {provider} account can take work: {reason}");
+                    return Err(NoCapacity::Exhausted { reason });
+                }
             };
 
             if Instant::now() >= deadline {
@@ -420,7 +423,7 @@ impl AccountPool {
             let entry = state.entry(id.clone()).or_default();
             entry.lifetime_nodes += 1;
             if let Some(c) = cost {
-                entry.lifetime_cost_usd += c.usd;
+                entry.credit_cost(c);
             }
             match failure {
                 None => {
@@ -465,7 +468,7 @@ impl AccountPool {
         let health = {
             let mut state = self.state.lock();
             let entry = state.entry(id.clone()).or_default();
-            entry.lifetime_cost_usd += cost.usd;
+            entry.credit_cost(cost);
             entry.health
         };
         self.after_change(id, health);
@@ -1110,8 +1113,12 @@ async fn cancelled(token: Option<&CancellationToken>) {
 
 /// Re-derives health after a fresh quota reading. A gate that has just been lifted also
 /// clears the `AuthBroken` it stamped; a real auth failure, which was never gated, stays,
-/// and so do the words a human set.
+/// and so does `Disabled`, which only `set_enabled` may leave.
 pub fn health_after_quota(entry: &mut AccountState, was_gated: bool, warn_at: f64) {
+    // `swamp accounts disable` is human-owned: no provider reading may lift it.
+    if entry.health == Health::Disabled {
+        return;
+    }
     let lifted = was_gated && !hard_gated(entry) && entry.health == Health::AuthBroken;
     if hard_gated(entry)
         || lifted

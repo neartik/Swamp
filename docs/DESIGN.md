@@ -466,13 +466,22 @@ pub enum LimitScope { FiveHour, SevenDay, Minute, Unknown }
 #[serde(rename_all = "snake_case")]
 pub enum LimitStatus { Allowed, Warning, Rejected }
 
+/// Why the limit was reached, when the provider says so. Decides cooldown vs park.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LimitReached { UsageLimit, CreditsDepleted, SpendControl }
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LimitWindow {
     pub scope: LimitScope,
-    /// 0.0 ..= 1.0
+    /// 0.0 ..= 1.0, ALWAYS. codex reports 0..100 and is divided at the boundary.
     pub utilization: f64,
     #[serde(with = "time::serde::rfc3339::option")]
     pub resets_at: Option<OffsetDateTime>,
+    /// The provider's own window length. 300 -> five_hour, 10080 -> seven_day.
+    pub window_minutes: Option<u32>,
+    /// False when this number came from Swamp's own counters, not the provider.
+    pub measured: bool,
 }
 
 /// The real sample carries five_hour = 0.06 AND seven_day = 0.64 in the same event.
@@ -484,20 +493,47 @@ pub struct RateLimitSnapshot {
     pub windows: Vec<LimitWindow>,
     #[serde(with = "time::serde::rfc3339::option")]
     pub resets_at: Option<OffsetDateTime>,
+    /// codex `limit_id` / claude `rateLimitType`. Names which bucket this is; two buckets
+    /// are two allowances and are never merged into one.
+    pub limit_id: Option<String>,
+    /// codex `ordinaryUsageAllowed`. The authoritative gate: a client must NOT infer
+    /// recovery from percentages or reset times, so `Some(false)` wins over both.
+    pub ordinary_usage_allowed: Option<bool>,
+    pub reached: Option<LimitReached>,
+    /// Plan name, display only.
+    pub plan: Option<String>,
 }
 
 impl RateLimitSnapshot {
+    /// An `Unknown` window is an overage-inclusive or unmapped bucket: it is never a plan
+    /// limit, so it is skipped as soon as one named window exists. Every accessor below
+    /// reads through it, which is what keeps an overage bucket from parking an account.
+    pub fn named(&self) -> impl Iterator<Item = &LimitWindow> { ... }
+    /// Windows whose `resets_at` has not passed. A rolled window measures an allowance that
+    /// is already gone, and for Anthropic nothing refreshes it until a node runs.
+    pub fn current(&self, now: OffsetDateTime) -> impl Iterator<Item = &LimitWindow> { ... }
+
     pub fn worst_utilization(&self) -> f64 {
-        self.windows.iter().map(|w| w.utilization).fold(0.0, f64::max)
+        self.named().map(|w| w.utilization).fold(0.0, f64::max)
     }
+    /// None when every window is an estimate: only a measured number may park an account.
+    pub fn measured_utilization(&self) -> Option<f64>;
+    pub fn worst_utilization_at(&self, now: OffsetDateTime) -> f64;
+    pub fn measured_utilization_at(&self, now: OffsetDateTime) -> Option<f64>;
+    /// The window section 4 scores against: the one closest to exhaustion.
+    pub fn tightest(&self) -> Option<&LimitWindow>;
+    pub fn tightest_at(&self, now: OffsetDateTime) -> Option<&LimitWindow>;
     pub fn soonest_reset(&self) -> Option<OffsetDateTime> {
-        self.windows.iter().filter_map(|w| w.resets_at).min().or(self.resets_at)
+        self.named().filter_map(|w| w.resets_at).min().or(self.resets_at)
     }
+    /// The earliest reset still ahead of us; a rolled window cannot be waited for.
+    pub fn soonest_reset_at(&self, now: OffsetDateTime) -> Option<OffsetDateTime>;
     pub fn worst_scope(&self) -> LimitScope {
-        self.windows.iter()
-            .max_by(|a, b| a.utilization.total_cmp(&b.utilization))
-            .map_or(LimitScope::Unknown, |w| w.scope)
+        self.tightest().map_or(LimitScope::Unknown, |w| w.scope)
     }
+    /// Per-scope merge, not replacement: a key dropping out of a later event must not erase
+    /// what it measured, and an estimate never replaces a live measurement.
+    pub fn merged_over(&self, prev: &RateLimitSnapshot, now: OffsetDateTime) -> RateLimitSnapshot;
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -513,6 +549,11 @@ pub struct FinalSummary {
     /// Under `--permission-prompts none` anything that would prompt is denied. A worker then
     /// writes a confident summary of work it never did. Non-empty is a failure signal.
     #[serde(default)] pub permission_denials: u32,
+    /// The tool names behind those denials, so the cause is visible without stream.jsonl.
+    #[serde(default)] pub denied_tools: Vec<String>,
+    /// claude `modelUsage`: per-model totals including side-calls `usage` never reports.
+    /// `account_usage()` sums them, because a haiku side-call bills the same subscription.
+    #[serde(default)] pub model_usage: BTreeMap<String, Usage>,
 }
 ```
 
@@ -1274,9 +1315,10 @@ pub fn classify(cx: &ExitContext<'_>) -> Option<Failure> {
 }
 ```
 
-Proactive quota stop is separate from failure: when a live `RateLimit` event reports
-`worst_utilization() >= quota_stop_at`, the pool cools the account immediately so no *new* node is
-routed to it, while running nodes finish normally. Avoiding the failure is much better than
+Proactive quota stop is separate from failure: an account whose **measured** utilization reaches
+`cooldown.quota_stop_at` stops being eligible for new leases (`policy::score` returns `None`) and
+reads `degraded` in every health view, while running nodes finish normally. No cooldown timer is
+set - the window's own `resets_at` is what brings it back. Avoiding the failure is much better than
 recovering from it, and the telemetry is free.
 
 Default pattern sets live in config (`[failure.anthropic]`, `[failure.openai]`) so a vendor wording
@@ -1317,17 +1359,56 @@ pub struct Account {
     pub max_concurrency: usize,
 }
 
+/// Every field is `#[serde(default)]`: a hand-written or older `~/.swamp/accounts.json` has to
+/// load, because the recovery commands read the same file that broke.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct AccountState {
     pub inflight: usize,
     pub health: Health,
     #[serde(with = "time::serde::rfc3339::option")] pub cooldown_until: Option<OffsetDateTime>,
     pub consecutive_infra_failures: u32,
+    /// The bucket dispatch scores against.
     pub quota: Option<RateLimitSnapshot>,
     #[serde(with = "time::serde::rfc3339::option")] pub last_used: Option<OffsetDateTime>,
     pub lifetime_nodes: u64,
     pub lifetime_cost_usd: f64,
+    /// How that total was arrived at. One estimated fold makes the whole of it an estimate.
+    pub lifetime_cost_basis: Option<CostBasis>,
+    /// When this process last changed the entry; the merge is last-writer-wins per account.
+    #[serde(with = "time::serde::rfc3339::option")] pub updated_at: Option<OffsetDateTime>,
+
+    /// Every token this account ever spent, across runs and repos.
+    pub lifetime_tokens: Usage,
+    /// Tokens spent inside the window `window_key` names. Zeroed when the window rolls.
+    pub window_tokens: Usage,
+    #[serde(with = "time::serde::rfc3339::option")] pub window_started_at: Option<OffsetDateTime>,
+    /// The window `window_tokens` is keyed to. A change means "roll and zero".
+    pub window_key: Option<WindowKey>,
+    /// Every bucket the provider reported, keyed by limit id. Display only.
+    pub quota_buckets: BTreeMap<String, RateLimitSnapshot>,
+    #[serde(with = "time::serde::rfc3339::option")] pub quota_observed_at: Option<OffsetDateTime>,
+    pub quota_source: Option<QuotaSource>,
 }
+
+/// Which provider window `window_tokens` is counted against. USAGE.md 2.1 has the roll rule:
+/// only a move to a different window zeroes the counter, and a synthetic key is adopted by
+/// the first real reading rather than rolled.
+#[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
+pub struct WindowKey {
+    pub scope: LimitScope,
+    #[serde(with = "time::serde::rfc3339")] pub resets_at: OffsetDateTime,
+    /// The provider's own window length, so two readings of one window are recognised as one.
+    pub window_minutes: Option<u32>,
+    /// True for the wall-time grid key Swamp invents when no snapshot ever reaches an account.
+    pub estimated: bool,
+}
+
+/// Where the percentages came from. `Estimated` is Swamp's own arithmetic and never a
+/// measurement: `/usage` and `doctor` both count such an account as having no source.
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QuotaSource { Telemetry, Rollout, AppServer, Estimated }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1336,7 +1417,7 @@ pub enum Health {
     Degraded,    // utilization past quota_warn_at: deprioritize, still usable
     Cooling,     // cooldown_until in the future
     AuthBroken,  // out of rotation until a human fixes it
-    Disabled,    // config, or `swamp accounts disable`
+    Disabled,    // config, or `swamp accounts disable`. Terminal: only `enable` leaves it.
 }
 ```
 

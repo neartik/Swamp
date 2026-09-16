@@ -621,8 +621,12 @@ hard-gated does **not** fail: `AccountPool::acquire_node` journals one `NodeBloc
 for it and waits, so `NodeState::Blocked` renders exactly like `Queued` in the board above -
 dim `·` glyph, account and elapsed both `-` - for as long as the wait lasts, and counts toward
 `running` in the headline, never toward `failed`. The reason and the reset time are not spelled out
-in the row: they live in the journal line and in a `WARN`-level log, `every anthropic account is at
-its limit until 14:20: <why>`, printed once per blocked node rather than once per recheck. Two
+in the row, but the wait is never silent: chat commits one `Notice` block per blocked node,
+`⏸ every anthropic account is at its limit · earliest reset 22:57 (in 41m) · esc esc to cancel`
+(`fmt::blocked_notice`), and `swamp run`, which has no live view to render one in, prints the same
+line on stderr with `ctrl-c to cancel`. The journal line and a `WARN`-level log, `every anthropic
+account is at its limit until 14:20: <why>`, are the secondary record; all three are emitted once
+per blocked node rather than once per recheck. Two
 `esc` within `ARM` cancel every running and blocked node the same way (`Failure::Cancelled { by:
 User }`); `swamp run` responds to a single ctrl-c. `Failure::NoCapacity` is reserved for the two
 cases that are not a wait: the node's own `--timeout` expiring first

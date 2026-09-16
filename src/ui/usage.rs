@@ -45,6 +45,7 @@ pub struct AccountRow {
     pub lifetime_tokens: Usage,
     pub lifetime_nodes: u64,
     pub cost_usd: f64,
+    pub cost_basis: Option<CostBasis>,
 }
 
 /// Builds rows the same way `AccountPool::snapshot()` would: one row per configured account,
@@ -107,6 +108,7 @@ fn row_of(
         lifetime_tokens: s.lifetime_tokens,
         lifetime_nodes: s.lifetime_nodes,
         cost_usd: s.lifetime_cost_usd,
+        cost_basis: s.lifetime_cost_basis,
     }
 }
 
@@ -520,6 +522,12 @@ fn observed_lines(
     out
 }
 
+/// Whether the row's percentages came from the provider. `Estimated` is Swamp's own
+/// arithmetic, so it counts as no source at all, exactly as `doctor` counts it.
+fn has_measured_source(r: &AccountRow) -> bool {
+    r.quota_source.is_some_and(|s| s.is_measured())
+}
+
 /// The footer sheds with the table: at 62 columns a fixed-width totals line wraps into three
 /// ragged ones in the CLI and is cut mid-number in chat.
 fn totals_lines(rows: &[AccountRow], width: u16, theme: &Theme) -> Vec<Line<'static>> {
@@ -529,7 +537,7 @@ fn totals_lines(rows: &[AccountRow], width: u16, theme: &Theme) -> Vec<Line<'sta
     for r in rows.iter().filter(|r| r.in_config) {
         usage.absorb(&r.lifetime_tokens);
         cost += r.cost_usd;
-        if r.quota_source.is_none() {
+        if !has_measured_source(r) {
             missing += 1;
         }
     }
@@ -586,7 +594,7 @@ pub fn json(rows: &[AccountRow]) -> Value {
     for r in rows.iter().filter(|r| r.in_config) {
         usage.absorb(&r.lifetime_tokens);
         cost += r.cost_usd;
-        if r.quota_source.is_none() {
+        if !has_measured_source(r) {
             missing += 1;
         }
         if r.provider == Some(Provider::Openai) && r.cost_usd == 0.0 && r.lifetime_nodes > 0 {
@@ -609,10 +617,8 @@ fn account_json(r: &AccountRow, now: OffsetDateTime) -> Value {
     let quota = r.quota.as_ref().map(|q| {
         let mut v = serde_json::to_value(q).unwrap_or(Value::Null);
         if let Some(obj) = v.as_object_mut() {
-            obj.insert(
-                "source".to_owned(),
-                json!(r.quota_source.map(|s| s.as_str())),
-            );
+            // The serde spelling, so the journal, accounts.json and this agree.
+            obj.insert("source".to_owned(), json!(r.quota_source));
             obj.insert(
                 "observed_at".to_owned(),
                 json!(r.quota_observed_at.and_then(rfc3339)),
@@ -627,11 +633,14 @@ fn account_json(r: &AccountRow, now: OffsetDateTime) -> Value {
         }
         v
     });
-    let cost_basis = if r.cost_usd > 0.0 {
-        Some(CostBasis::Reported)
-    } else {
-        None
-    };
+    // A pricing-table multiplication is not provider truth: a state file written before the
+    // basis was recorded falls back to what the provider can report at all.
+    let cost_basis = (r.cost_usd > 0.0).then(|| {
+        r.cost_basis.unwrap_or(match r.provider {
+            Some(Provider::Openai) => CostBasis::Estimated,
+            _ => CostBasis::Reported,
+        })
+    });
     json!({
         "provider": r.provider.map(|p| p.as_str()),
         "account": r.account.0,
@@ -693,6 +702,7 @@ mod tests {
             lifetime_tokens: Usage::default(),
             lifetime_nodes: 0,
             cost_usd: 0.0,
+            cost_basis: None,
         }
     }
 

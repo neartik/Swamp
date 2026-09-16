@@ -669,6 +669,27 @@ async fn reporting_accumulates_lifetime_counters() {
         .expect("main");
     assert_eq!(state.lifetime_nodes, 2);
     assert!((state.lifetime_cost_usd - 1.5).abs() < f64::EPSILON);
+    assert_eq!(
+        state.lifetime_cost_basis,
+        Some(swamp::model::core::CostBasis::Reported)
+    );
+
+    // One estimated fold makes the whole total an estimate: a mixed sum is not provider truth.
+    h.pool.credit(
+        &id("main"),
+        swamp::model::core::Cost {
+            usd: 0.25,
+            basis: swamp::model::core::CostBasis::Estimated,
+        },
+    );
+    let basis = h
+        .pool
+        .snapshot()
+        .into_iter()
+        .find(|(_, a, _)| a.0 == "main")
+        .and_then(|(_, _, s)| s.lifetime_cost_basis)
+        .expect("a basis");
+    assert_eq!(basis, swamp::model::core::CostBasis::Estimated);
 }
 
 /// Counting configured accounts is not enough: a peer that cannot take work is not a peer, and

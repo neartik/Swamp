@@ -587,9 +587,10 @@ holds; WP3 provides the real impl, WP4's tests provide a scripted one.
   ineligible for new leases while a running lease is untouched.
 - **Selection:** with identical state, `RoundRobin` alternates; `LeastLoaded` picks the account with
   fewer inflight; `QuotaAware` prefers `util 0.1` over `util 0.9` at equal load, and degrades to
-  `LeastLoaded` when no quota is known. Default policy is `LeastLoaded`.
-- **Concurrency:** `max_concurrency = 2` never yields a third simultaneous lease; the global
-  semaphore caps total across providers. `acquire` does not busy-spin (assert bounded wakeups).
+  `LeastLoaded` when no quota is known. Default policy is `QuotaAware`.
+- **Concurrency:** `max_concurrency = 2` never yields a third simultaneous lease; an account with
+  no `max_concurrency` is bounded by its own headroom, not by a machine-wide count. `acquire` does
+  not busy-spin (assert bounded wakeups).
 - **Lease drop:** a panicking task releases its permit and decrements `inflight`.
 - **Persistence:** cooldowns written by one `AccountPool` are honoured by a fresh one constructed
   from the same path. Two pools writing concurrently do not corrupt the file (`fs4` lock + rename);
@@ -913,8 +914,8 @@ WP1 through WP6.
 - Ctrl-C during a run journals `RunFinished` and `killpg`s every live node. Assert no orphan
   process group survives.
 - `cmd::resume --plan` prints the `Recovery` plan and spawns nothing. Assert zero processes started.
-- `cmd::accounts` renders the table with blank 5H/7D columns for OpenAI (no quota telemetry) rather
-  than zeros. `--json` is stable.
+- `cmd::accounts` renders the table with blank 5H/7D columns when the account has no quota source at
+  all, rather than zeros. `--json` is stable.
 - `doctor::checks` on a good fixture returns zero `Error`s. Injected faults each produce exactly one
   failing check with a message naming the fix:
   - a missing exec on PATH,

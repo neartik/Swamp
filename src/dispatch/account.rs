@@ -1,5 +1,5 @@
 use crate::ids::NodeId;
-use crate::model::core::{AccountId, LimitScope, Provider, RateLimitSnapshot, Usage};
+use crate::model::core::{AccountId, CostBasis, LimitScope, Provider, RateLimitSnapshot, Usage};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use time::OffsetDateTime;
@@ -18,7 +18,11 @@ pub struct Account {
     pub max_concurrency: Option<usize>,
 }
 
+/// `#[serde(default)]` on the container, not per field: a hand-written or older
+/// `~/.swamp/accounts.json` has to load, because the commands that recover from a bad file
+/// read that same file, and a future field must not break it again.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct AccountState {
     pub inflight: usize,
     pub health: Health,
@@ -30,29 +34,27 @@ pub struct AccountState {
     pub last_used: Option<OffsetDateTime>,
     pub lifetime_nodes: u64,
     pub lifetime_cost_usd: f64,
+    /// How `lifetime_cost_usd` was arrived at. One estimated fold makes the whole total an
+    /// estimate, so a pricing-table number is never presented as provider truth.
+    pub lifetime_cost_basis: Option<CostBasis>,
     /// When this process last changed the entry. The merge into the shared file is
     /// last-writer-wins per account, so a cooldown learned elsewhere is never clobbered.
-    #[serde(default, with = "time::serde::rfc3339::option")]
+    #[serde(with = "time::serde::rfc3339::option")]
     pub updated_at: Option<OffsetDateTime>,
 
     /// Every token this account ever spent, across runs and repos.
-    #[serde(default)]
     pub lifetime_tokens: Usage,
     /// Tokens spent inside the window `window_key` names. Zeroed when the window rolls.
-    #[serde(default)]
     pub window_tokens: Usage,
     /// When the current counting window began.
-    #[serde(default, with = "time::serde::rfc3339::option")]
+    #[serde(with = "time::serde::rfc3339::option")]
     pub window_started_at: Option<OffsetDateTime>,
     /// The window `window_tokens` is keyed to. A change means "roll and zero".
-    #[serde(default)]
     pub window_key: Option<WindowKey>,
     /// Every bucket the provider reported, keyed by limit id. Display only.
-    #[serde(default)]
     pub quota_buckets: BTreeMap<String, RateLimitSnapshot>,
-    #[serde(default, with = "time::serde::rfc3339::option")]
+    #[serde(with = "time::serde::rfc3339::option")]
     pub quota_observed_at: Option<OffsetDateTime>,
-    #[serde(default)]
     pub quota_source: Option<QuotaSource>,
 }
 
@@ -130,6 +132,12 @@ pub enum QuotaSource {
 }
 
 impl QuotaSource {
+    /// An estimate is Swamp's own arithmetic, not a provider reading: every surface that
+    /// counts accounts "without a quota source" has to count it as one of them.
+    pub fn is_measured(&self) -> bool {
+        !matches!(self, Self::Estimated)
+    }
+
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Telemetry => "telemetry",
@@ -251,6 +259,16 @@ impl AccountState {
         for (id, snap) in buckets {
             self.quota_buckets.insert(id.clone(), snap.clone());
         }
+    }
+
+    /// Fold one node's spend in. An estimate poisons the basis for good: a total that mixes
+    /// the two is an estimate.
+    pub fn credit_cost(&mut self, cost: crate::model::core::Cost) {
+        self.lifetime_cost_usd += cost.usd;
+        self.lifetime_cost_basis = Some(match self.lifetime_cost_basis {
+            Some(CostBasis::Estimated) => CostBasis::Estimated,
+            _ => cost.basis,
+        });
     }
 
     /// Fold a node's committed tokens into both counters.

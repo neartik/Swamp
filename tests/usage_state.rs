@@ -2,7 +2,7 @@
 
 use camino::Utf8PathBuf;
 use swamp::dispatch::account::{AccountState, QuotaSource, UsageLedger, WindowKey};
-use swamp::dispatch::persist::{StateMap, load_state, merge_state};
+use swamp::dispatch::persist::{StateMap, load_state, merge_state, update_state};
 use swamp::ids::{NodeId, RunId};
 use swamp::journal::fold::RunView;
 use swamp::journal::record::{JournalEvent, JournalLine};
@@ -263,6 +263,36 @@ fn a_state_file_from_before_token_accounting_still_loads() {
     assert!(got.window_key.is_none());
     assert!(got.quota_source.is_none());
     assert!(got.quota_buckets.is_empty());
+
+    // USAGE 2.1: every field defaults, so the smallest hand-written entry is a valid one.
+    std::fs::write(&path, r#"{"main":{}}"#).expect("write");
+    let state = load_state(&path).expect("a hand-written entry loads");
+    let got = &state[&AccountId("main".into())];
+    assert_eq!(got.lifetime_nodes, 0);
+    assert!(got.cooldown_until.is_none());
+    assert!(got.last_used.is_none());
+}
+
+/// `AccountPool::new` tolerates an unreadable state file and starts clean. If the write path
+/// tolerated it too, the first persist would replace a machine-wide file - every other repo's
+/// account included - with this repo's accounts alone.
+#[test]
+fn a_write_never_replaces_a_state_file_it_could_not_parse() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = Utf8PathBuf::from_path_buf(dir.path().join("accounts.json")).expect("utf8");
+    std::fs::write(&path, "{ not json at all").expect("write");
+
+    let mut mine = StateMap::new();
+    mine.insert(AccountId("main".into()), AccountState::default());
+    assert!(merge_state(&path, &mine).is_err(), "a parse error is fatal");
+    assert!(
+        update_state(&path, &[AccountId("main".into())], |_, _| {}).is_err(),
+        "a parse error is fatal"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&path).expect("the file survives"),
+        "{ not json at all"
+    );
 }
 
 /// WP-B acceptance 8: quota telemetry is percentages and counters. No credential, no email,

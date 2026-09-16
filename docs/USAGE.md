@@ -169,8 +169,10 @@ node-count and depth guards, which stay.
 
 ### 2.1 Per-account state
 
-`src/dispatch/account.rs`, persisted to `~/.swamp/accounts.json`. Every field is
-`#[serde(default)]` so an old file loads.
+`src/dispatch/account.rs`, persisted to `~/.swamp/accounts.json`. `#[serde(default)]` sits on the
+container, so an old or hand-written file loads whatever it omits - and so does one written before
+a field existed. A write never falls back to an empty map: a file that fails to parse is an error,
+never a whole-file overwrite of a machine-wide state file.
 
 ```rust
 pub struct AccountState {
@@ -182,6 +184,9 @@ pub struct AccountState {
     pub last_used: Option<OffsetDateTime>,
     pub lifetime_nodes: u64,
     pub lifetime_cost_usd: f64,
+    /// How that total was arrived at. One estimated fold makes the whole of it an estimate,
+    /// so `swamp usage --json` never labels a `[pricing]` multiplication `reported`.
+    pub lifetime_cost_basis: Option<CostBasis>,
     pub updated_at: Option<OffsetDateTime>,
 
     // new: token counters

@@ -1,5 +1,5 @@
 use crate::dispatch::account::{AccountState, WindowKey};
-use crate::model::core::AccountId;
+use crate::model::core::{AccountId, CostBasis};
 use anyhow::Context;
 use camino::Utf8Path;
 use fs4::fs_std::FileExt;
@@ -30,7 +30,9 @@ pub fn merge_state(path: &Utf8Path, mine: &StateMap) -> anyhow::Result<StateMap>
         .ok_or_else(|| anyhow::anyhow!("{path} has no parent directory"))?;
     std::fs::create_dir_all(dir).with_context(|| format!("creating {dir}"))?;
     let _guard = lock(path)?;
-    let mut merged = read_unlocked(path).unwrap_or_default();
+    // Never `unwrap_or_default`: writing our own map over a file we failed to parse would
+    // erase every account this repo does not configure.
+    let mut merged = read_unlocked(path)?;
     for (id, ours) in mine {
         let theirs = merged.get(id).cloned();
         // The newer entry wins the last-writer-wins fields; the counters are still
@@ -49,6 +51,8 @@ pub fn merge_state(path: &Utf8Path, mine: &StateMap) -> anyhow::Result<StateMap>
             // Cost accumulates per process from whatever the file held at startup, so our
             // own total does not include what the other process has spent since.
             entry.lifetime_cost_usd = theirs.lifetime_cost_usd.max(ours.lifetime_cost_usd);
+            entry.lifetime_cost_basis =
+                coarsest_basis(theirs.lifetime_cost_basis, ours.lifetime_cost_basis);
             // A rolled window starts at zero: only the SAME window may keep the other
             // process's count, or a reset window comes straight back from the file.
             if same_window(theirs.window_key.as_ref(), ours.window_key.as_ref()) {
@@ -62,6 +66,16 @@ pub fn merge_state(path: &Utf8Path, mine: &StateMap) -> anyhow::Result<StateMap>
     }
     write_locked(path, dir, &merged)?;
     Ok(merged)
+}
+
+/// One estimated fold anywhere makes the merged total an estimate.
+fn coarsest_basis(a: Option<CostBasis>, b: Option<CostBasis>) -> Option<CostBasis> {
+    match (a, b) {
+        (Some(CostBasis::Estimated), _) | (_, Some(CostBasis::Estimated)) => {
+            Some(CostBasis::Estimated)
+        }
+        (x, y) => x.or(y),
+    }
 }
 
 /// Two processes reading one codex window derive reset instants that differ by the age of
@@ -87,7 +101,7 @@ pub fn update_state(
         .ok_or_else(|| anyhow::anyhow!("{path} has no parent directory"))?;
     std::fs::create_dir_all(dir).with_context(|| format!("creating {dir}"))?;
     let _guard = lock(path)?;
-    let mut merged = read_unlocked(path).unwrap_or_default();
+    let mut merged = read_unlocked(path)?;
     for id in ids {
         f(id, merged.entry(id.clone()).or_default());
     }

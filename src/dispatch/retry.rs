@@ -165,7 +165,7 @@ pub async fn run_node(cx: &NodeCtx, mut spec: LaunchSpec, task: &TaskRequest) ->
                 {
                     Ok(l) => l,
                     Err(NoCapacity::Cancelled) => return cancelled(logical, attempts),
-                    Err(_) => return give_up(cx, logical, attempts, provider, &excluded),
+                    Err(e) => return give_up(cx, logical, attempts, provider, &excluded, e),
                 }
             }
         };
@@ -680,29 +680,38 @@ fn fail(logical: NodeId, attempts: Vec<NodeRecord>, failure: Failure) -> NodeOut
     outcome
 }
 
+/// The pool already worked out why every candidate is unusable; a generic count of cooling
+/// accounts would throw that away, and for a depleted pool it counts nothing at all.
 fn give_up(
     cx: &NodeCtx,
     logical: NodeId,
     attempts: Vec<NodeRecord>,
     provider: Provider,
     excluded: &HashSet<AccountId>,
+    no: NoCapacity,
 ) -> NodeOutcome {
-    let cooling = cx
-        .pool
-        .snapshot()
-        .into_iter()
-        .filter(|(p, _, s)| {
-            *p == provider
-                && s.cooldown_until
-                    .is_some_and(|t| t > time::OffsetDateTime::now_utc())
-        })
-        .count();
-    let detail = crate::error::SwampError::NoAccountAvailable {
-        provider,
-        excluded: excluded.len(),
-        cooling,
-    }
-    .to_string();
+    let now = time::OffsetDateTime::now_utc();
+    let detail = match no {
+        NoCapacity::Exhausted { reason } => reason,
+        NoCapacity::AllExhausted { retry_at, why } => format!(
+            "every {provider} account is at its limit until {}: {why}",
+            crate::ui::fmt::clock_day(retry_at, now)
+        ),
+        _ => {
+            let cooling = cx
+                .pool
+                .snapshot()
+                .into_iter()
+                .filter(|(p, _, s)| *p == provider && s.cooldown_until.is_some_and(|t| t > now))
+                .count();
+            crate::error::SwampError::NoAccountAvailable {
+                provider,
+                excluded: excluded.len(),
+                cooling,
+            }
+            .to_string()
+        }
+    };
     fail(logical, attempts, Failure::NoCapacity { detail })
 }
 

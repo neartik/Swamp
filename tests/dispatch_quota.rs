@@ -1022,6 +1022,47 @@ async fn a_depleted_account_that_is_also_cooling_carries_no_retry_time() {
     assert!(reason.contains("has no credits left"), "{reason}");
 }
 
+/// `swamp accounts disable` parks a subscription on purpose. A provider gate that lands and
+/// then lifts used to rewrite that word to `auth_broken` and then to `healthy`, putting the
+/// account back in rotation without anyone asking for it.
+#[tokio::test]
+async fn a_disabled_account_survives_a_hard_gate_that_lifts() {
+    let h = harness(TWO_UNCAPPED).await;
+    h.pool.set_enabled(&id("main"), false);
+
+    h.pool.observe_quota(
+        &id("main"),
+        RateLimitSnapshot {
+            ordinary_usage_allowed: Some(false),
+            reached: Some(LimitReached::CreditsDepleted),
+            ..Default::default()
+        },
+    );
+    assert_eq!(health_of(&h, "main"), Health::Disabled);
+
+    h.pool.observe_quota(
+        &id("main"),
+        RateLimitSnapshot {
+            ordinary_usage_allowed: Some(true),
+            ..Default::default()
+        },
+    );
+    assert_eq!(
+        health_of(&h, "main"),
+        Health::Disabled,
+        "only `swamp accounts enable` may take an account out of Disabled"
+    );
+}
+
+fn health_of(h: &Harness, who: &str) -> Health {
+    h.pool
+        .snapshot()
+        .into_iter()
+        .find(|(_, a, _)| a == &id(who))
+        .map(|(_, _, s)| s.health)
+        .expect("a configured account")
+}
+
 /// The cooldown and the health word are two independent gates: `swamp accounts enable`
 /// rewrites one and leaves the other, and dispatch must still honour the live timer.
 #[test]

@@ -12,8 +12,8 @@ use support::Harness;
 use swamp::dispatch::account::{AccountState, Health, QuotaSource};
 use swamp::dispatch::policy::DEFAULT_QUOTA_MAX_AGE as MAX_AGE;
 use swamp::model::core::{
-    AccountId, LimitReached, LimitScope, LimitStatus, LimitWindow, Provider, RateLimitSnapshot,
-    Usage,
+    AccountId, CostBasis, LimitReached, LimitScope, LimitStatus, LimitWindow, Provider,
+    RateLimitSnapshot, Usage,
 };
 use swamp::ui::chat::theme::{Role, Theme};
 use swamp::ui::usage::{self, AccountRow};
@@ -60,6 +60,7 @@ fn row(id: &str, provider: Provider, health: Health) -> AccountRow {
         lifetime_tokens: Usage::default(),
         lifetime_nodes: 0,
         cost_usd: 0.0,
+        cost_basis: None,
     }
 }
 
@@ -370,6 +371,59 @@ fn the_totals_footnote_agrees_with_itself_in_the_plural() {
         body.contains("2 accounts have no quota source; their utilization is estimated"),
         "{body}"
     );
+}
+
+/// `Estimated` is Swamp's own arithmetic, not a provider reading. `doctor` already counts it
+/// as no source; the footnote used to exclude the very rows it describes.
+#[test]
+fn an_estimated_quota_source_counts_as_no_quota_source() {
+    let mut r = row("codex-main", Provider::Openai, Health::Healthy);
+    r.quota_source = Some(QuotaSource::Estimated);
+    let r = with_seven_day(r, 0.42, false);
+    let body = screen(
+        &usage::render(std::slice::from_ref(&r), 100, &Theme::plain(), MAX_AGE),
+        100,
+    );
+    assert!(
+        body.contains("1 account has no quota source; its utilization is estimated"),
+        "{body}"
+    );
+    assert_eq!(
+        usage::json(&[r])["totals"]["accounts_without_quota_source"],
+        1
+    );
+}
+
+/// A consumer reading both `swamp usage --json` and `accounts.json` must not meet two
+/// spellings of one enum value.
+#[test]
+fn the_json_quota_source_is_the_spelling_serde_writes() {
+    let mut r = row("codex-main", Provider::Openai, Health::Healthy);
+    r.quota_source = Some(QuotaSource::AppServer);
+    let r = with_seven_day(r, 0.10, true);
+    let source = &usage::json(std::slice::from_ref(&r))["accounts"][0]["quota"]["source"];
+    assert_eq!(
+        source,
+        &serde_json::to_value(QuotaSource::AppServer).expect("serde value")
+    );
+    assert_eq!(source, "app_server");
+}
+
+/// A `[pricing]` multiplication is not what the provider told us, and the JSON is the one
+/// surface that drops the `~`.
+#[test]
+fn an_estimated_cost_is_never_labelled_reported() {
+    let mut r = row("codex-main", Provider::Openai, Health::Healthy);
+    r.cost_usd = 1.2;
+    r.cost_basis = Some(CostBasis::Estimated);
+    assert_eq!(
+        usage::json(std::slice::from_ref(&r))["accounts"][0]["cost_basis"],
+        "estimated"
+    );
+
+    // A state file written before the basis was recorded must not promise provider truth.
+    r.cost_basis = None;
+    assert_eq!(usage::json(&[r])["accounts"][0]["cost_basis"], "estimated");
 }
 
 fn test_config() -> swamp::config::Config {
