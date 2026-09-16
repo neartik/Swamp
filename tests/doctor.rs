@@ -459,3 +459,32 @@ async fn the_quota_check_grades_the_source_and_prints_the_age() {
     );
     assert!(check("alt").detail.contains("no quota source"));
 }
+
+/// The §9 sample is the interface teams gate CI on, so it must show the collision at the level
+/// the code emits and the header the code prints.
+#[test]
+fn the_design_doc_doctor_sample_matches_what_the_code_emits() {
+    let root = Utf8PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let doc = std::fs::read_to_string(root.join("docs/DESIGN.md")).expect("DESIGN.md");
+    let sample = doc
+        .split("$ swamp doctor\n")
+        .nth(1)
+        .and_then(|rest| rest.split("```").next())
+        .expect("the §9 doctor sample");
+    assert!(
+        sample.contains(&format!("{} claude-work", Level::Error.label())),
+        "the collision is an Error in src/doctor.rs: {sample}"
+    );
+    assert!(
+        !sample.contains("rustc"),
+        "swamp doctor prints no rustc version"
+    );
+    assert!(
+        sample.contains("swamp 0.1.0 - macos aarch64"),
+        "the header is `swamp <version> - <os> <arch>`: {sample}"
+    );
+    assert!(
+        sample.trim_end().ends_with("2 warnings, 1 error."),
+        "the sample has two WARN lines and one ERROR line: {sample}"
+    );
+}

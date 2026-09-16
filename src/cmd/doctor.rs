@@ -66,7 +66,12 @@ pub async fn run(ctx: &Ctx, args: &DoctorArgs) -> anyhow::Result<i32> {
             c.detail
         ));
     }
-    text.push_str(&format!("\n{warnings} warnings, {errors} errors.\n"));
+    let plural = |n: usize, w: &str| format!("{n} {w}{}", if n == 1 { "" } else { "s" });
+    text.push_str(&format!(
+        "\n{}, {}.\n",
+        plural(warnings, "warning"),
+        plural(errors, "error")
+    ));
     ctx.out(&text);
     Ok(if errors > 0 { 1 } else { 0 })
 }

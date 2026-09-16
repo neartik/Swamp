@@ -218,11 +218,7 @@ fn account_lines(
     } else {
         health_role(shown)
     };
-    let word = if parked {
-        "parked"
-    } else {
-        watch::health_word(shown)
-    };
+    let word = if parked { "parked" } else { health_cell(shown) };
     let glyph = if parked { "x" } else { health_glyph(shown) };
     let mut cells = Vec::new();
     if l.show_health {
@@ -407,6 +403,15 @@ fn health_role(h: Health) -> Role {
         Health::Degraded => Role::Accent,
         Health::Cooling => Role::Meta,
         Health::AuthBroken | Health::Disabled => Role::Err,
+    }
+}
+
+/// `watch::health_word` inside the documented nine-column HEALTH budget: `auth-broken` is eleven
+/// columns and would be clipped mid-word, so the cell names the action instead.
+fn health_cell(h: Health) -> &'static str {
+    match h {
+        Health::AuthBroken => "no-auth",
+        h => watch::health_word(h),
     }
 }
 
@@ -801,5 +806,31 @@ mod tests {
         .join("\n");
         assert!(!narrow.contains("LIFETIME") && !narrow.contains("COST"));
         assert!(!narrow.contains("HEALTH"));
+    }
+
+    #[test]
+    fn every_health_word_fits_the_health_column() {
+        for h in [
+            Health::Healthy,
+            Health::Degraded,
+            Health::Cooling,
+            Health::AuthBroken,
+            Health::Disabled,
+        ] {
+            assert!(
+                health_cell(h).width() <= HEALTH_W,
+                "{} overflows HEALTH_W",
+                health_cell(h)
+            );
+        }
+        let body = text(&render(
+            &[row("claude-broke", Health::AuthBroken)],
+            100,
+            &Theme::plain(),
+            MAX_AGE,
+        ))
+        .join("\n");
+        assert!(body.contains("claude-broke  no-auth"), "{body}");
+        assert!(!body.contains('\u{2026}'), "{body}");
     }
 }

@@ -459,7 +459,7 @@ Columns, left to right, with widths:
 | Column | Width | Align | Source | Empty |
 |---|---|---|---|---|
 | ACCOUNT | 13 | left | `AccountId` | never |
-| HEALTH | 9 | left | `watch::health_word` | never |
+| HEALTH | 9 | left | `watch::health_word`, `no-auth` for `AuthBroken` (the word is 11 wide) | never |
 | 5H | 5 | right | `LimitScope::FiveHour` window, `NN%` | `-` |
 | RESETS | 9 | right | `in 3h02m`, `in 23h`, `in 6d21h` from that window's `resets_at` | `-` |
 | 7D | 5 | right | `LimitScope::SevenDay` window | `-` |

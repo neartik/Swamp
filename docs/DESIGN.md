@@ -1969,48 +1969,48 @@ node. A run that exists is a run that spent something.
 
 ```
 $ swamp doctor
-swamp 0.1.0 - rustc 1.98.0 - darwin arm64
+swamp 0.1.0 - macos aarch64
 
 environment
-  ok   git 2.47.1                    worktree support present
-  ok   repo ~/projects/api           HEAD a3f91c2, clean
-  ok   .swamp/ writable              listed in .git/info/exclude
-  ok   ~/.swamp state dir            free 412 GiB
-  ok   swamp resolvable              /usr/local/bin/swamp (needed for the MCP bridge)
-  ok   not inside a worker           SWAMP_DEPTH unset
+  ok    git 2.47.1                    worktree support present
+  ok    repo ~/projects/api           HEAD a3f91c2, clean
+  ok    .swamp/ writable              listed in .git/info/exclude
+  ok    ~/.swamp state dir            free 412 GiB
+  ok    swamp resolvable              /usr/local/bin/swamp (needed for the MCP bridge)
+  ok    not inside a worker           SWAMP_DEPTH unset
 
 providers.anthropic (claude-cli)
-  ok   claude-main -> ~/bin/claude-main   wrapper -> claude 2.x
-         auth: subscription (apiKeySource=none)   CLAUDE_CONFIG_DIR=~/.claude
-         tiers: high=opus  mid=sonnet  low=haiku   probe 1.4s
-  ok   claude-alt  -> ~/bin/claude-alt    CLAUDE_CONFIG_DIR=~/.claude-alt
-  WARN claude-work -> /opt/homebrew/bin/claude
-         not a wrapper and CLAUDE_CONFIG_DIR is unset: this is the SAME account as
-         claude-main. Dispatch would double-spend one quota while reporting two
-         healthy accounts, and failover between them would be a silent no-op.
+  ok    claude-main -> ~/bin/claude-main   wrapper -> claude 2.x
+          auth: subscription (apiKeySource=none)   CLAUDE_CONFIG_DIR=~/.claude
+          tiers: high=opus  mid=sonnet  low=haiku   probe 1.4s
+  ok    claude-alt  -> ~/bin/claude-alt    CLAUDE_CONFIG_DIR=~/.claude-alt
+  ERROR claude-work -> /opt/homebrew/bin/claude
+          not a wrapper and CLAUDE_CONFIG_DIR is unset: this is the SAME account as
+          claude-main. Dispatch would double-spend one quota while reporting two
+          healthy accounts, and failover between them would be a silent no-op.
 
 providers.openai (codex-cli)
-  ok   codex-main  -> ~/bin/codex-main    wrapper -> codex-cli 0.15.x
-         auth: ChatGPT subscription   CODEX_HOME=~/.codex-main
-  note codex exec reports no cost and no quota telemetry.
-         [pricing] is set, so OpenAI node costs render as estimates.
+  ok    codex-main  -> ~/bin/codex-main    wrapper -> codex-cli 0.15.x
+          auth: ChatGPT subscription   CODEX_HOME=~/.codex-main
+  note  codex exec reports no cost and no quota telemetry.
+          [pricing] is set, so OpenAI node costs render as estimates.
 
 protocol
-  ok   claude stream-json fixtures parse   (5/5 golden lines)
-  ok   codex  --json fixtures parse        (5/5, 1 known non-JSON preamble)
-  ok   mcp round trip                      brain spawned with --mcp-config called swamp_ping
+  ok    claude stream-json fixtures parse   (5/5 golden lines)
+  ok    codex  --json fixtures parse        (5/5, 1 known non-JSON preamble)
+  ok    mcp round trip                      brain spawned with --mcp-config called swamp_ping
 
 config
-  ok   ~/.config/swamp/config.toml         valid
-  WARN [workspace] link is empty but ./target is 3.1 GiB
-         fresh worktrees will rebuild from scratch; consider link = ["target"]
-  WARN providers.anthropic.worker.permission_mode = "acceptEdits"
-         denies every Bash call under --permission-prompts none and Bash is not
-         allowed, so workers cannot run tests, a build or git. Add "Bash" to
-         providers.anthropic.worker.allow_tools. ("auto" is not the fix: it denies
-         the file writes instead.) The same check covers [brain].
+  ok    ~/.config/swamp/config.toml         valid
+  WARN  [workspace] link is empty but ./target is 3.1 GiB
+          fresh worktrees will rebuild from scratch; consider link = ["target"]
+  WARN  providers.anthropic.worker.permission_mode = "acceptEdits"
+          denies every Bash call under --permission-prompts none and Bash is not
+          allowed, so workers cannot run tests, a build or git. Add "Bash" to
+          providers.anthropic.worker.allow_tools. ("auto" is not the fix: it denies
+          the file writes instead.) The same check covers [brain].
 
-3 warnings, 0 errors.
+2 warnings, 1 error.
 ```
 
 The most valuable check is the third provider line. Two "accounts" that resolve to the same config
