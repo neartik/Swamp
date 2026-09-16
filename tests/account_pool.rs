@@ -560,6 +560,62 @@ max_concurrency = 4
     assert_eq!(leases.len(), 4);
 }
 
+/// A cooldown is machine-wide and persisted, so `swamp chat` regularly starts inside one.
+/// Failing the command instead of waiting the timer out throws the whole session away.
+#[tokio::test]
+async fn the_brain_waits_for_a_cooling_account_instead_of_failing() {
+    let h = harness(TWO_ACCOUNTS).await;
+    h.pool
+        .cooldown(&id("main"), Duration::from_millis(400), "rate limit");
+    assert_eq!(health_of(&h.pool, "main"), Health::Cooling);
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let lease = h
+        .pool
+        .acquire_brain(Provider::Anthropic, Some(&id("main")), deadline)
+        .await
+        .expect("the brain waits out the cooldown");
+    assert_eq!(lease.account, id("main"));
+}
+
+/// Waiting is only right when a timer can help: a disabled account never comes back, so the
+/// call must fail at once rather than park the command until its deadline.
+#[tokio::test]
+async fn the_brain_does_not_wait_on_a_hard_gate() {
+    let h = harness(TWO_ACCOUNTS).await;
+    h.pool.set_enabled(&id("main"), false);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    let started = std::time::Instant::now();
+    let got = h
+        .pool
+        .acquire_brain(Provider::Anthropic, Some(&id("main")), deadline)
+        .await;
+    assert!(
+        matches!(got, Err(NoCapacity::Exhausted { .. })),
+        "a disabled account is not a wait"
+    );
+    assert!(started.elapsed() < Duration::from_secs(5));
+}
+
+/// A `credits_depleted` reading has no timer, so `swamp accounts clear` is the only way back
+/// into rotation. Clearing only the cooldown left the account gated forever.
+#[tokio::test]
+async fn clear_lifts_the_provider_gates_too() {
+    let h = harness(TWO_ACCOUNTS).await;
+    h.pool.set_enabled(&id("alt"), false);
+    let mut depleted = quota(0.1);
+    depleted.reached = Some(swamp::model::core::LimitReached::CreditsDepleted);
+    depleted.ordinary_usage_allowed = Some(false);
+    h.pool.observe_quota(&id("main"), depleted);
+    assert!(matches!(
+        acquire(&h.pool).await,
+        Err(NoCapacity::Exhausted { .. })
+    ));
+
+    h.pool.clear(&id("main"));
+    assert_eq!(acquire(&h.pool).await.expect("lease").account, id("main"));
+}
+
 #[tokio::test]
 async fn disable_and_clear_move_an_account_in_and_out_of_rotation() {
     let h = harness(TWO_ACCOUNTS).await;

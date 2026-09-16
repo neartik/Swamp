@@ -629,6 +629,113 @@ fn an_estimated_reset_under_a_day_fits_the_column() {
     assert!(body.contains("~in 23h"), "{body}");
 }
 
+/// Nothing on the reading side resets `health` when a cooldown expires, so `swamp usage`
+/// with no supervisor running used to print "cooling" with no `until` row, indefinitely,
+/// while `score` happily dispatched to the account.
+#[test]
+fn an_expired_cooldown_is_not_rendered_as_cooling() {
+    let mut r = row("claude-main", Provider::Anthropic, Health::Cooling);
+    r.cooldown_until = Some(OffsetDateTime::now_utc() - time::Duration::hours(1));
+    let body = screen(
+        &usage::render(std::slice::from_ref(&r), 100, &Theme::plain(), MAX_AGE),
+        100,
+    );
+    assert!(!body.contains("cooling"), "{body}");
+    assert!(body.contains("healthy"), "{body}");
+
+    // At 62 columns the HEALTH word is a glyph; it must not stay the cooling one either.
+    let narrow = screen(&usage::render(&[r], 62, &Theme::plain(), MAX_AGE), 62);
+    assert!(narrow.contains("+ claude-main"), "{narrow}");
+}
+
+/// §3.1: a parked account gets a continuation row. `health_from_quota` reads utilization
+/// alone, so a provider-refused account rendered `healthy` with 68% headroom while every
+/// node dispatched to it was hard-blocked.
+#[test]
+fn a_provider_parked_account_says_so() {
+    let mut r = with_seven_day(
+        row("codex-main", Provider::Openai, Health::Healthy),
+        0.32,
+        true,
+    );
+    let q = r.quota.as_mut().expect("quota");
+    q.reached = Some(LimitReached::CreditsDepleted);
+    q.ordinary_usage_allowed = Some(false);
+    let body = screen(&usage::render(&[r], 100, &Theme::plain(), MAX_AGE), 100);
+    assert!(body.contains("parked"), "{body}");
+    assert!(body.contains("credits_depleted"), "{body}");
+    assert!(!body.contains("healthy"), "{body}");
+}
+
+/// The estimated variant of a sub-hour reset was one column too wide for RESETS and came out
+/// ellipsized, exactly in the last hour before the window rolls.
+#[test]
+fn an_estimated_reset_in_minutes_fits_the_column() {
+    for minutes in [10i64, 24, 59] {
+        let mut r = row("claude-main", Provider::Anthropic, Health::Healthy);
+        r.quota = Some(RateLimitSnapshot {
+            status: LimitStatus::Allowed,
+            windows: vec![LimitWindow {
+                scope: LimitScope::FiveHour,
+                utilization: 0.8,
+                resets_at: Some(
+                    OffsetDateTime::now_utc()
+                        + time::Duration::minutes(minutes)
+                        + time::Duration::seconds(59),
+                ),
+                window_minutes: Some(300),
+                measured: false,
+            }],
+            ..RateLimitSnapshot::default()
+        });
+        let body = screen(&usage::render(&[r], 100, &Theme::plain(), MAX_AGE), 100);
+        assert!(!body.contains('\u{2026}'), "{minutes}m: {body}");
+        assert!(
+            body.contains(&format!("~in {minutes}m")),
+            "{minutes}m: {body}"
+        );
+    }
+}
+
+/// §3.1 documents a drop order down to 62 columns; the footer has to shed with the table
+/// instead of soft-wrapping into three ragged lines under it.
+#[test]
+fn the_totals_row_never_overflows_a_narrow_terminal() {
+    let mut rows = vec![
+        with_seven_day(
+            row("claude-main", Provider::Anthropic, Health::Healthy),
+            0.2,
+            true,
+        ),
+        with_seven_day(
+            row("claude-alt", Provider::Anthropic, Health::Healthy),
+            0.3,
+            true,
+        ),
+    ];
+    for r in &mut rows {
+        r.lifetime_tokens = Usage {
+            input_tokens: 2_100_000,
+            output_tokens: 96_400,
+            cached_input_tokens: 18_200_000,
+            cache_write_tokens: 441_000,
+            ..Usage::default()
+        };
+        r.cost_usd = 2.65;
+    }
+    for width in [62u16, 66, 78, 100] {
+        let lines = usage::render(&rows, width, &Theme::plain(), MAX_AGE);
+        for line in &lines {
+            assert!(
+                line.width() <= width as usize,
+                "{width} columns: {:?} is {} wide",
+                line,
+                line.width()
+            );
+        }
+    }
+}
+
 /// A `not in config` row has no executable to name, so the re-auth instruction would name
 /// nothing at all.
 #[test]

@@ -345,14 +345,54 @@ impl AccountPool {
             }
             Err(_) => return Err(NoCapacity::Saturated),
         };
+        // The permit is held for the whole wait: a cooling account comes back on a timer, and
+        // failing the command instead of waiting for it throws the run away.
+        let mut permit = Some(permit);
         let exclude = HashSet::new();
-        self.take_from(provider, &exclude, chosen.as_ref(), Some(permit))
-            .ok_or_else(|| NoCapacity::Exhausted {
-                reason: match &chosen {
-                    Some(id) => format!("the brain's account `{}` is cooling or disabled", id.0),
-                    None => self.no_account_error(provider, &exclude).to_string(),
-                },
-            })
+        let mut announced = false;
+        loop {
+            // Registered BEFORE the check, exactly as `acquire_node` does it.
+            let notified = self.returned.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            let wake_at = match self.capacity_for(provider, &exclude, chosen.as_ref()) {
+                Capacity::Ready => {
+                    match self.take_from(provider, &exclude, chosen.as_ref(), None) {
+                        Some(mut lease) => {
+                            lease._permit = permit.take();
+                            return Ok(lease);
+                        }
+                        None => {
+                            self.returned.notify_waiters();
+                            None
+                        }
+                    }
+                }
+                Capacity::Busy { next_reset } => next_reset,
+                Capacity::AllExhausted { retry_at, why } => {
+                    if !announced {
+                        announced = true;
+                        tracing::warn!(
+                            "the brain's account is at its limit until {}: {why}",
+                            crate::ui::fmt::clock_hm(retry_at)
+                        );
+                    }
+                    Some(retry_at)
+                }
+                // No timer will rescue this: disabled, auth-broken, or out of credits.
+                Capacity::Exhausted { reason } => return Err(NoCapacity::Exhausted { reason }),
+            };
+            if Instant::now() >= deadline {
+                return Err(NoCapacity::Saturated);
+            }
+            let until = wake_at
+                .map_or(Instant::now() + IDLE_RECHECK, instant_of)
+                .min(deadline);
+            tokio::select! {
+                _ = &mut notified => {}
+                _ = tokio::time::sleep_until(until) => {}
+            }
+        }
     }
 
     pub fn report(&self, id: &AccountId, failure: Option<&Failure>, cost: Option<Cost>) {
@@ -556,6 +596,12 @@ impl AccountPool {
             let entry = state.entry(id.clone()).or_default();
             entry.cooldown_until = None;
             entry.consecutive_infra_failures = 0;
+            // The hard gates too: a misread `credits_depleted` has no timer, so without this
+            // the only way back into rotation is editing accounts.json by hand.
+            if let Some(q) = entry.quota.as_mut() {
+                q.reached = None;
+                q.ordinary_usage_allowed = None;
+            }
             entry.health = health_from_quota(entry, self.quota_warn_at());
             entry.health
         };
@@ -673,8 +719,22 @@ impl AccountPool {
     }
 
     fn capacity(&self, provider: Provider, exclude: &HashSet<AccountId>) -> Capacity {
+        self.capacity_for(provider, exclude, None)
+    }
+
+    /// `pin` narrows the candidates to the one account the caller insists on, so the brain
+    /// reads the same gate a worker does instead of a pool-wide verdict that ignores it.
+    fn capacity_for(
+        &self,
+        provider: Provider,
+        exclude: &HashSet<AccountId>,
+        pin: Option<&AccountId>,
+    ) -> Capacity {
         let now = OffsetDateTime::now_utc();
-        let candidates = self.candidates(provider, exclude);
+        let candidates: Vec<&Account> = match pin {
+            Some(id) => self.accounts.values().filter(|a| &a.id == id).collect(),
+            None => self.candidates(provider, exclude),
+        };
         if candidates.is_empty() {
             return Capacity::Exhausted {
                 reason: self.no_account_error(provider, exclude).to_string(),

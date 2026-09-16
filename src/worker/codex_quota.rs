@@ -2,7 +2,7 @@
 //! the rollout file the run appends to (free, live), then the app-server (richer, network).
 
 use crate::model::core::{
-    LimitReached, LimitScope, LimitStatus, LimitWindow, RateLimitSnapshot, Usage,
+    AccountId, LimitReached, LimitScope, LimitStatus, LimitWindow, RateLimitSnapshot, Usage,
 };
 use camino::{Utf8Path, Utf8PathBuf};
 use parking_lot::Mutex;
@@ -302,6 +302,18 @@ pub fn estimated(
     })
 }
 
+/// The model a probe must resolve its bucket by. Dispatch scores whatever a probe stores, so
+/// `/usage` and `swamp usage --probe` have to agree with `retry.rs` on which bucket an
+/// account bills against, or a display command silently reroutes the pool.
+pub fn quota_model(cfg: &crate::config::Config, id: &AccountId) -> Option<String> {
+    let a = cfg.account(id)?;
+    let tier = cfg
+        .dispatch
+        .default_tier
+        .unwrap_or(crate::model::core::Tier::Mid);
+    cfg.model_for(a.provider, tier, Some(id)).ok()
+}
+
 /// `CODEX_HOME` is owned by the user's wrapper and Swamp cannot read a wrapper: the
 /// app-server's `initialize` result echoes it, and the answer is cached per account.
 pub async fn resolve_codex_home(exec: &str, env: &BTreeMap<String, String>) -> Option<Utf8PathBuf> {
@@ -309,6 +321,13 @@ pub async fn resolve_codex_home(exec: &str, env: &BTreeMap<String, String>) -> O
         return Some(Utf8PathBuf::from(home));
     }
     let key = home_key(exec, env);
+    if let Some(hit) = homes().lock().get(&key) {
+        return hit.clone();
+    }
+    // Single-flight, not a check-then-insert: eight nodes finishing together would otherwise
+    // all miss the cold cache and spawn eight app-servers for one answer.
+    let gate = home_gate(&key);
+    let _held = gate.lock().await;
     if let Some(hit) = homes().lock().get(&key) {
         return hit.clone();
     }
@@ -348,6 +367,18 @@ pub async fn read_rate_limits(
         homes().lock().insert(home_key(exec, env), home);
     }
     read.ok_or_else(|| anyhow::anyhow!("{exec} app-server returned no rate limits"))
+}
+
+fn home_gate(key: &str) -> std::sync::Arc<tokio::sync::Mutex<()>> {
+    static GATES: OnceLock<Mutex<BTreeMap<String, std::sync::Arc<tokio::sync::Mutex<()>>>>> =
+        OnceLock::new();
+    std::sync::Arc::clone(
+        GATES
+            .get_or_init(|| Mutex::new(BTreeMap::new()))
+            .lock()
+            .entry(key.to_owned())
+            .or_default(),
+    )
 }
 
 fn homes() -> &'static Mutex<BTreeMap<String, Option<Utf8PathBuf>>> {
@@ -644,5 +675,82 @@ mod tests {
         let sample = tail_rollout(&home, thread).expect("sample");
         assert!(sample.quota.is_some());
         assert!(tail_rollout(&home, "no-such-thread").is_none());
+    }
+
+    fn test_config(text: &str) -> crate::config::Config {
+        let schema = toml::from_str(text).expect("config parses");
+        let layers = vec![
+            crate::config::load::default_layer(),
+            crate::config::load::Layer {
+                origin: "test".into(),
+                schema,
+            },
+        ];
+        let mut cfg = crate::config::resolve::from_schema(crate::config::load::merge(layers));
+        crate::config::validate::validate(&mut cfg).expect("config is valid");
+        cfg
+    }
+
+    /// Both probe call sites used to select with no model, which picks `codex` and then
+    /// overwrites the bucket dispatch scores: a read-only display command rerouting the pool.
+    #[test]
+    fn the_probe_model_is_the_accounts_own_mapping() {
+        let cfg = test_config(
+            r#"
+version = 1
+[providers.openai]
+models = { low = "gpt-5-codex", mid = "gpt-5-codex", high = "gpt-5-codex" }
+[[accounts]]
+id = "codex-main"
+provider = "openai"
+exec = "codex"
+models = { mid = "gpt-5.1-codex-mini" }
+"#,
+        );
+        let model = quota_model(&cfg, &AccountId("codex-main".into()));
+        assert_eq!(model.as_deref(), Some("gpt-5.1-codex-mini"));
+
+        let value: serde_json::Value =
+            serde_json::from_str(&fixture("codex-ratelimits-sample.json")).expect("json");
+        let read = parse_rate_limits(&value, now());
+        let snap = read.select(None, model.as_deref()).expect("bucket");
+        assert_eq!(
+            snap.limit_id.as_deref(),
+            Some("codex_bengalfox"),
+            "the probe must bill the same bucket dispatch does"
+        );
+    }
+
+    /// The cache was a check-then-insert around an await: eight nodes finishing together all
+    /// missed the cold entry and each spawned its own `codex app-server`.
+    #[tokio::test]
+    async fn concurrent_callers_probe_the_codex_home_once() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let counter = dir.path().join("spawns");
+        let exec = dir.path().join("fake-codex");
+        std::fs::write(
+            &exec,
+            format!("#!/bin/sh\necho x >> {}\nexit 1\n", counter.display()),
+        )
+        .expect("write");
+        std::fs::set_permissions(&exec, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        let exec = exec.to_string_lossy().into_owned();
+
+        let mut tasks = Vec::new();
+        for _ in 0..8 {
+            let exec = exec.clone();
+            tasks.push(tokio::spawn(async move {
+                resolve_codex_home(&exec, &BTreeMap::new()).await
+            }));
+        }
+        for t in tasks {
+            assert!(t.await.expect("join").is_none());
+        }
+        let spawns = std::fs::read_to_string(&counter)
+            .unwrap_or_default()
+            .lines()
+            .count();
+        assert_eq!(spawns, 1, "one app-server for the whole burst");
     }
 }

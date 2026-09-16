@@ -380,18 +380,18 @@ fn minutes_of(scope: LimitScope) -> Option<u32> {
     }
 }
 
-/// Overage is only a hard stop once the limit itself rejected the turn: `overageStatus:
-/// "rejected"` on an allowed account merely means the plan has no overage, which is normal.
+/// `overageStatus` and `overageDisabledReason` are plan attributes, not a depletion event: a
+/// Pro plan reports `rejected`/`member_zero_credit_limit` while perfectly healthy. Credits
+/// only ran out once the account was actually drawing on overage when the turn was refused;
+/// anything else is an ordinary window limit that comes back at `resetsAt`.
 fn reached_of(info: &RateLimitInfo, status: LimitStatus) -> Option<LimitReached> {
     if status != LimitStatus::Rejected {
         return None;
     }
-    match (info.overage_status.as_deref(), &info.overage_reason) {
-        (Some("rejected"), Some(reason)) if !reason.is_empty() => {
-            Some(LimitReached::CreditsDepleted)
-        }
-        _ => Some(LimitReached::RateLimit),
+    if info.using_overage == Some(true) && info.overage_status.as_deref() == Some("rejected") {
+        return Some(LimitReached::CreditsDepleted);
     }
+    Some(LimitReached::RateLimit)
 }
 
 fn reset_time(secs: Option<i64>) -> Option<OffsetDateTime> {
@@ -467,8 +467,8 @@ struct RateLimitInfo {
     windows: BTreeMap<String, Window>,
     #[serde(default, rename = "overageStatus")]
     overage_status: Option<String>,
-    #[serde(default, rename = "overageDisabledReason")]
-    overage_reason: Option<String>,
+    #[serde(default, rename = "isUsingOverage")]
+    using_overage: Option<bool>,
 }
 
 #[derive(Deserialize, Clone, Copy)]

@@ -834,6 +834,7 @@ unreadable; a truncated one is not. Results collapse to `ui.collapse_lines` (3) 
 | `app.rs` | 340 | `App`, `Msg`, `Effect`, `Phase { Idle, Working { since }, Interrupting }`, `reduce`, `on_key`, `on_brain`, `on_journal`, `on_tick`, `live_height`, `cursor_xy`. Pure, no I/O |
 | `theme.rs` | 120 | `Theme`, `Role`, `detect`, glyph table, ascii fallback, `state_style(&NodeState)` |
 | `live.rs` | 270 | `Inline`: the live area over `RelativeBackend` - open, draw, commit, set_height, reflow, clear; enter and restore |
+| `render.rs` | 70 | `render::live`, `render::compose`, `render::live_height`: composes the live area - worker board, spinner and status line, slash popup - into the `Live { lines, cursor }` `live.rs` draws |
 | `live/relative.rs` | 285 | `RelativeBackend`: a `Backend` over `CrosstermBackend` that tracks the cursor's row inside the area and moves by `MoveUp`/`MoveDown`. No DSR |
 | `input.rs` | 220 | `Editor`: multi-line buffer, grapheme cursor, readline bindings, `History` load/save |
 | `markdown.rs` | 250 | `MdStream`, block grammar, inline pass, `wrap_spans` |

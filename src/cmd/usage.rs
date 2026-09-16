@@ -2,11 +2,12 @@ use crate::cli::UsageArgs;
 use crate::cmd::Ctx;
 use crate::config::resolve::expand_env;
 use crate::dispatch::account::{AccountState, QuotaSource};
-use crate::dispatch::persist::{self, StateMap};
-use crate::model::core::{AccountId, Provider};
+use crate::dispatch::persist;
+use crate::model::core::{AccountId, Provider, RateLimitSnapshot};
 use crate::ui::chat::theme::Theme;
 use crate::ui::usage;
 use crate::worker::codex_quota;
+use std::collections::BTreeMap;
 use time::OffsetDateTime;
 
 /// Reads `~/.swamp/accounts.json` under the `fs4` lock and renders the same table `/usage`
@@ -16,8 +17,20 @@ pub async fn run(ctx: &Ctx, args: &UsageArgs) -> anyhow::Result<i32> {
     let mut state = persist::load_state(&path).unwrap_or_default();
 
     if args.probe {
-        probe_all(ctx, &mut state).await;
-        state = persist::merge_state(&path, &state).unwrap_or(state);
+        let probed = probe_all(ctx).await;
+        if !probed.is_empty() {
+            let now = OffsetDateTime::now_utc();
+            let ids: Vec<AccountId> = probed.iter().map(|(id, ..)| id.clone()).collect();
+            state = persist::update_state(&path, &ids, |id, entry| {
+                let Some((_, buckets, snap)) = probed.iter().find(|(p, ..)| p == id) else {
+                    return;
+                };
+                entry.apply_buckets(buckets);
+                entry.apply_quota(snap.clone(), QuotaSource::AppServer, now);
+                entry.updated_at = Some(now);
+            })
+            .unwrap_or(state);
+        }
     }
 
     let pool: Vec<(Provider, AccountId, AccountState)> = ctx
@@ -59,15 +72,24 @@ fn terminal_width() -> u16 {
     crossterm::terminal::size().map(|(w, _)| w).unwrap_or(100)
 }
 
+/// One account's reading: every bucket it reported, plus the one it bills against.
+type Probed = (
+    AccountId,
+    BTreeMap<String, RateLimitSnapshot>,
+    RateLimitSnapshot,
+);
+
 /// One `account/rateLimits/read` per openai account, each capped at
 /// `codex_quota::PROBE_TIMEOUT`; a timeout leaves the cached row exactly as it was, never an
 /// error. Anthropic has no out-of-band source: its telemetry only arrives inside a worker
-/// stream, so it is not probed here.
-async fn probe_all(ctx: &Ctx, state: &mut StateMap) {
+/// stream, so it is not probed here. Returns the readings rather than writing them, so the
+/// caller can apply them to the file's own entries instead of to a pre-probe copy.
+async fn probe_all(ctx: &Ctx) -> Vec<Probed> {
+    let mut out = Vec::new();
     // `providers.openai.quota_source` is not a dispatch-only setting: "none" and "rollout"
     // both mean "do not spawn an app-server", whoever is asking.
     if !ctx.cfg.probes_app_server(Provider::Openai) {
-        return;
+        return out;
     }
     for a in ctx
         .cfg
@@ -76,6 +98,7 @@ async fn probe_all(ctx: &Ctx, state: &mut StateMap) {
         .filter(|a| a.provider == Provider::Openai)
     {
         let env = expand_env(&a.env);
+        let model = codex_quota::quota_model(&ctx.cfg, &a.id);
         match tokio::time::timeout(
             codex_quota::PROBE_TIMEOUT,
             codex_quota::read_rate_limits(&a.exec, &env),
@@ -83,16 +106,13 @@ async fn probe_all(ctx: &Ctx, state: &mut StateMap) {
         .await
         {
             Ok(Ok(read)) => {
-                if let Some(snap) = read.select(a.limit_id.as_deref(), None) {
-                    let now = OffsetDateTime::now_utc();
-                    let entry = state.entry(a.id.clone()).or_default();
-                    entry.apply_buckets(&read.buckets);
-                    entry.apply_quota(snap, QuotaSource::AppServer, now);
-                    entry.updated_at = Some(now);
+                if let Some(snap) = read.select(a.limit_id.as_deref(), model.as_deref()) {
+                    out.push((a.id.clone(), read.buckets.clone(), snap));
                 }
             }
             Ok(Err(e)) => tracing::debug!("probing {} for quota: {e:#}", a.id.0),
             Err(_) => tracing::debug!("probing {} for quota timed out", a.id.0),
         }
     }
+    out
 }

@@ -29,7 +29,15 @@ pub fn until(d: Duration) -> String {
     if secs >= 36_000 {
         return format!("{}h", secs / 3600);
     }
-    duration(d)
+    if secs >= 3600 {
+        return duration(d);
+    }
+    // "24m59s" plus "in " plus the tilde overflows the cell too, and a window rolls whole
+    // minutes from now at best.
+    if secs >= 60 {
+        return format!("{}m", secs / 60);
+    }
+    format!("{secs}s")
 }
 
 /// "1.2M"

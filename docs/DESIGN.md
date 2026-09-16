@@ -1598,7 +1598,7 @@ anthropic  alt      claude-alt   cooling      0/2    1.00  0.72  in 41m      88 
 openai     main     codex-main   healthy      0/2     -     -    -           31  ~1.90 est
 ```
 
-The 5H/7D columns are blank for OpenAI when it has no live quota source at all; §2.3's rollout
+The 5H/7D columns are blank for OpenAI when it has no live quota source at all; `USAGE.md` §2.3's rollout
 tailer and app-server probe give it one on most setups, which is exactly what makes `QuotaAware`
 safe as the default. `swamp accounts` stays the health, cooldown and exec-resolution view; the token
 counters, quota windows and their reset times live in `swamp usage` / `/usage` instead (`USAGE.md`
@@ -1627,7 +1627,7 @@ with `swamp accounts reset <id>`. Nothing deletes them silently.
   runs/<run_id>/
     run.json                              # header: cwd, git HEAD, config hash, swamp version, argv
     journal.jsonl                         # THE tree: append-only JournalLine stream
-    tools/                                # one file per brain tool call: arguments and result
+    tools/                                # the arguments of every brain tool call, one file per distinct payload (<tool>-<sha16>.json); results live in the journal
     nodes/<node_short>/                     # the ATTEMPT id; the branch keeps the LOGICAL one
       prompt.md                           # the exact bytes fed to fd0
       stream.jsonl                        # RAW provider stdout, verbatim, never rewritten
@@ -2019,7 +2019,7 @@ expected. `doctor` resolves each `exec`, runs it with a probe, compares effectiv
 errors when two accounts collide.
 
 `--probe` sends a one-token prompt through each configured account and asserts the stream still
-yields `SessionStarted` + `Final` with non-zero usage. Run it after every CLI upgrade; it is the
+yields a terminal `Final` the adapter classifies as success. Run it after every CLI upgrade; it is the
 real defence against upstream format drift. `--schema` reports the `Detector::Pattern` fallback rate
 and the unparsed-line ratio across recent runs, which is the early warning that a vendor changed
 wording or shape. `--reap` removes stale worktrees, sockets and pidfiles and runs `git worktree prune`. It then sweeps
@@ -2152,8 +2152,9 @@ tier_extra = { high = { effort = "high" }, mid = { effort = "medium" }, low = { 
   # Optional: appended after Swamp's built-in worker role prompt.
   # system_prompt_file = ".swamp/worker.md"
   args = []
-  # Read-only isolation already forces plan mode and denies every edit tool, and a raw
-  # `--disallowed-tools` here would overwrite the merged list `deny_tools` feeds.
+  # Read-only isolation denies the edit tools by name; it does not change `permission_mode`,
+  # and an allowed Bash can still write. A raw `--disallowed-tools` here would overwrite the
+  # merged list `deny_tools` feeds.
   readonly_args = []
 
 [providers.openai]

@@ -169,7 +169,7 @@ pub fn render(
     if !rows.is_empty() {
         out.push(Line::from(String::new()));
         out.extend(observed_lines(rows, width, theme, now, max_age));
-        out.extend(totals_lines(rows, theme));
+        out.extend(totals_lines(rows, width, theme));
     }
     out
 }
@@ -211,13 +211,25 @@ fn account_lines(
     theme: &Theme,
     now: OffsetDateTime,
 ) -> Vec<Line<'static>> {
-    let role = health_role(r.health);
+    let shown = shown_health(r, now);
+    let parked = parked_reason(r).is_some();
+    let role = if parked {
+        Role::Err
+    } else {
+        health_role(shown)
+    };
+    let word = if parked {
+        "parked"
+    } else {
+        watch::health_word(shown)
+    };
+    let glyph = if parked { "x" } else { health_glyph(shown) };
     let mut cells = Vec::new();
     if l.show_health {
         cells.push(left(&r.account.0, ACCOUNT_W));
-        cells.push(left(watch::health_word(r.health), HEALTH_W));
+        cells.push(left(word, HEALTH_W));
     } else {
-        let name = format!("{} {}", health_glyph(r.health), r.account.0);
+        let name = format!("{glyph} {}", r.account.0);
         cells.push(left(&name, ACCOUNT_W + 2));
     }
     if l.collapse_resets {
@@ -271,28 +283,50 @@ fn account_lines(
     out
 }
 
-fn status_continuation(r: &AccountRow, now: OffsetDateTime) -> Option<String> {
+/// The health word the row shows. A `Cooling` entry whose timer has already elapsed is not
+/// cooling any more: `score` dispatches to it, nothing on the reading side resets the stored
+/// field, and "cooling" with no `until` row is a state the user cannot act on.
+fn shown_health(r: &AccountRow, now: OffsetDateTime) -> Health {
     match r.health {
+        Health::Cooling if !r.cooldown_until.is_some_and(|t| t > now) => Health::Healthy,
+        h => h,
+    }
+}
+
+/// The gates `block_reason` applies that `Health` cannot express: the account is refused by
+/// the provider and no timer brings it back.
+fn parked_reason(r: &AccountRow) -> Option<&'static str> {
+    let q = r.quota.as_ref()?;
+    match q.reached {
+        Some(LimitReached::CreditsDepleted) => return Some("credits_depleted"),
+        Some(LimitReached::SpendControl) => return Some("spend_control"),
+        _ => {}
+    }
+    (q.ordinary_usage_allowed == Some(false)).then_some("ordinary usage refused")
+}
+
+fn status_continuation(r: &AccountRow, now: OffsetDateTime) -> Option<String> {
+    match shown_health(r, now) {
         Health::AuthBroken if r.exec.is_empty() => {
-            Some("auth broken \u{b7} drop with swamp accounts reset <id>".to_owned())
+            return Some("auth broken \u{b7} drop with swamp accounts reset <id>".to_owned());
         }
-        Health::AuthBroken => Some(format!(
-            "auth broken \u{b7} re-auth {}",
-            fmt::sanitize(&r.exec)
-        )),
+        Health::AuthBroken => {
+            return Some(format!(
+                "auth broken \u{b7} re-auth {}",
+                fmt::sanitize(&r.exec)
+            ));
+        }
         Health::Cooling => {
             let until = r.cooldown_until?;
-            if until <= now {
-                return None;
-            }
             let reason = r.quota.as_ref().and_then(|q| q.reached).map(reached_word);
-            Some(match reason {
+            return Some(match reason {
                 Some(w) => format!("until {} \u{b7} {w}", fmt::clock_hm(until)),
                 None => format!("until {}", fmt::clock_hm(until)),
-            })
+            });
         }
-        _ => None,
+        _ => {}
     }
+    parked_reason(r).map(|w| format!("parked \u{b7} {w} \u{b7} no timer clears this"))
 }
 
 fn reached_word(r: LimitReached) -> &'static str {
@@ -455,7 +489,9 @@ fn observed_lines(
     out
 }
 
-fn totals_lines(rows: &[AccountRow], theme: &Theme) -> Vec<Line<'static>> {
+/// The footer sheds with the table: at 62 columns a fixed-width totals line wraps into three
+/// ragged ones in the CLI and is cut mid-number in chat.
+fn totals_lines(rows: &[AccountRow], width: u16, theme: &Theme) -> Vec<Line<'static>> {
     let mut usage = Usage::default();
     let mut cost = 0.0;
     let mut missing = 0usize;
@@ -466,24 +502,42 @@ fn totals_lines(rows: &[AccountRow], theme: &Theme) -> Vec<Line<'static>> {
             missing += 1;
         }
     }
-    let mut out = vec![Line::from(theme.span(
-        format!(
-            "totals    in {}  out {}  cache-read {}  cache-write {}  \u{b7}  ~${cost:.2}",
-            fmt::tokens(usage.input_tokens),
-            fmt::tokens(usage.output_tokens),
-            fmt::tokens(usage.cached_input_tokens),
-            fmt::tokens(usage.cache_write_tokens),
-        ),
-        Role::Meta,
-    ))];
+    let mut parts = vec![
+        format!("in {}", fmt::tokens(usage.input_tokens)),
+        format!("out {}", fmt::tokens(usage.output_tokens)),
+        format!("cache-read {}", fmt::tokens(usage.cached_input_tokens)),
+        format!("cache-write {}", fmt::tokens(usage.cache_write_tokens)),
+    ];
+    let mut cost_part = Some(format!("~${cost:.2}"));
+    let compose = |parts: &[String], cost: &Option<String>| {
+        let mut s = format!("totals    {}", parts.join("  "));
+        if let Some(c) = cost {
+            s.push_str(&format!("  \u{b7}  {c}"));
+        }
+        s
+    };
+    let mut line = compose(&parts, &cost_part);
+    while line.width() > width as usize {
+        if parts.len() > 2 {
+            parts.pop();
+        } else if cost_part.is_some() {
+            cost_part = None;
+        } else {
+            line = fmt::truncate(&line, width as usize);
+            break;
+        }
+        line = compose(&parts, &cost_part);
+    }
+    let mut out = vec![Line::from(theme.span(line, Role::Meta))];
     if missing > 0 {
         let clause = if missing == 1 {
             "account has no quota source; its utilization is estimated"
         } else {
             "accounts have no quota source; their utilization is estimated"
         };
+        let note = format!("          {missing} {clause}");
         out.push(Line::from(
-            theme.span(format!("          {missing} {clause}"), Role::Meta),
+            theme.span(fmt::truncate(&note, width as usize), Role::Meta),
         ));
     }
     out

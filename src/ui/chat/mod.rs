@@ -17,6 +17,7 @@ pub mod tests_support;
 use crate::brain::{Brain, BrainEvent};
 use crate::cmd::Ctx;
 use crate::dispatch::Dispatcher;
+use crate::dispatch::account::{AccountState, Health};
 use crate::journal::fold::RunView;
 use crate::journal::reader::Tailer;
 use crate::ui::chat::app::{App, Effect, MIN_LIVE, Msg};
@@ -298,6 +299,7 @@ fn probe_quota(
             continue;
         };
         let (exec, limit_id) = (account.exec.clone(), account.limit_id.clone());
+        let model = crate::worker::codex_quota::quota_model(cfg, &account.id);
         let env = crate::config::resolve::expand_env(&account.env);
         let pool = Arc::clone(disp.pool());
         tokio::spawn(async move {
@@ -307,7 +309,7 @@ fn probe_quota(
             )
             .await;
             if let Ok(Ok(read)) = read
-                && let Some(snap) = read.select(limit_id.as_deref(), None)
+                && let Some(snap) = read.select(limit_id.as_deref(), model.as_deref())
             {
                 pool.observe_quota_read(
                     &id,
@@ -324,6 +326,44 @@ fn size() -> (u16, u16) {
     crossterm::terminal::size()
         .map(|(w, h)| (w.max(20), h.max(MIN_LIVE)))
         .unwrap_or((100, 24))
+}
+
+/// The §1.5 workers line. Every health state is named for what it is: only `Cooling` comes
+/// back on a timer, so an expired login or a disabled account must not borrow that word.
+fn workers_line(
+    snapshot: &[(
+        crate::model::core::Provider,
+        crate::model::core::AccountId,
+        AccountState,
+    )],
+) -> String {
+    let accounts = snapshot.len();
+    let count = |h: Health| snapshot.iter().filter(|(_, _, s)| s.health == h).count();
+    let mut out = format!(
+        "{accounts} account{} \u{b7} {} ready",
+        if accounts == 1 { "" } else { "s" },
+        count(Health::Healthy)
+    );
+    for (n, word) in [
+        (count(Health::Cooling), "cooling"),
+        (count(Health::Degraded), "degraded"),
+        (count(Health::AuthBroken), "auth-broken"),
+        (count(Health::Disabled), "disabled"),
+    ] {
+        if n > 0 {
+            out.push_str(&format!(", {n} {word}"));
+        }
+    }
+    let tightest = snapshot
+        .iter()
+        .filter_map(|(_, _, s)| s.quota.as_ref())
+        .map(|q| q.worst_utilization())
+        .fold(0.0_f64, f64::max);
+    out.push_str(&format!(
+        " \u{b7} {:.0}% of the tightest window used",
+        tightest * 100.0
+    ));
+    out
 }
 
 fn welcome(ctx: &Ctx, disp: &Arc<Dispatcher>) -> WelcomeInfo {
@@ -348,29 +388,7 @@ fn welcome(ctx: &Ctx, disp: &Arc<Dispatcher>) -> WelcomeInfo {
         account.map(|a| a.0).unwrap_or_else(|| "-".to_owned())
     );
 
-    let snapshot = disp.pool().snapshot();
-    let accounts = snapshot.len();
-    let ready = snapshot
-        .iter()
-        .filter(|(_, _, s)| crate::ui::watch::health_word(s.health) == "healthy")
-        .count();
-    let mut workers = format!(
-        "{accounts} account{} · {ready} ready",
-        if accounts == 1 { "" } else { "s" }
-    );
-    let cooling = accounts - ready;
-    if cooling > 0 {
-        workers.push_str(&format!(", {cooling} cooling"));
-    }
-    let tightest = snapshot
-        .iter()
-        .filter_map(|(_, _, s)| s.quota.as_ref())
-        .map(|q| q.worst_utilization())
-        .fold(0.0_f64, f64::max);
-    workers.push_str(&format!(
-        " · {:.0}% of the tightest window used",
-        tightest * 100.0
-    ));
+    let workers = workers_line(&disp.pool().snapshot());
     WelcomeInfo {
         cwd: ctx.paths.repo.to_string(),
         brain,
@@ -421,4 +439,43 @@ pub async fn drain_turn(brain: &mut Box<dyn Brain>, ctx: &Ctx) -> i32 {
         }
     }
     code
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::core::{AccountId, Provider};
+
+    fn entry(id: &str, health: Health) -> (Provider, AccountId, AccountState) {
+        (
+            Provider::Anthropic,
+            AccountId(id.to_owned()),
+            AccountState {
+                health,
+                ..Default::default()
+            },
+        )
+    }
+
+    #[test]
+    fn the_welcome_line_names_every_health_state() {
+        let line = workers_line(&[
+            entry("a", Health::Healthy),
+            entry("b", Health::Healthy),
+            entry("c", Health::Cooling),
+            entry("d", Health::AuthBroken),
+        ]);
+        assert!(
+            line.starts_with("4 accounts \u{b7} 2 ready, 1 cooling, 1 auth-broken"),
+            "{line}"
+        );
+        assert_eq!(line.matches("cooling").count(), 1, "{line}");
+    }
+
+    #[test]
+    fn a_disabled_account_is_never_called_cooling() {
+        let line = workers_line(&[entry("a", Health::Healthy), entry("b", Health::Disabled)]);
+        assert!(line.contains("1 disabled"), "{line}");
+        assert!(!line.contains("cooling"), "{line}");
+    }
 }

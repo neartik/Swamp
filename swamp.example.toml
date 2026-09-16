@@ -113,8 +113,9 @@ tier_extra = { high = { effort = "high" }, mid = { effort = "medium" }, low = { 
   # Optional: appended after Swamp's built-in worker role prompt.
   # system_prompt_file = ".swamp/worker.md"
   args = []
-  # Read-only isolation already forces plan mode and denies every edit tool, and a raw
-  # `--disallowed-tools` here would overwrite the merged list `deny_tools` feeds.
+  # Read-only isolation denies the edit tools by name; it does not change `permission_mode`,
+  # and an allowed Bash can still write. A raw `--disallowed-tools` here would overwrite the
+  # merged list `deny_tools` feeds.
   readonly_args = []
 
 [providers.openai]

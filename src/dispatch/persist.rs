@@ -67,6 +67,27 @@ fn same_window(a: Option<&WindowKey>, b: Option<&WindowKey>) -> bool {
     }
 }
 
+/// Read-modify-write of a few named entries, under the lock. A caller that refreshed one
+/// field group must not write back the rest of an entry it read minutes ago: `f` edits the
+/// file's own entry, so a cooldown another process learned meanwhile survives.
+pub fn update_state(
+    path: &Utf8Path,
+    ids: &[AccountId],
+    mut f: impl FnMut(&AccountId, &mut AccountState),
+) -> anyhow::Result<StateMap> {
+    let dir = path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("{path} has no parent directory"))?;
+    std::fs::create_dir_all(dir).with_context(|| format!("creating {dir}"))?;
+    let _guard = lock(path)?;
+    let mut merged = read_unlocked(path).unwrap_or_default();
+    for id in ids {
+        f(id, merged.entry(id.clone()).or_default());
+    }
+    write_locked(path, dir, &merged)?;
+    Ok(merged)
+}
+
 pub fn save_state(path: &Utf8Path, s: &StateMap) -> anyhow::Result<()> {
     let dir = path
         .parent()
@@ -200,6 +221,41 @@ mod tests {
         assert!(merged[&AccountId("main".into())].cooldown_until.is_some());
         assert_eq!(merged[&AccountId("alt".into())].lifetime_nodes, 3);
         assert_eq!(load_state(&path).unwrap().len(), 2);
+    }
+
+    /// `swamp usage --probe` refreshes quota while a supervisor cools the same account.
+    /// Writing back the whole entry it loaded before probing used to erase that cooldown.
+    #[test]
+    fn an_update_keeps_the_fields_it_did_not_touch() {
+        let (_dir, path) = tmp_dir();
+        let now = time::OffsetDateTime::now_utc();
+        let mut supervisor = StateMap::new();
+        supervisor.insert(
+            AccountId("main".into()),
+            AccountState {
+                health: Health::Cooling,
+                cooldown_until: Some(now + std::time::Duration::from_secs(900)),
+                updated_at: Some(now),
+                ..Default::default()
+            },
+        );
+        save_state(&path, &supervisor).unwrap();
+
+        let ids = [AccountId("main".into())];
+        let merged = update_state(&path, &ids, |_, entry| {
+            entry.lifetime_nodes = 9;
+            entry.updated_at = Some(now + std::time::Duration::from_secs(3));
+        })
+        .unwrap();
+
+        let got = &merged[&AccountId("main".into())];
+        assert_eq!(got.health, Health::Cooling);
+        assert!(got.cooldown_until.is_some());
+        assert_eq!(got.lifetime_nodes, 9);
+        assert_eq!(
+            load_state(&path).unwrap()[&AccountId("main".into())].health,
+            Health::Cooling
+        );
     }
 
     #[test]

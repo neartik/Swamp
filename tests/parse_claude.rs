@@ -9,8 +9,8 @@ use std::str::FromStr;
 use swamp::config::FailurePatterns;
 use swamp::ids::{NodeId, NodeIds};
 use swamp::model::core::{
-    ChangeKind, CostBasis, EvidenceSource, FinalSummary, LimitScope, LimitStatus, NodeKind,
-    Provider, RateLimitSnapshot, SessionHandle, Tier, Usage,
+    ChangeKind, CostBasis, EvidenceSource, FinalSummary, LimitReached, LimitScope, LimitStatus,
+    NodeKind, Provider, RateLimitSnapshot, SessionHandle, Tier, Usage,
 };
 use swamp::model::event::WorkerEvent;
 use swamp::model::failure::{Detector, Failure};
@@ -425,6 +425,37 @@ fn an_event_without_unified_windows_reports_no_window_at_all() {
     );
     assert_eq!(snap.status, LimitStatus::Rejected);
     assert_eq!(snap.limit_id.as_deref(), Some("five_hour"));
+}
+
+/// `overageStatus` and `overageDisabledReason` are plan attributes: the reference fixture
+/// carries `rejected`/`member_zero_credit_limit` on an *allowed* account. Reading them as a
+/// depletion event turned every ordinary five-hour limit into a permanent hard gate.
+#[test]
+fn a_plan_with_no_overage_is_rate_limited_not_depleted() {
+    let a = claude();
+    let mut st = ParseState::default();
+    let line = r#"{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","resetsAt":1789440000,"rateLimitType":"five_hour","overageStatus":"rejected","overageDisabledReason":"member_zero_credit_limit","isUsingOverage":false,"unifiedWindows":{"five_hour":{"utilization":1.0,"resetsAt":1789440000}}}}"#;
+    let snap = rate_limits(&a.parse_line(line, &mut st).events)
+        .pop()
+        .expect("a rate limit event");
+    assert_eq!(snap.status, LimitStatus::Rejected);
+    assert_eq!(
+        snap.reached,
+        Some(LimitReached::RateLimit),
+        "a window that resets is not depleted credits"
+    );
+}
+
+/// Credits only ran out once the account was actually drawing on overage when refused.
+#[test]
+fn a_rejection_while_using_overage_is_depletion() {
+    let a = claude();
+    let mut st = ParseState::default();
+    let line = r#"{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","resetsAt":1789440000,"rateLimitType":"five_hour","overageStatus":"rejected","overageDisabledReason":"credit_limit_reached","isUsingOverage":true}}"#;
+    let snap = rate_limits(&a.parse_line(line, &mut st).events)
+        .pop()
+        .expect("a rate limit event");
+    assert_eq!(snap.reached, Some(LimitReached::CreditsDepleted));
 }
 
 /// WP-B acceptance 1: the sample's second event adds `seven_day_overage_included`, which is
