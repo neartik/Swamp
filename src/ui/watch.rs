@@ -438,9 +438,11 @@ pub async fn run_tui(paths: RunPaths, cfg: Arc<Config>) -> anyhow::Result<()> {
     );
     let mut tailer = Tailer::open(&paths.journal())?;
 
+    // The guard first: a failure on the way into the alternate screen must not leave the
+    // shell in raw mode with nothing left to undo it.
+    let _guard = TerminalGuard::new();
     enable_raw_mode()?;
     execute!(std::io::stdout(), EnterAlternateScreen)?;
-    let _guard = TerminalGuard::new();
     let backend = ratatui::backend::CrosstermBackend::new(std::io::stdout());
     let mut terminal = ratatui::Terminal::new(backend)?;
     let mut keys = crossterm::event::EventStream::new();

@@ -89,6 +89,7 @@ redact = [
 [ui]
 refresh_hz = 20
 tree_width = 46
+board_width = 46
 show_thinking = false
 tail_lines = 200
 "#;

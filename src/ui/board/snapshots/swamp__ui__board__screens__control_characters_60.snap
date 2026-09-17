@@ -20,7 +20,7 @@ openai                                             1 account
     cooling until 23:20
 
 waiting 1
-  · 9g5f04   mid  rebuild the index                -       -
+  · 9g5f04   mid  rebuild the index            3m18s blocked
     every anthropic account is at its limit
     earliest reset 22:54 (in 38m)
 recent 3
@@ -30,6 +30,6 @@ recent 3
 ────────────────────────────────────────────────────────────
 9g5f09 → alt   score .41 = util .93×.50 + load .33×.30 +
                share .12×.15 − weight .00 − idle .02
-               excluded main
+               main ineligible (at 4/4)
 ────────────────────────────────────────────────────────────
 ↑↓ select · ↵ trace · tab run · a accounts · q quit

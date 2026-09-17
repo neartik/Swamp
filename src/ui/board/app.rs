@@ -36,6 +36,11 @@ const IDLE_PERIOD: StdDuration = StdDuration::from_secs(1);
 /// How many journal lines `r` shows, per §4.
 const RAW_LINES: usize = 200;
 
+/// How much of a journal `r` reads at a time, and the most it will ever read: a run whose
+/// lines are enormous stops at the cap rather than pulling the whole file into the loop.
+const RAW_CHUNK: u64 = 64 * 1024;
+const RAW_MAX: u64 = 4 * 1024 * 1024;
+
 // ---------------------------------------------------------------- state
 
 /// What a keypress asks the outer loop to do. Everything that needs no file is already done
@@ -295,10 +300,7 @@ impl App {
         let Some(pane) = board.pane(run) else {
             return;
         };
-        let path = pane.paths.journal();
-        let text = std::fs::read_to_string(&path).unwrap_or_default();
-        let all: Vec<&str> = text.lines().collect();
-        let tail = all[all.len().saturating_sub(RAW_LINES)..].join("\n");
+        let tail = tail_lines(&pane.paths.journal(), RAW_LINES);
         self.overlay = Some(pager(&format!("raw \u{b7} run {}", run.short()), &tail));
     }
 
@@ -333,7 +335,7 @@ impl App {
         }
         let rows = board.rows();
         let head = vec![render::header(board, &rows, &c), render::rule(&c)];
-        let foot = render::footer(board, &c);
+        let foot = render::footer(board, &rows, &c);
         let body = if self.accounts_only {
             usage::render(&board.accounts, area.width, theme, max_age)
         } else {
@@ -372,6 +374,37 @@ impl App {
         ));
         out
     }
+}
+
+/// The last `want` lines of a file, read backwards from the end. A long-lived run's journal
+/// is append-only and unbounded, and this runs inline on the loop that draws and polls: what
+/// it costs must depend on `want`, never on how long the run has been going.
+pub(crate) fn tail_lines(path: &Utf8Path, want: usize) -> String {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let Ok(mut f) = std::fs::File::open(path) else {
+        return String::new();
+    };
+    let Ok(len) = f.seek(SeekFrom::End(0)) else {
+        return String::new();
+    };
+    let mut span = 0u64;
+    let mut buf: Vec<u8> = Vec::new();
+    while span < len.min(RAW_MAX) {
+        span = (span + RAW_CHUNK).min(len).min(RAW_MAX);
+        buf.resize(span as usize, 0);
+        if f.seek(SeekFrom::Start(len - span)).is_err() || f.read_exact(&mut buf).is_err() {
+            return String::new();
+        }
+        if buf.iter().filter(|b| **b == b'\n').count() > want {
+            break;
+        }
+    }
+    let text = String::from_utf8_lossy(&buf);
+    // A window that starts mid-file opens on a fragment; taking only the last `want` of more
+    // than `want` line ends is what drops it.
+    let all: Vec<&str> = text.lines().collect();
+    all[all.len().saturating_sub(want)..].join("\n")
 }
 
 fn pager(title: &str, text: &str) -> Pager {
@@ -573,9 +606,11 @@ pub async fn run_tui(
     let mut app = App::new();
     let _pid = BoardPid::write(&sources.paths.board_pid());
 
+    // The guard first: it installs the panic hook and the restore, so a failure on the way
+    // into the alternate screen cannot leave the shell in raw mode.
+    let _guard = watch::TerminalGuard::new();
     enable_raw_mode()?;
     execute!(std::io::stdout(), EnterAlternateScreen)?;
-    let _guard = watch::TerminalGuard::new();
     let backend = ratatui::backend::CrosstermBackend::new(std::io::stdout());
     let mut terminal = ratatui::Terminal::new(backend)?;
     let mut keys = crossterm::event::EventStream::new();

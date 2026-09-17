@@ -9,9 +9,6 @@ use tokio::time::Instant;
 
 /// Interactive brain session. The brain is just another account in the same pool.
 pub async fn run(ctx: &Ctx, args: &ChatArgs) -> anyhow::Result<i32> {
-    if args.board {
-        open_board_pane();
-    }
     let cfg = Arc::new(overrides(ctx, args)?);
     let depth = crate::cmd::guard_depth(&cfg)?;
     let resume = match args.resume.as_deref() {
@@ -22,6 +19,11 @@ pub async fn run(ctx: &Ctx, args: &ChatArgs) -> anyhow::Result<i32> {
     ctx.paths
         .register_run(session.paths.run, &session.paths.dir)
         .ok();
+    // After the run exists, never before: the board is pinned to this session, and its id is
+    // only minted by `RunSession::start`.
+    if args.board {
+        open_board_pane(&cfg, session.paths.run);
+    }
     // The interactive UI prints the run id in its welcome box; the header would leak above it.
     if !crate::ui::chat::interactive_stdout() {
         println!("run {}", session.paths.run);
@@ -88,19 +90,39 @@ fn previous_session(ctx: &Ctx, run: RunId) -> Option<crate::model::core::Session
         .and_then(|n| n.session.clone())
 }
 
+/// `ui.board_width` default, per docs/BOARD.md §5.
+const BOARD_WIDTH: u16 = 46;
+
 /// docs/BOARD.md §5: `--board` splits a pane for `swamp board` when tmux is available, and
 /// otherwise just names the command, since chat must never fail over a pane it cannot open.
-fn open_board_pane() {
-    if std::env::var_os("TMUX").is_some() {
-        if let Err(e) = std::process::Command::new("tmux")
-            .args(["split-window", "-h", "-l", "46", "-d", "swamp", "board"])
-            .status()
-        {
-            eprintln!("--board: could not start `swamp board` in a tmux split: {e}");
-        }
-    } else {
-        eprintln!("--board only works inside tmux; run `swamp board` in another pane instead");
+fn open_board_pane(cfg: &Config, run: RunId) {
+    if std::env::var_os("TMUX").is_none() {
+        eprintln!("--board only works inside tmux; run `swamp board --run {run}` in another pane");
+        return;
     }
+    let argv = board_split_argv(cfg.ui.board_width.unwrap_or(BOARD_WIDTH), run);
+    if let Err(e) = std::process::Command::new("tmux").args(&argv).status() {
+        eprintln!("--board: could not start `swamp board` in a tmux split: {e}");
+    }
+}
+
+/// Split the width `ui.board_width` asks for, and pin the board to the run chat just started
+/// so another live run in the repo cannot pull it away.
+fn board_split_argv(width: u16, run: RunId) -> Vec<String> {
+    [
+        "split-window",
+        "-h",
+        "-l",
+        &width.max(1).to_string(),
+        "-d",
+        "swamp",
+        "board",
+        "--run",
+        &run.to_string(),
+    ]
+    .iter()
+    .map(|a| (*a).to_owned())
+    .collect()
 }
 
 fn overrides(ctx: &Ctx, args: &ChatArgs) -> anyhow::Result<Config> {
@@ -125,4 +147,37 @@ fn overrides(ctx: &Ctx, args: &ChatArgs) -> anyhow::Result<Config> {
             .push("--dry-run: dispatch tools journal and return a fake success".into());
     }
     Ok(cfg)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// docs/BOARD.md §5: the split is sized by `ui.board_width` and pinned to the run chat
+    /// just started, or a board opened next to a busy repo shows somebody else's run.
+    #[test]
+    fn the_board_split_is_sized_and_pinned_to_this_run() {
+        let run = RunId::new();
+        let argv = board_split_argv(60, run);
+        assert_eq!(
+            argv,
+            vec![
+                "split-window",
+                "-h",
+                "-l",
+                "60",
+                "-d",
+                "swamp",
+                "board",
+                "--run",
+                &run.to_string(),
+            ]
+        );
+        assert_eq!(board_split_argv(BOARD_WIDTH, run)[3], "46");
+        assert_eq!(
+            board_split_argv(0, run)[3],
+            "1",
+            "tmux rejects a zero split"
+        );
+    }
 }

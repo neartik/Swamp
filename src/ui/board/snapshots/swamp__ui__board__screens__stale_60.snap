@@ -6,7 +6,7 @@ swamp board           2 runs · 1 stale · 5 in flight · 22:16
 ────────────────────────────────────────────────────────────
 anthropic                                         2 accounts
 ● main           4/4  5h ▇▇▇▇▇▇▇░░░  71% ↻ 38m        ↓ 812k
-                      7d ▇▇▇░░░░░░░  32% ↻ 4d02h
+                      7d ▇▇▇░░░░░░░  32% ↻ 4d02h       stale
   ◆ 9g5fav   -    orchestrating                3m10s  ↓ 214k
   ⠋ 9g5f01   mid  add pagination to /users     3m10s  ↓ 118k
   ⠙ 9g5f02   low  rename the fixtures          1m02s   ↓ 61k
@@ -20,7 +20,7 @@ openai                                             1 account
     cooling until 23:20
 
 waiting 1
-  · 9g5f04   mid  rebuild the index                -       -
+  · 9g5f04   mid  rebuild the index            3m18s blocked
     every anthropic account is at its limit
     earliest reset 22:54 (in 38m)
 recent 3
@@ -30,6 +30,6 @@ recent 3
 ────────────────────────────────────────────────────────────
 9g5f09 → alt   score .41 = util .93×.50 + load .33×.30 +
                share .12×.15 − weight .00 − idle .02
-               excluded main
+               main ineligible (at 4/4)
 ────────────────────────────────────────────────────────────
 ↑↓ select · ↵ trace · tab run · a accounts · q quit

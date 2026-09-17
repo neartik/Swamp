@@ -6,6 +6,7 @@
 //! `swamp watch` cannot drift apart.
 
 use crate::dispatch::account::Health;
+use crate::dispatch::policy::{self, Ineligible, Scoring};
 use crate::model::core::{AccountId, LimitScope, LimitWindow, NodeState, Tier};
 use crate::ui::board::model::{
     AccountGroup, Board, NodeRow, ProviderGroup, Reason, ReasonForm, Rows, Section, Selection,
@@ -79,6 +80,9 @@ pub struct Ctx<'a> {
     pub max_age: StdDuration,
     /// The run column only earns its width once two runs are tailed.
     pub multi_run: bool,
+    /// The dispatcher's thresholds, so the footer's exclusion lines read the same gate the
+    /// pool read.
+    pub scoring: Scoring,
 }
 
 impl<'a> Ctx<'a> {
@@ -96,6 +100,7 @@ impl<'a> Ctx<'a> {
             tick,
             max_age,
             multi_run: b.runs.len() > 1,
+            scoring: b.scoring,
         }
     }
 
@@ -122,7 +127,7 @@ pub fn frame(
     let rows = b.rows();
     let mut out = vec![header(b, &rows, &c), rule(&c)];
     out.extend(body(&rows, &c));
-    out.extend(footer(b, &c));
+    out.extend(footer(b, &rows, &c));
     out
 }
 
@@ -237,14 +242,24 @@ pub fn body(rows: &Rows, c: &Ctx) -> Vec<Line<'static>> {
         }
     }
     if !rows.orphan_nodes.is_empty() {
-        out.push(heading("unknown accounts", c));
+        out.push(heading(
+            &section_word(
+                "unknown accounts",
+                rows.orphan_nodes.len(),
+                rows.orphan_total,
+            ),
+            c,
+        ));
         for n in &rows.orphan_nodes {
             out.extend(node_lines(n, Section::InFlight, &mut spin, c));
         }
     }
     if !rows.waiting.is_empty() {
         out.push(Line::default());
-        out.push(heading(&format!("waiting {}", rows.waiting.len()), c));
+        out.push(heading(
+            &section_word("waiting", rows.waiting.len(), rows.waiting_total),
+            c,
+        ));
         for n in &rows.waiting {
             out.extend(node_lines(n, Section::Waiting, &mut spin, c));
         }
@@ -256,6 +271,15 @@ pub fn body(rows: &Rows, c: &Ctx) -> Vec<Line<'static>> {
         }
     }
     out
+}
+
+/// `waiting 12`, or `waiting 32 of 480` once `SECTION_MAX` hid the rest, the same shape
+/// the header uses for the runs it could not tail.
+fn section_word(word: &str, shown: usize, total: usize) -> String {
+    if total > shown {
+        return format!("{word} {shown} of {total}");
+    }
+    format!("{word} {total}")
 }
 
 fn heading(text: &str, c: &Ctx) -> Line<'static> {
@@ -328,24 +352,47 @@ fn account_lines(g: &AccountGroup, c: &Ctx) -> Vec<Line<'static>> {
         out.push(second.line(c.width()));
     }
 
-    if let Some(status) = status_cell(r, health, c) {
+    let status = status_parts(g, health, role, c);
+    if !status.is_empty() {
+        let mut cell = Row::default();
+        for (i, (text, role)) in status.iter().enumerate() {
+            if i > 0 {
+                cell.add(c.theme, SEP, Role::Meta);
+            }
+            cell.add(c.theme, text, *role);
+        }
         // The bar row takes it when it fits whole; a clipped status word says nothing.
         let used: usize = out
             .last()
             .map(|l| l.spans.iter().map(|s| s.content.width()).sum())
             .unwrap_or(c.width());
-        if !c.l.windows_inline && used + 2 + status.width() <= c.width() {
+        if !c.l.windows_inline && used + 2 + cell.w <= c.width() {
             let mut last = out.pop().expect("the 7d row");
             last.spans
-                .push(Span::raw(" ".repeat(c.width() - used - status.width())));
-            last.spans.push(c.theme.span(status, role));
+                .push(Span::raw(" ".repeat(c.width() - used - cell.w)));
+            last.spans.extend(cell.spans);
             out.push(last);
         } else {
             let mut line = Row::default();
             line.to(4);
-            line.add(c.theme, &status, role);
+            line.w += cell.w;
+            line.spans.extend(cell.spans);
             out.push(line.line(c.width()));
         }
+    }
+    out
+}
+
+/// What the account row says beyond its bars: when it comes back, and `· stale` when the run
+/// behind one of its nodes lost its brain, so the marker sits on the affected row rather than
+/// only in the header's total.
+fn status_parts(g: &AccountGroup, health: Health, role: Role, c: &Ctx) -> Vec<(String, Role)> {
+    let mut out = Vec::new();
+    if let Some(text) = status_cell(&g.row, health, c) {
+        out.push((text, role));
+    }
+    if g.nodes.iter().any(|n| n.stale) {
+        out.push(("stale".to_owned(), Role::Err));
     }
     out
 }
@@ -470,7 +517,7 @@ fn node_lines(n: &NodeRow, section: Section, spin: &mut usize, c: &Ctx) -> Vec<L
     }
     tail.push((right(&elapsed_cell(n, c), 6), Role::Meta));
     if c.l.show_tokens {
-        tail.push((right(&node_tokens(n, c), 7), Role::Meta));
+        tail.push((right(&node_tokens(n, section, c), 7), Role::Meta));
     }
     if c.l.show_cost {
         tail.push((right(&fmt::cost(n.cost), 7), Role::Meta));
@@ -591,7 +638,16 @@ fn elapsed_cell(n: &NodeRow, c: &Ctx) -> String {
         .unwrap_or_else(|| "-".to_owned())
 }
 
-fn node_tokens(n: &NodeRow, c: &Ctx) -> String {
+fn node_tokens(n: &NodeRow, section: Section, c: &Ctx) -> String {
+    // §3.2: a node the pool parked has no tokens to show, so the cell names the wait instead
+    // of a dash, in the band where it is the row's last cell and the title is beside it.
+    if section == Section::Waiting
+        && matches!(n.state, NodeState::Blocked { .. })
+        && !c.l.title_own_line
+        && !c.l.show_cost
+    {
+        return "blocked".to_owned();
+    }
     let billable = n.usage.billable();
     if billable == 0 {
         return "-".to_owned();
@@ -629,16 +685,17 @@ fn blocked_lines(n: &NodeRow, c: &Ctx) -> Vec<String> {
 
 // ---------------------------------------------------------------- footer
 
-/// The rule, the selected row's dispatch reason, the rule, the key hints.
-pub fn footer(b: &Board, c: &Ctx) -> Vec<Line<'static>> {
+/// The rule, the selected row's dispatch reason, the rule, the key hints. `rows` comes in
+/// because the exclusion lines are re-derived against the counts a frame actually shows.
+pub fn footer(b: &Board, rows: &Rows, c: &Ctx) -> Vec<Line<'static>> {
     let mut out = vec![rule(c)];
-    out.extend(reason_lines(b, c));
+    out.extend(reason_lines(b, rows, c));
     out.push(rule(c));
     out.push(hints(b, c));
     out
 }
 
-fn reason_lines(b: &Board, c: &Ctx) -> Vec<Line<'static>> {
+fn reason_lines(b: &Board, rows: &Rows, c: &Ctx) -> Vec<Line<'static>> {
     match &b.selected {
         Selection::Node { run, logical } => {
             let Some(note) = b.note_for(*run, *logical) else {
@@ -648,9 +705,9 @@ fn reason_lines(b: &Board, c: &Ctx) -> Vec<Line<'static>> {
                 Some(attempts) => attempts.last().copied().unwrap_or(*logical),
                 None => *logical,
             };
-            selected_node_lines(&head.short(), note, c)
+            selected_node_lines(&head.short(), note, rows, c)
         }
-        Selection::Account(id) => vec![account_reason(b, id, c)],
+        Selection::Account(id) => vec![account_reason(rows, id, c)],
         Selection::None => vec![Line::from(c.theme.span(
             fmt::truncate("select a row to see why its account won", c.width()),
             Role::Meta,
@@ -665,7 +722,12 @@ fn note_missing(c: &Ctx) -> Line<'static> {
     ))
 }
 
-fn selected_node_lines(short: &str, note: &SelectionNote, c: &Ctx) -> Vec<Line<'static>> {
+fn selected_node_lines(
+    short: &str,
+    note: &SelectionNote,
+    rows: &Rows,
+    c: &Ctx,
+) -> Vec<Line<'static>> {
     let head = format!("{short} \u{2192} {}", fmt::sanitize(&note.account.0));
     let mut out = Vec::new();
     let indent = if c.l.title_own_line {
@@ -695,16 +757,85 @@ fn selected_node_lines(short: &str, note: &SelectionNote, c: &Ctx) -> Vec<Line<'
         line.add(c.theme, &chunk, Role::Meta);
         out.push(line.line(c.width()));
     }
-    if !note.excluded.is_empty() {
-        let names: Vec<String> = note.excluded.iter().map(|a| fmt::sanitize(&a.0)).collect();
-        for chunk in wrap(&format!("excluded {}", names.join(SEP)), room) {
+    for (text, role) in excluded_lines(note, rows, c) {
+        for chunk in wrap(&text, room) {
             let mut line = Row::default();
             line.to(indent);
-            line.add(c.theme, &chunk, Role::Err);
+            line.add(c.theme, &chunk, role);
             out.push(line.line(c.width()));
         }
     }
     out
+}
+
+/// §3.4: every account the pool passed over, with the gate that holds it back right now. The
+/// recorded reason says they were excluded at dispatch; an account that would be taken today
+/// disagrees with it, and says so with `now`.
+fn excluded_lines(note: &SelectionNote, rows: &Rows, c: &Ctx) -> Vec<(String, Role)> {
+    note.excluded
+        .iter()
+        .map(|id| {
+            let name = fmt::sanitize(&id.0);
+            let Some(r) = account_row(rows, id) else {
+                return (
+                    format!("{name} excluded{SEP}not in accounts.json"),
+                    Role::Err,
+                );
+            };
+            match gate_of(r, c) {
+                Some(g) => (
+                    format!("{name} ineligible ({})", gate_text(r, g, c)),
+                    Role::Err,
+                ),
+                None => (format!("{name} eligible now"), Role::Meta),
+            }
+        })
+        .collect()
+}
+
+fn account_row<'a>(rows: &'a Rows, id: &AccountId) -> Option<&'a AccountRow> {
+    rows.providers
+        .iter()
+        .flat_map(|g| &g.accounts)
+        .map(|a| &a.row)
+        .find(|r| &r.account == id)
+}
+
+/// The dispatcher's own gate, over the row's live numbers: `inflight` here is the journal
+/// count `rows()` recomputed, not the zero the state file carries.
+fn gate_of(r: &AccountRow, c: &Ctx) -> Option<Ineligible> {
+    policy::gate(
+        r.health,
+        r.cooldown_until,
+        r.quota.as_ref(),
+        r.inflight,
+        r.max_concurrency,
+        &c.scoring,
+        c.now,
+    )
+}
+
+fn gate_text(r: &AccountRow, g: Ineligible, c: &Ctx) -> String {
+    match g {
+        Ineligible::Cooling => match r.cooldown_until {
+            Some(t) => format!("cooldown until {}", fmt::clock_day(t, c.now)),
+            None => g.word().to_owned(),
+        },
+        Ineligible::AtCapacity => format!(
+            "at {}/{}",
+            r.inflight,
+            r.max_concurrency.unwrap_or(r.inflight)
+        ),
+        Ineligible::QuotaStop => match r
+            .quota
+            .as_ref()
+            .and_then(|q| q.measured_utilization_at(c.now))
+        {
+            Some(u) => format!("quota {}%", (u * 100.0).round() as i64),
+            None => g.word().to_owned(),
+        },
+        g => g.word().to_owned(),
+    }
 }
 
 /// 40 columns keeps the score on the head line and wraps the terms under it; wider layouts
@@ -729,8 +860,9 @@ fn wrap(text: &str, room: usize) -> Vec<String> {
         .collect()
 }
 
-fn account_reason(b: &Board, id: &AccountId, c: &Ctx) -> Line<'static> {
-    let Some(r) = b.accounts.iter().find(|r| &r.account == id) else {
+fn account_reason(rows: &Rows, id: &AccountId, c: &Ctx) -> Line<'static> {
+    // From `rows`, not `board.accounts`: `inflight` there is the zero the state file carries.
+    let Some(r) = account_row(rows, id) else {
         return note_missing(c);
     };
     let health = watch::shown_health(r.health, r.cooldown_until, c.now);

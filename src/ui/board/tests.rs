@@ -8,7 +8,7 @@ use crate::ids::RunId;
 use crate::journal::paths::RunPaths;
 use crate::journal::record::JournalLine;
 use crate::model::core::AccountId;
-use crate::ui::board::app::{Action, App, BoardPid, json};
+use crate::ui::board::app::{Action, App, BoardPid, json, tail_lines};
 use crate::ui::board::model::{Board, RunPane, Selection};
 use crate::ui::board::sources::{Tail, rows_from_state};
 use crate::ui::chat::tests_support as fx;
@@ -355,4 +355,34 @@ fn the_json_dump_carries_the_frame() {
         "the /usage account shape: {}",
         v["accounts"]
     );
+}
+
+/// `r` runs on the same task as the render and the tails, and a long-lived run's journal has
+/// no bound: what the read costs has to depend on the 200 lines, not on the file.
+#[test]
+fn the_raw_view_reads_only_the_tail_of_a_journal() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = Utf8PathBuf::from_path_buf(dir.path().join("journal.jsonl")).expect("utf8");
+    // Several windows wide, so the read really has to walk backwards to find its 200 lines.
+    let pad = "x".repeat(64);
+    let body: String = (0..5_000).map(|n| format!("line {n} {pad}\n")).collect();
+    std::fs::write(&path, &body).expect("write");
+    assert!(body.len() > 4 * 64 * 1024, "wider than one read window");
+
+    let text = tail_lines(&path, 200);
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines.len(), 200);
+    assert_eq!(lines[0], format!("line 4800 {pad}"));
+    assert_eq!(lines[199], format!("line 4999 {pad}"));
+    // No fragment survives the window's leading edge.
+    assert!(
+        lines.iter().all(|l| l.starts_with("line ")),
+        "{:?}",
+        lines[0]
+    );
+
+    // A file shorter than one window, and one that is not there at all.
+    std::fs::write(&path, "a\nb\n").expect("write");
+    assert_eq!(tail_lines(&path, 200), "a\nb");
+    assert_eq!(tail_lines(&path.with_file_name("gone.jsonl"), 200), "");
 }

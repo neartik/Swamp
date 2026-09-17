@@ -115,11 +115,15 @@ Node rows are `view.tree()` collapsed by `logical`, taking `attempts.last()` as 
 same `latest()` rule `trace.rs` uses, so a retry changes the short id in place and the id shown is
 the one `swamp diff` and `swamp adopt` take. Grouping is by `NodeRecord.account` (provider from
 `NodeRecord.provider`), not by run, which is what makes the tree read "account -> what it works on".
-Elapsed is recomputed every frame from `started_at` against `now`, never accumulated.
+Elapsed is recomputed every frame against `now`, never accumulated: from `started_at`, or from
+`created_at` for a row that has not started, which is the wait a queued node is judged on.
 
 Sections: **in flight** (`Running`, `Leased`), **waiting** (`Queued`, `Blocked { until, why }`),
 **recent** (last `N = 8` terminal nodes by `ended_at`, fading through `meta` then dropped after
-`RECENT_TTL = 5m`).
+`RECENT_TTL = 5m`). `waiting` and the unknown-account list draw at most `SECTION_MAX = 32` rows,
+longest wait first; their headings read `waiting 32 of 480` when a fan-out batch queues more, so
+a frame costs the same whatever the backlog. An account's `inflight/max_concurrency` counts every
+tailed run even while `tab` draws one: what is drawn is a view, what an account carries is a fact.
 
 ### 2.3 Refresh
 

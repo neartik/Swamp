@@ -2373,6 +2373,7 @@ output       = 2.00
 [ui]
 refresh_hz    = 20
 tree_width    = 46
+board_width   = 46
 show_thinking = false
 tail_lines    = 200
 # `swamp chat`: auto | truecolor | ansi256 | plain, how many result lines survive a collapse,

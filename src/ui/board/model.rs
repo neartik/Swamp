@@ -24,6 +24,10 @@ pub const RECENT: usize = 8;
 /// How long a terminal node stays in `recent` before it is dropped.
 pub const RECENT_TTL: StdDuration = StdDuration::from_secs(5 * 60);
 
+/// How many rows the sections with no natural bound draw. A fan-out batch queues hundreds of
+/// nodes at once; past this the heading counts them and a frame stays a fixed cost.
+pub const SECTION_MAX: usize = 32;
+
 // ---------------------------------------------------------------- selection
 
 /// Why the pool picked this account for this node, as recorded at dispatch.
@@ -219,6 +223,7 @@ impl RunPane {
             model: n.model.clone(),
             title: fmt::sanitize(&n.title),
             state: n.state.clone(),
+            created_at: n.created_at,
             started_at: n.started_at,
             ended_at: n.ended_at,
             usage: n.usage,
@@ -279,6 +284,8 @@ pub struct NodeRow {
     pub model: Option<String>,
     pub title: String,
     pub state: NodeState,
+    /// When the node was queued: what a row that has not started yet counts from.
+    pub created_at: OffsetDateTime,
     pub started_at: Option<OffsetDateTime>,
     pub ended_at: Option<OffsetDateTime>,
     pub usage: Usage,
@@ -287,10 +294,11 @@ pub struct NodeRow {
 }
 
 impl NodeRow {
-    /// Recomputed from `started_at` every frame, never accumulated.
+    /// Recomputed every frame, never accumulated: time on the account once a node started,
+    /// and time spent waiting before that, which is the number a queued row is judged on.
     pub fn elapsed(&self, now: OffsetDateTime) -> Option<StdDuration> {
-        let started = self.started_at?;
-        (self.ended_at.unwrap_or(now) - started).try_into().ok()
+        let from = self.started_at.unwrap_or(self.created_at);
+        (self.ended_at.unwrap_or(now) - from).try_into().ok()
     }
 
     pub fn section(&self) -> Section {
@@ -319,6 +327,12 @@ pub struct Rows {
     pub orphan_nodes: Vec<NodeRow>,
     pub waiting: Vec<NodeRow>,
     pub recent: Vec<NodeRow>,
+    /// In flight across every tailed run, `focus` included: what is drawn is a view, what an
+    /// account is carrying is a fact.
+    pub in_flight: usize,
+    /// How many rows the two capped sections had before `SECTION_MAX`.
+    pub orphan_total: usize,
+    pub waiting_total: usize,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
@@ -476,13 +490,14 @@ impl Board {
             }
         }
 
+        let (carried, in_flight) = self.in_flight_counts(&by_account, &loose);
         let mut groups: Vec<(Option<Provider>, Vec<AccountGroup>)> = Vec::new();
         for row in &self.accounts {
             let nodes = by_account.remove(&row.account).unwrap_or_default();
             let mut row = row.clone();
             // `persist::merge_state` zeroes `inflight` in the file, because it is one
             // process's runtime state: the only honest count is the one the journals show.
-            row.inflight = nodes.len();
+            row.inflight = carried.get(&row.account).copied().unwrap_or(0);
             let slot = match groups.iter_mut().find(|(p, _)| *p == row.provider) {
                 Some(slot) => slot,
                 None => {
@@ -506,6 +521,13 @@ impl Board {
         });
         recent.truncate(RECENT);
 
+        // Longest wait first, so the rows a cap hides are the ones that just arrived.
+        waiting.sort_by_key(|r| (r.created_at, r.id));
+        let waiting_total = waiting.len();
+        let orphan_total = loose.len();
+        waiting.truncate(SECTION_MAX);
+        loose.truncate(SECTION_MAX);
+
         Rows {
             providers: groups
                 .into_iter()
@@ -514,20 +536,46 @@ impl Board {
             orphan_nodes: loose,
             waiting,
             recent,
+            in_flight,
+            orphan_total,
+            waiting_total,
         }
     }
 
+    /// In-flight nodes per account, and in total, over every tailed run. `focus` narrows what
+    /// a frame draws; an account running three nodes in the run `tab` hid is still at three.
+    fn in_flight_counts(
+        &self,
+        drawn: &BTreeMap<AccountId, Vec<NodeRow>>,
+        loose: &[NodeRow],
+    ) -> (BTreeMap<AccountId, usize>, usize) {
+        if self.focus.is_none() {
+            let counts = drawn.iter().map(|(id, n)| (id.clone(), n.len())).collect();
+            let total = drawn.values().map(Vec::len).sum::<usize>() + loose.len();
+            return (counts, total);
+        }
+        let mut counts: BTreeMap<AccountId, usize> = BTreeMap::new();
+        let mut total = 0usize;
+        for pane in &self.runs {
+            for row in pane.rows() {
+                if row.section() != Section::InFlight {
+                    continue;
+                }
+                total += 1;
+                if let Some(id) = &row.account {
+                    *counts.entry(id.clone()).or_default() += 1;
+                }
+            }
+        }
+        (counts, total)
+    }
+
     pub fn summary(&self, rows: &Rows) -> Summary {
-        let in_flight = rows
-            .providers
-            .iter()
-            .flat_map(|p| &p.accounts)
-            .map(|a| a.nodes.len())
-            .sum::<usize>()
-            + rows.orphan_nodes.len();
         let mut cost_usd = 0.0;
         let mut cost_complete = true;
-        for pane in self.panes() {
+        // The header counts the tailed set, never the focused one: `2 runs` and the totals
+        // beside it have to describe the same thing.
+        for pane in &self.runs {
             cost_usd += pane.view.cost_usd;
             cost_complete &= pane.view.cost_complete;
         }
@@ -535,8 +583,8 @@ impl Board {
             runs: self.runs.len(),
             hidden_runs: self.hidden_runs,
             stale_runs: self.runs.iter().filter(|p| p.stale.is_some()).count(),
-            in_flight,
-            waiting: rows.waiting.len(),
+            in_flight: rows.in_flight,
+            waiting: rows.waiting_total,
             accounts: self.accounts.len(),
             cost_usd,
             cost_complete,
@@ -552,6 +600,7 @@ mod tests {
     use crate::ui::board::sources::Tail;
     use crate::ui::chat::tests_support as fx;
     use camino::Utf8PathBuf;
+    use std::str::FromStr;
 
     fn paths() -> RunPaths {
         RunPaths {
@@ -726,7 +775,68 @@ mod tests {
         let rows = b.rows();
         assert_eq!(rows.waiting.len(), 1);
         assert_eq!(rows.waiting[0].title, "rebuild the index");
-        assert_eq!(rows.waiting[0].elapsed(b.now), None);
+        // A node that has not started yet still has a wait, and it is the number that says
+        // how badly the pool is stuck: §3.1 shows it in the elapsed cell.
+        assert_eq!(
+            rows.waiting[0].elapsed(b.now),
+            Some(StdDuration::from_secs(191))
+        );
+    }
+
+    /// A backlog is unbounded; a frame is not. The heading keeps the true total.
+    #[test]
+    fn the_waiting_section_is_capped_and_says_so() {
+        let mut lines = fx::running();
+        for n in 0..(SECTION_MAX as u64 + 5) {
+            lines.push(queued(10 + n, fx::id(10 + n as u8), "rebuild the index"));
+        }
+        let b = board(
+            vec![pane(&lines)],
+            vec![account_row("main", Some(Provider::Anthropic))],
+        );
+        let rows = b.rows();
+        assert_eq!(rows.waiting.len(), SECTION_MAX);
+        assert_eq!(rows.waiting_total, SECTION_MAX + 5);
+        assert_eq!(b.summary(&rows).waiting, SECTION_MAX + 5);
+        // Oldest wait first, so the rows the cap hides are the ones that just arrived.
+        assert!(rows.waiting[0].created_at <= rows.waiting[1].created_at);
+    }
+
+    /// `tab` chooses what is drawn, never what is true: an account at capacity in the run the
+    /// focus hid must not read as having headroom here.
+    #[test]
+    fn focus_never_shrinks_an_account_count() {
+        let other = RunId::from_str("01ARZ3NDEKTSV4RRFFQ69G5FBZ").expect("run id");
+        let mut second = RunPane::new(
+            RunPaths {
+                run: other,
+                dir: Utf8PathBuf::from("/repo/.swamp/runs/y"),
+                sock_dir: Utf8PathBuf::from("/home/.swamp/sock"),
+            },
+            Tail::detached("/repo/.swamp/runs/y/journal.jsonl"),
+        );
+        second.apply(&fx::running());
+        let mut b = board(
+            vec![pane(&fx::running()), second],
+            vec![account_row("main", Some(Provider::Anthropic))],
+        );
+
+        let merged = b.rows();
+        assert_eq!(merged.providers[0].accounts[0].row.inflight, 4);
+        assert_eq!(merged.in_flight, 6);
+
+        b.focus = Some(fx::run_id());
+        let rows = b.rows();
+        assert_eq!(
+            rows.providers[0].accounts[0].nodes.len(),
+            2,
+            "one run drawn"
+        );
+        assert_eq!(
+            rows.providers[0].accounts[0].row.inflight, 4,
+            "both runs counted"
+        );
+        assert_eq!(b.summary(&rows).in_flight, 6);
     }
 
     #[test]

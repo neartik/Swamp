@@ -35,7 +35,7 @@ fn screen(lines: Vec<Line<'static>>, width: u16) -> String {
     term.draw(|f| f.render_widget(Paragraph::new(lines), f.area()))
         .expect("draw");
     let buffer = term.backend().buffer();
-    let width = buffer.area.width as usize;
+    let width = (buffer.area.width as usize).max(1);
     let text: String = buffer.content().iter().map(|c| c.symbol()).collect();
     let chars: Vec<char> = text.chars().collect();
     chars
@@ -519,6 +519,13 @@ fn two_runs_one_exhausted_account() {
     assert!(mid.contains("recent 3"), "{mid}");
     // In flight counts every tailed run: two brains and three workers.
     assert!(mid.contains("5 in flight"), "{mid}");
+    // §3.2: the waiting row's last cell names the wait rather than a dash.
+    assert!(
+        mid.contains("rebuild the index            3m18s blocked"),
+        "{mid}"
+    );
+    // §3.4: the footer says why the pool could not use the account it passed over.
+    assert!(mid.contains("main ineligible (at 4/4)"), "{mid}");
 }
 
 // ---------------------------------------------------------------- §7.3
@@ -542,6 +549,20 @@ fn a_stale_run_freezes_its_glyphs() {
     );
     // The live run keeps its spinner.
     assert!(mid.contains("\u{25c6} 9g5fav"), "{mid}");
+    // §2.3: the marker sits on the account carrying the dead run's node, not only in the
+    // header's total, or with two tailed runs nothing says which account is the stale one.
+    let block = |head: &str| {
+        mid.lines()
+            .skip_while(|l| !l.contains(head))
+            .take(3)
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    assert!(block("\u{25cf} main").contains("stale"), "{mid}");
+    assert!(
+        !block("\u{25d0} alt").contains("stale"),
+        "alt only runs the live run: {mid}"
+    );
 }
 
 // ---------------------------------------------------------------- §7.4
@@ -552,12 +573,63 @@ fn the_selection_reason_shows_the_terms_as_recorded() {
     let theme = Theme::plain();
     for width in [40u16, 60, 100] {
         let c = render::Ctx::new(&b, width, &theme, 0, MAX_AGE);
-        let text = screen(render::footer(&b, &c), width);
+        let text = screen(render::footer(&b, &b.rows(), &c), width);
         insta::assert_snapshot!(format!("reason_{width}"), text);
         assert!(text.contains("9g5f09 \u{2192} alt"), "{text}");
         assert!(text.contains("util .93\u{d7}.50"), "{text}");
-        assert!(text.contains("excluded main"), "{text}");
+        assert!(text.contains("main ineligible (at 4/4)"), "{text}");
     }
+}
+
+/// §3.4: every account `excluded` names, with the gate that holds it back right now.
+#[test]
+fn every_exclusion_names_the_gate_that_holds_it_back() {
+    let mut lines = journal_a();
+    lines.push(JournalLine {
+        seq: 7,
+        at: fx::at(7),
+        run: fx::run_id(),
+        node: Some(fx::id(9)),
+        event: JournalEvent::AccountSelected {
+            account: AccountId("alt".into()),
+            exec: "claude-alt".into(),
+            policy: SelectionPolicy::QuotaAware,
+            reason: TERMS.to_owned(),
+            excluded: vec![
+                AccountId("main".into()),
+                AccountId("codex-main".into()),
+                AccountId("gone".into()),
+            ],
+        },
+    });
+    let mut b = board();
+    b.runs[0] = pane(fx::run_id(), &lines);
+
+    let theme = Theme::plain();
+    let c = render::Ctx::new(&b, 100, &theme, 0, MAX_AGE);
+    let text = screen(render::footer(&b, &b.rows(), &c), 100);
+    insta::assert_snapshot!("reason_excluded_100", text);
+    assert!(text.contains("main ineligible (at 4/4)"), "{text}");
+    assert!(
+        text.contains("codex-main ineligible (cooldown until 23:20)"),
+        "{text}"
+    );
+    assert!(text.contains("gone excluded"), "{text}");
+}
+
+/// A recorded exclusion the live gate no longer agrees with is labelled `now`, per §3.4.
+#[test]
+fn an_exclusion_the_pool_would_not_make_today_says_now() {
+    let mut b = board();
+    for r in &mut b.accounts {
+        if r.account.0 == "main" {
+            r.max_concurrency = Some(8);
+        }
+    }
+    let theme = Theme::plain();
+    let c = render::Ctx::new(&b, 100, &theme, 0, MAX_AGE);
+    let text = screen(render::footer(&b, &b.rows(), &c), 100);
+    assert!(text.contains("main eligible now"), "{text}");
 }
 
 /// Journals written before WP5 carry `format!("score {sc:.4}")` and nothing else.
@@ -582,7 +654,7 @@ fn the_legacy_reason_degrades_to_one_line() {
 
     let theme = Theme::plain();
     let c = render::Ctx::new(&b, 100, &theme, 0, MAX_AGE);
-    let text = screen(render::footer(&b, &c), 100);
+    let text = screen(render::footer(&b, &b.rows(), &c), 100);
     insta::assert_snapshot!("reason_legacy_100", text);
     assert_eq!(
         text.lines()
@@ -620,13 +692,13 @@ fn control_characters_never_reach_the_pane() {
     insta::assert_snapshot!("control_characters_60", draw(&b, 60));
 }
 
-/// A pane the user dragged to one column, and a board with nothing in it yet, still draw.
+/// A pane the user dragged to nothing, and a board with nothing in it yet, still draw.
 #[test]
 fn every_width_draws_inside_its_pane() {
     let full = board();
     let empty = Board::new(Scoring::default(), SelectionPolicy::default(), fx::now());
     for b in [&full, &empty] {
-        for width in 1u16..=120 {
+        for width in 0u16..=120 {
             for line in draw(b, width).lines() {
                 assert!(
                     unicode_width::UnicodeWidthStr::width(line) <= width as usize,

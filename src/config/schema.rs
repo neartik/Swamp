@@ -259,6 +259,8 @@ fn is_zero_f64(n: &f64) -> bool {
 pub struct UiCfg {
     pub refresh_hz: Option<u16>,
     pub tree_width: Option<u16>,
+    /// `swamp chat --board`: how many columns the tmux split gets.
+    pub board_width: Option<u16>,
     pub show_thinking: Option<bool>,
     pub tail_lines: Option<usize>,
     /// auto | truecolor | ansi256 | plain

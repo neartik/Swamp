@@ -1,6 +1,6 @@
 use crate::config::Config;
 use crate::dispatch::account::{Account, AccountState, Health};
-use crate::model::core::LimitReached;
+use crate::model::core::{LimitReached, RateLimitSnapshot};
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
@@ -131,7 +131,81 @@ fn inputs(a: &Account, s: &AccountState, pool_window: u64, now: OffsetDateTime) 
     }
 }
 
-/// Lower is better. None means ineligible right now; every `None` here is a hard gate.
+/// Why an account cannot take work right now. `score` returns `None` for exactly these, so
+/// the dispatcher's decision and any surface explaining one read the same gate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ineligible {
+    Disabled,
+    AuthBroken,
+    Cooling,
+    ProviderStop,
+    CreditsDepleted,
+    SpendControl,
+    AtCapacity,
+    QuotaStop,
+}
+
+impl Ineligible {
+    pub fn word(self) -> &'static str {
+        match self {
+            Ineligible::Disabled => "disabled",
+            Ineligible::AuthBroken => "auth broken",
+            Ineligible::Cooling => "cooling",
+            Ineligible::ProviderStop => "provider stopped",
+            Ineligible::CreditsDepleted => "credits depleted",
+            Ineligible::SpendControl => "spend control",
+            Ineligible::AtCapacity => "at capacity",
+            Ineligible::QuotaStop => "quota stop",
+        }
+    }
+}
+
+/// The hard gates, in the order they outrank each other, over the facts every surface has
+/// rather than a live pool: `AccountRow` carries the same five, so the board can name a
+/// rejection without re-deriving one of its own.
+pub fn gate(
+    health: Health,
+    cooldown_until: Option<OffsetDateTime>,
+    quota: Option<&RateLimitSnapshot>,
+    inflight: usize,
+    max_concurrency: Option<usize>,
+    cfg: &Scoring,
+    now: OffsetDateTime,
+) -> Option<Ineligible> {
+    match health {
+        Health::Disabled => return Some(Ineligible::Disabled),
+        Health::AuthBroken => return Some(Ineligible::AuthBroken),
+        _ => {}
+    }
+    // Independent of health: `swamp accounts enable` never touches the timer.
+    if cooldown_until.is_some_and(|t| t > now) {
+        return Some(Ineligible::Cooling);
+    }
+    // The provider's own gate: recovery must never be inferred from percentages or resets.
+    if quota.and_then(|q| q.ordinary_usage_allowed) == Some(false) {
+        return Some(Ineligible::ProviderStop);
+    }
+    // Depleted credits or a spend control is not a timer: a human has to act.
+    match quota.and_then(|q| q.reached) {
+        Some(LimitReached::CreditsDepleted) => return Some(Ineligible::CreditsDepleted),
+        Some(LimitReached::SpendControl) => return Some(Ineligible::SpendControl),
+        _ => {}
+    }
+    if max_concurrency.is_some_and(|c| inflight >= c) {
+        return Some(Ineligible::AtCapacity);
+    }
+    // MEASURED windows only, and only ones that have not rolled: an estimate is a guess and
+    // must never park a working subscription.
+    if quota
+        .and_then(|q| q.measured_utilization_at(now))
+        .is_some_and(|u| u >= cfg.stop_at)
+    {
+        return Some(Ineligible::QuotaStop);
+    }
+    None
+}
+
+/// Lower is better. None means ineligible right now; `gate` names which hard gate it was.
 pub fn score(
     policy: SelectionPolicy,
     a: &Account,
@@ -140,39 +214,16 @@ pub fn score(
     cfg: &Scoring,
     now: OffsetDateTime,
 ) -> Option<f64> {
-    if matches!(s.health, Health::Disabled | Health::AuthBroken) {
-        return None;
-    }
-    // Two independent gates, never one nested inside the other: `swamp accounts enable`
-    // rewrites health without touching the timer, and a live cooldown still means wait.
-    if s.cooldown_until.is_some_and(|t| t > now) {
-        return None;
-    }
-    // The provider's own authoritative gate: a client must not infer recovery from
-    // percentages or reset times, so this outranks both.
-    if s.quota.as_ref().and_then(|q| q.ordinary_usage_allowed) == Some(false) {
-        return None;
-    }
-    // Depleted credits or a spend control is not a timer: a human has to act.
-    if matches!(
-        s.quota.as_ref().and_then(|q| q.reached),
-        Some(LimitReached::CreditsDepleted | LimitReached::SpendControl)
-    ) {
-        return None;
-    }
-    if let Some(c) = a.max_concurrency
-        && s.inflight >= c
-    {
-        return None;
-    }
-    // Proactive, before any provider error, and on MEASURED windows only: an estimate is a
-    // guess and must never park a working subscription.
-    // A window whose reset has passed measures an allowance that has already rolled: gating
-    // on it strands the account forever, because only a node running on it can refresh it.
-    if s.quota
-        .as_ref()
-        .and_then(|q| q.measured_utilization_at(now))
-        .is_some_and(|u| u >= cfg.stop_at)
+    if gate(
+        s.health,
+        s.cooldown_until,
+        s.quota.as_ref(),
+        s.inflight,
+        a.max_concurrency,
+        cfg,
+        now,
+    )
+    .is_some()
     {
         return None;
     }
@@ -455,6 +506,54 @@ mod tests {
         // An expired cooldown is usable again without anyone clearing the flag.
         s.cooldown_until = Some(now - Duration::from_secs(60));
         assert!(score(SelectionPolicy::LeastLoaded, &a, &s, 0, &cfg, now).is_some());
+    }
+
+    /// The board names a rejection out of the same gate the pool decides on, so the two can
+    /// never disagree about why an account was passed over.
+    #[test]
+    fn the_gate_names_every_reason_score_refuses_for() {
+        let now = OffsetDateTime::now_utc();
+        let a = account("main", Some(2));
+        let cfg = scoring();
+        let of = |s: &AccountState| {
+            gate(
+                s.health,
+                s.cooldown_until,
+                s.quota.as_ref(),
+                s.inflight,
+                a.max_concurrency,
+                &cfg,
+                now,
+            )
+        };
+
+        let mut s = AccountState::default();
+        assert_eq!(of(&s), None);
+
+        s.health = Health::AuthBroken;
+        assert_eq!(of(&s), Some(Ineligible::AuthBroken));
+        s.health = Health::Cooling;
+        s.cooldown_until = Some(now + Duration::from_secs(60));
+        assert_eq!(of(&s), Some(Ineligible::Cooling));
+
+        s.cooldown_until = None;
+        s.inflight = 2;
+        assert_eq!(of(&s), Some(Ineligible::AtCapacity));
+
+        s.inflight = 0;
+        let mut q = util(0.99);
+        q.windows[0].measured = true;
+        s.quota = Some(q);
+        assert_eq!(of(&s), Some(Ineligible::QuotaStop));
+        assert_eq!(
+            score(SelectionPolicy::QuotaAware, &a, &s, 0, &cfg, now),
+            None,
+            "the gate and the score refuse together"
+        );
+
+        s.quota = None;
+        assert_eq!(of(&s), None);
+        assert!(score(SelectionPolicy::QuotaAware, &a, &s, 0, &cfg, now).is_some());
     }
 
     /// An account with no ceiling is bounded by headroom, never by a number.

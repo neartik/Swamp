@@ -17,7 +17,7 @@ openai                                                                       1 a
     until 23:20
 
 waiting 1
-  · 9g5f04   9g5fbz [mid ] rebuild the index                     -                 -       -       -
+  · 9g5f04   9g5fbz [mid ] rebuild the index                     -             3m18s       -       -
     every anthropic account is at its limit · earliest reset 22:54 (in 38m)
 recent 3
   ⊘ 9g5f07   9g5fbz [low ] probe the migration                   haiku-4-5     3m00s    ↓ 2k  ~$0.00
@@ -25,6 +25,6 @@ recent 3
   ✘ 9g5f06   9g5fbz [mid ] seed script                           sonnet-4-5    2m06s   ↓ 12k  ~$0.01
 ────────────────────────────────────────────────────────────────────────────────────────────────────
 9g5f09 → alt   score .41 = util .93×.50 + load .33×.30 + share .12×.15 − weight .00 − idle .02
-               excluded main
+               main ineligible (at 4/4)
 ────────────────────────────────────────────────────────────────────────────────────────────────────
 ↑↓ select · enter trace · tab run · a accounts · r raw · q quit                        9g5fav 9g5fbz
