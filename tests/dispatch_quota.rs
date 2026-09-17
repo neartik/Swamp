@@ -728,6 +728,39 @@ async fn usage_is_cumulative_live_and_committed_once() {
     assert_eq!(after.lifetime_tokens.billable(), 200);
 }
 
+/// claude bills one node through many assistant messages, each re-reporting the cached prefix:
+/// the account has to end on the provider's own total, the number the journal records for the
+/// same node, and not on the peak of the live estimate.
+#[tokio::test]
+async fn a_settled_total_replaces_the_per_message_estimate() {
+    let h = harness(TWO_UNCAPPED).await;
+    let node = NodeId::new();
+    let live = || {
+        h.pool
+            .snapshot()
+            .into_iter()
+            .find(|(_, a, _)| a == &id("main"))
+            .map(|(_, _, s)| s)
+            .expect("main")
+    };
+    for total in [300u64, 600, 900] {
+        h.pool.observe_usage(&id("main"), node, tokens(total));
+    }
+    assert_eq!(live().window_tokens.billable(), 900);
+
+    h.pool.settle_usage(&id("main"), node, tokens(300));
+    assert_eq!(
+        live().window_tokens.billable(),
+        300,
+        "the result line settles the account while the node is still running"
+    );
+
+    h.pool.commit_usage(&id("main"), node, tokens(300));
+    let after = live();
+    assert_eq!(after.window_tokens.billable(), 300);
+    assert_eq!(after.lifetime_tokens.billable(), 300);
+}
+
 /// A measured window whose reset has passed is stale, not a gate: the account has to come back
 /// on its own, because only a node running on it could ever refresh the reading.
 #[tokio::test]

@@ -74,6 +74,82 @@ fn cumulative_observations_are_idempotent_and_commit_once() {
     assert_eq!(ledger.inflight(&account).billable(), 70);
 }
 
+/// claude reports usage per assistant message and re-reports the whole cached prefix every
+/// time, so the running sum peaks well above what the node really spent. The result line is
+/// the measurement: the ledger has to settle back down to it, not keep the peak.
+#[test]
+fn the_provider_total_settles_the_per_message_estimate_down() {
+    let account = AccountId("claude-alt".into());
+    let node = NodeId::new();
+    let mut ledger = UsageLedger::default();
+    let mut state = AccountState::default();
+    let cached = |n: u64| Usage {
+        cached_input_tokens: n,
+        ..Usage::default()
+    };
+
+    let mut running = Usage::default();
+    for message in [35_597u64, 35_597] {
+        running.absorb(&cached(message));
+        ledger.observe(&account, node, running);
+    }
+    assert_eq!(ledger.inflight(&account).cached_input_tokens, 71_194);
+
+    ledger.settle(&account, node, cached(35_597));
+    assert_eq!(
+        ledger.inflight(&account).cached_input_tokens,
+        35_597,
+        "the result line supersedes the per-message sum"
+    );
+
+    state.credit_tokens(&ledger.commit(&account, node, cached(35_597)));
+    assert_eq!(state.lifetime_tokens.cached_input_tokens, 35_597);
+    assert_eq!(state.window_tokens.cached_input_tokens, 35_597);
+
+    // A node that never reported a total keeps the estimate: crediting nothing is worse.
+    let orphan = NodeId::new();
+    ledger.observe(&account, orphan, tokens(120));
+    assert_eq!(
+        ledger.commit(&account, orphan, Usage::default()).billable(),
+        120
+    );
+}
+
+/// One account, one allowance: a bucket an earlier reading left behind must not keep answering
+/// with a number the live snapshot contradicts.
+#[test]
+fn a_telemetry_reading_drops_the_buckets_it_supersedes() {
+    let now = OffsetDateTime::now_utc();
+    let resets = now + time::Duration::days(3);
+    let seven = |utilization: f64| RateLimitSnapshot {
+        windows: vec![LimitWindow {
+            scope: LimitScope::SevenDay,
+            utilization,
+            resets_at: Some(resets),
+            window_minutes: Some(10_080),
+            measured: true,
+        }],
+        limit_id: Some("seven_day".into()),
+        ..Default::default()
+    };
+    let mut state = AccountState::default();
+    state.apply_quota(seven(0.80), QuotaSource::AppServer, now);
+    assert_eq!(state.quota_buckets.len(), 1);
+
+    state.apply_quota(seven(0.92), QuotaSource::Telemetry, now);
+    assert!(
+        state.quota_buckets.is_empty(),
+        "a bucket quoting 80% next to a live 92% is two answers to one question"
+    );
+    assert_eq!(
+        state
+            .quota
+            .as_ref()
+            .and_then(|q| q.measured_utilization_at(now)),
+        Some(0.92)
+    );
+}
+
 /// WP-B acceptance 5: `resets_at` moving forward is what a rolled window looks like on the
 /// wire, for both providers, and it is the only thing that zeroes `window_tokens`.
 #[test]

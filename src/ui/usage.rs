@@ -99,7 +99,7 @@ fn row_of(
         inflight: s.inflight,
         max_concurrency,
         cooldown_until: s.cooldown_until,
-        quota: s.quota.clone(),
+        quota: s.quota.clone().map(|q| as_observed(q, s.quota_source)),
         quota_buckets: s.quota_buckets.clone(),
         quota_observed_at: s.quota_observed_at,
         quota_source: s.quota_source,
@@ -110,6 +110,19 @@ fn row_of(
         cost_usd: s.lifetime_cost_usd,
         cost_basis: s.lifetime_cost_basis,
     }
+}
+
+/// Provenance decides what counts as measured, because it is the field every other surface
+/// asks: an account no provider reading ever reached is estimated, whatever a snapshot
+/// inherited from an older state file says about itself.
+fn as_observed(mut q: RateLimitSnapshot, source: Option<QuotaSource>) -> RateLimitSnapshot {
+    if source.is_some_and(|s| s.is_measured()) {
+        return q;
+    }
+    for w in &mut q.windows {
+        w.measured = false;
+    }
+    q
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -625,9 +638,11 @@ pub fn json(rows: &[AccountRow]) -> Value {
 
 /// A window whose reset has passed measures an allowance that already rolled: the table and
 /// `swamp accounts --json` drop it, so the JSON view must not quote it as current either.
+/// The snapshot's own `resets_at` goes the same way once it is behind us.
 fn current_only(q: &RateLimitSnapshot, now: OffsetDateTime) -> RateLimitSnapshot {
     let mut q = q.clone();
     q.windows.retain(|w| w.is_current(now));
+    q.resets_at = q.resets_at.filter(|t| *t > now);
     q
 }
 

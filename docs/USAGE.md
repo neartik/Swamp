@@ -321,10 +321,22 @@ impl AccountPool {
     /// `cumulative` is this node's running total, not a delta. Idempotent: calling it twice
     /// with the same value changes nothing.
     pub fn observe_usage(&self, id: &AccountId, node: NodeId, cumulative: Usage);
+    /// The provider's own total for a node that is still running: it REPLACES the estimate
+    /// `observe_usage` accumulated rather than being maxed against it.
+    pub fn settle_usage(&self, id: &AccountId, node: NodeId, total: Usage);
     /// The node is terminal: fold its final total into the committed counters and forget it.
     pub fn commit_usage(&self, id: &AccountId, node: NodeId, final_total: Usage);
 }
 ```
+
+`observe_usage` is monotone per field, which makes it an over-estimate and never an under-estimate
+while a node runs. That is the right bias for a live `share` term and the wrong one for the books:
+claude reports usage per assistant message and re-reports the whole cached prefix each time, so the
+running sum peaks two or three times above what the turn really spent. The result line is the
+measurement, so it arrives through `settle_usage` (and `commit_usage`, which applies the same rule
+for a terminal node), replacing the estimate instead of maxing it. A node that reported no total at
+all keeps the estimate: crediting nothing is worse than crediting an approximation. The ledger
+therefore ends a node exactly where the journal does, up to the side-calls below.
 
 Cumulative, not delta, because claude's adapter *replaces* the running total with the `result`
 line's (`src/worker/claude.rs:309`, `if usage.billable() > 0 { st.usage = usage }`) and codex's
@@ -367,7 +379,11 @@ number.
    New `src/worker/codex_quota.rs` globs `sessions/**/rollout-*-<thread_id>.jsonl` and tails it for
    the last `event_msg` with `payload.type == "token_count"`, reading
    `payload.rate_limits` and `payload.info.total_token_usage`. It appends live, so this works
-   mid-run. Source `Rollout`.
+   mid-run. Source `Rollout`. A window states its reset one of two ways and both are read:
+   `resets_at`, an absolute unix timestamp in seconds, which is what the rollout writes, and
+   `resets_in_seconds` / `resetsInSeconds`, a countdown, which is what the app-server answers. The
+   absolute instant wins when both are present, since a countdown is only as good as the age of the
+   reading. Neither means no reset, and the RESETS column stays empty.
    `CODEX_HOME` is owned by the user's wrapper and Swamp cannot read a wrapper. It is resolved once
    per account per process by `codex-<acct> app-server` + `initialize`, whose result echoes
    `codexHome`, and cached. `accounts[].env.CODEX_HOME`, when the user set it, short-circuits the
@@ -415,7 +431,10 @@ same order dispatch does: `accounts[].limit_id` first, then the bucket already r
 yet. A display command must never move an account onto a bucket dispatch did not choose - neither
 onto a re-derived one, nor back onto the stale one the pin was written to replace. Every bucket a
 provider reports buckets for is kept in `quota_buckets` for display; Anthropic reports none, since
-its `limit_id` is the event's `rateLimitType` label and not an allowance.
+its `limit_id` is the event's `rateLimitType` label and not an allowance. `quota_buckets` never
+contradicts `quota`: applying a snapshot rewrites the bucket it names, and a reading that names no
+bucket of its own - Anthropic telemetry, or an estimate - clears the map rather than leaving a
+frozen copy of an older reading beside the live one.
 `worst_utilization()` never maxes across buckets: `codex_bengalfox` at 0% on a model family this
 account never runs must not make `codex` at 32% look worse, and `codex` at 95% must not park a
 Spark-only task.
@@ -618,7 +637,12 @@ Field names are snake_case and stable; new fields are additive. `quota.windows` 
 `quota_buckets` entry carry only windows `LimitWindow::is_current` still accepts: a window whose
 `resets_at` has passed measures an allowance that already rolled, and the table beside this JSON,
 `swamp accounts --json` and dispatch itself all drop it, so a dashboard must not read 96% for a
-window that ended hours ago.
+window that ended hours ago. The snapshot's own `resets_at` is dropped on the same
+rule, so the payload never dates a window to the past.
+
+`measured` is read off the account's provenance, not off whatever a stored snapshot claims about
+itself: with `quota.source` null or `"estimated"` every window reports `measured: false`, which is
+the same fact the footer states as `accounts_without_quota_source` and the table as a leading `~`.
 
 ---
 

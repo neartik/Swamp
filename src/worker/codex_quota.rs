@@ -40,6 +40,11 @@ pub struct RateWindow {
     pub window_minutes: Option<u32>,
     #[serde(default, alias = "resetsInSeconds")]
     pub resets_in_seconds: Option<i64>,
+    /// The rollout states the reset as an absolute unix timestamp in seconds where the
+    /// app-server states a countdown. Read as a float so an integer or a fractional second
+    /// both parse: a hard error here would drop the whole `rate_limits` payload.
+    #[serde(default, alias = "resetsAt")]
+    pub resets_at: Option<f64>,
 }
 
 /// One quota bucket. `codex_bengalfox` at 0% on a model family this account never runs must
@@ -114,10 +119,15 @@ fn window_of(w: &RateWindow, now: OffsetDateTime) -> LimitWindow {
     LimitWindow {
         scope: scope_of(w.window_minutes),
         utilization: (w.used_percent / 100.0).clamp(0.0, 1.0),
+        // The absolute instant first: a countdown is only as good as the age of the reading.
         resets_at: w
-            .resets_in_seconds
-            .and_then(|s| time::Duration::checked_seconds_f64(s as f64))
-            .and_then(|d| now.checked_add(d)),
+            .resets_at
+            .and_then(|t| OffsetDateTime::from_unix_timestamp(t as i64).ok())
+            .or_else(|| {
+                w.resets_in_seconds
+                    .and_then(|s| time::Duration::checked_seconds_f64(s as f64))
+                    .and_then(|d| now.checked_add(d))
+            }),
         window_minutes: w.window_minutes,
         measured: true,
     }
@@ -600,6 +610,37 @@ mod tests {
             "cached tokens are not billed twice"
         );
         assert_eq!(tokens.output_tokens, 120);
+    }
+
+    /// The rollout dates the reset instead of counting down to it, and a window with no reset
+    /// renders an empty RESETS column however good its percentage is.
+    #[test]
+    fn the_rollout_reset_is_an_absolute_timestamp_not_a_countdown() {
+        let sample = parse_rollout(&fixture("codex-rollout-sample.jsonl"), now());
+        let quota = sample.quota.expect("rate limits");
+        assert_eq!(
+            quota.windows[0].resets_at,
+            OffsetDateTime::from_unix_timestamp(1_789_983_570).ok(),
+            "rate_limits.primary.resets_at is unix seconds"
+        );
+
+        // The app-server still counts down, and both spellings have to keep working.
+        let limits: RateLimits = serde_json::from_str(
+            r#"{"primary":{"usedPercent":32.0,"windowMinutes":10080,"resetsInSeconds":600},
+                "secondary":null}"#,
+        )
+        .expect("rate_limits");
+        let snap = snapshot_of(
+            &Bucket {
+                limits,
+                ..Bucket::default()
+            },
+            now(),
+        );
+        assert_eq!(
+            snap.windows[0].resets_at,
+            Some(now() + time::Duration::seconds(600))
+        );
     }
 
     #[test]

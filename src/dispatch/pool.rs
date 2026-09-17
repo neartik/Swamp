@@ -541,6 +541,12 @@ impl AccountPool {
         self.ledger.lock().observe(id, node, cumulative);
     }
 
+    /// The provider's own running total for a node that is still going: it replaces the
+    /// per-message estimate `observe_usage` accumulates rather than being maxed against it.
+    pub fn settle_usage(&self, id: &AccountId, node: NodeId, total: Usage) {
+        self.ledger.lock().settle(id, node, total);
+    }
+
     /// The node is terminal: fold its final total into the committed counters and forget it.
     pub fn commit_usage(&self, id: &AccountId, node: NodeId, final_total: Usage) {
         let owed = self.ledger.lock().commit(id, node, final_total);

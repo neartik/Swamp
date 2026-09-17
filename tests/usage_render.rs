@@ -1571,6 +1571,60 @@ fn cooling_a_depleted_account_keeps_its_gate() {
     );
 }
 
+/// USAGE 3.3: an account no provider reading ever reached is estimated, and the JSON has to say
+/// so in the same breath the footer does. A reset instant two days behind us names an allowance
+/// that rolled long ago, so it is not a reset the payload may still quote.
+#[test]
+fn usage_json_never_calls_an_unsourced_window_measured() {
+    let h = Harness::new();
+    let now = OffsetDateTime::now_utc();
+    let mut state = swamp::dispatch::persist::StateMap::new();
+    state.insert(
+        AccountId("main".into()),
+        AccountState {
+            quota: Some(RateLimitSnapshot {
+                status: LimitStatus::Allowed,
+                windows: vec![LimitWindow {
+                    scope: LimitScope::SevenDay,
+                    utilization: 0.65,
+                    resets_at: Some(now + time::Duration::days(2)),
+                    window_minutes: None,
+                    measured: true,
+                }],
+                resets_at: Some(now - time::Duration::days(2)),
+                ..RateLimitSnapshot::default()
+            }),
+            ..Default::default()
+        },
+    );
+    swamp::dispatch::persist::save_state(&h.paths().accounts_state(), &state)
+        .expect("writing accounts.json by hand");
+
+    let out = h.swamp(&["usage", "--json"]).assert().success();
+    let text = String::from_utf8_lossy(&out.get_output().stdout).into_owned();
+    let v: serde_json::Value = serde_json::from_str(&text).expect("valid json");
+    let account = &v["accounts"][0];
+    assert_eq!(account["quota"]["source"], serde_json::Value::Null);
+    assert_eq!(
+        account["quota"]["windows"][0]["measured"],
+        serde_json::json!(false),
+        "no source means the number is Swamp's own arithmetic: {text}"
+    );
+    assert_eq!(
+        account["quota"]["resets_at"],
+        serde_json::Value::Null,
+        "a reset in the past is not a reset this payload may quote: {text}"
+    );
+    assert_eq!(v["totals"]["accounts_without_quota_source"], 1);
+
+    let table = h.swamp(&["usage"]).assert().success();
+    let table = String::from_utf8_lossy(&table.get_output().stdout).into_owned();
+    assert!(
+        table.contains("~65%"),
+        "the table marks the same number as estimated: {table}"
+    );
+}
+
 /// DESIGN 6.7: a window whose reset has passed measures an allowance that already rolled. The
 /// table, `swamp accounts --json` and dispatch all drop it, so `swamp usage --json` must not
 /// hand a dashboard 96% for a window that ended hours ago.

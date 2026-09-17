@@ -466,7 +466,8 @@ impl EventObserver for NodeTelemetry {
                 if end.billable() > 0 {
                     *total = end;
                 }
-                self.pool.observe_usage(&self.account, self.node, *total);
+                // Authoritative: it settles the account down to the provider's own total.
+                self.pool.settle_usage(&self.account, self.node, *total);
             }
             WorkerEvent::RateLimit(snap) => self.pool.observe_quota(&self.account, snap.clone()),
             _ => {}

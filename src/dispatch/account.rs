@@ -235,11 +235,15 @@ impl AccountState {
         }
         let rolled = self.roll_window(WindowKey::of(&merged), now);
         // Only a source that reports buckets has one: Claude's `limit_id` is a rejection
-        // label, so recording it would leave one frozen duplicate per label it ever sent.
-        if source != QuotaSource::Telemetry
-            && let Some(id) = merged.limit_id.clone()
-        {
-            self.quota_buckets.insert(id, merged.clone());
+        // label, so recording it would leave one frozen duplicate per label it ever sent -
+        // and any bucket an earlier source left behind now contradicts the live reading,
+        // which is why telemetry drops them rather than leaving two numbers on display.
+        match (source, merged.limit_id.clone()) {
+            (QuotaSource::Telemetry, _) => self.quota_buckets.clear(),
+            (_, Some(id)) => {
+                self.quota_buckets.insert(id, merged.clone());
+            }
+            (_, None) => self.quota_buckets.clear(),
         }
         self.quota = Some(merged);
         self.quota_observed_at = Some(now);
@@ -331,13 +335,29 @@ impl UsageLedger {
         entry.total.take_max(&cumulative);
     }
 
+    /// The provider's own total for this node, which REPLACES the live estimate instead of
+    /// maxing it. claude re-reports the whole cached prefix on every assistant message, so the
+    /// running sum of those peaks well above the turn's real spend; a monotone max would keep
+    /// that peak for good and credit the account two or three times over.
+    pub fn settle(&mut self, id: &AccountId, node: NodeId, total: Usage) {
+        let entry = self.nodes.entry((id.clone(), node)).or_default();
+        if entry.committed {
+            return;
+        }
+        entry.total = total;
+    }
+
     /// What this node still owes the committed counters. Calling it twice owes nothing.
     pub fn commit(&mut self, id: &AccountId, node: NodeId, final_total: Usage) -> Usage {
         let entry = self.nodes.entry((id.clone(), node)).or_default();
         if entry.committed {
             return Usage::default();
         }
-        entry.total.take_max(&final_total);
+        // Same rule as `settle`: the final total is the provider's own, and the per-message
+        // estimate only stands in until it lands. A node that never reported one keeps it.
+        if final_total != Usage::default() {
+            entry.total = final_total;
+        }
         entry.committed = true;
         entry.total
     }

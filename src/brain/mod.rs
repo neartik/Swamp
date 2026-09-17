@@ -249,7 +249,8 @@ impl Launch {
         self.adapter.brain_transport() == BrainTransport::ResumePerTurn
     }
 
-    /// A turn's result line carries that turn's totals and replaces what its deltas summed to.
+    /// A turn's result line carries that turn's totals and replaces what its deltas summed to,
+    /// in the pool's ledger as well: the deltas are a live estimate, this is the measurement.
     pub fn observe_turn(&self, turn: &Usage) {
         let cumulative = {
             let mut t = self.totals.lock();
@@ -263,7 +264,7 @@ impl Launch {
         };
         self.lease
             .pool()
-            .observe_usage(&self.account, self.node(), cumulative);
+            .settle_usage(&self.account, self.node(), cumulative);
     }
 
     /// Hands this turn's spend to the pool. The node itself is counted once, at shutdown.
