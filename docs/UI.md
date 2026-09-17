@@ -353,6 +353,21 @@ closes admission. Nodes appearing with no batch open (a retry, a resumed node) j
 `Batch::loose` rendered the same way under `● workers`. Dispatch calls from one brain are serial,
 so this is exact and needs no id plumbing through MCP.
 
+### 1.6 Pointing chat at the board
+
+Committed right after the welcome block, once, in `meta`:
+
+```
+  board: `swamp board` in a split, or restart with `swamp chat --board`
+```
+
+Shown only when `TMUX` is set and `~/.swamp/board.pid` names no live process
+(`journal::paths::board_is_alive`, the same start-time check `worker::liveness::is_ours` uses).
+The decision is one pure function, `ui::chat::board_hint(in_tmux, board_alive) -> Option<&str>`,
+so it is unit-tested without a terminal. `swamp chat --board` runs
+`tmux split-window -h -l 46 -d swamp board` when `TMUX` is set, or prints one line naming the
+command otherwise, then always continues into chat - a pane it could not open is never fatal.
+
 ---
 
 ## 2. Glyphs and colours

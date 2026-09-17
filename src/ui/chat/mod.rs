@@ -24,11 +24,12 @@ use crate::journal::reader::Tailer;
 use crate::ui::chat::app::{App, Effect, MIN_LIVE, Msg};
 use crate::ui::chat::blocks::WelcomeInfo;
 use crate::ui::chat::input::History;
-use crate::ui::chat::theme::Theme;
+use crate::ui::chat::theme::{Role, Theme};
 use crate::ui::fmt;
 use crate::ui::trace::{TraceOpts, render};
 use crossterm::event::{Event, EventStream};
 use futures::StreamExt;
+use ratatui::text::Line;
 use std::io::{IsTerminal, Write};
 use std::sync::Arc;
 use std::time::Duration;
@@ -43,6 +44,20 @@ const RESIZE_QUIET: Duration = Duration::from_millis(50);
 /// header, so the header and the welcome box never both claim the run id.
 pub fn interactive_stdout() -> bool {
     std::io::stdout().is_terminal()
+}
+
+/// docs/BOARD.md §5: shown once, before the first prompt, only when tmux is active and no
+/// board owns `~/.swamp/board.pid`.
+fn board_hint(in_tmux: bool, board_alive: bool) -> Option<&'static str> {
+    (in_tmux && !board_alive)
+        .then_some("board: `swamp board` in a split, or restart with `swamp chat --board`")
+}
+
+fn board_hint_for(ctx: &Ctx) -> Option<&'static str> {
+    board_hint(
+        std::env::var_os("TMUX").is_some(),
+        crate::journal::paths::board_is_alive(&ctx.paths.board_pid()),
+    )
 }
 
 /// The chat UI. A tty gets the inline viewport; a pipe gets the plain transcript, so CI and
@@ -61,6 +76,9 @@ pub async fn repl(brain: Box<dyn Brain>, disp: Arc<Dispatcher>, ctx: &Ctx) -> an
 async fn plain(mut brain: Box<dyn Brain>, disp: Arc<Dispatcher>, ctx: &Ctx) -> anyhow::Result<i32> {
     use tokio::io::AsyncBufReadExt;
     println!("swamp {} - /help for commands", crate::VERSION);
+    if let Some(hint) = board_hint_for(ctx) {
+        println!("  {hint}");
+    }
     // No live view here: the blocked notice has to reach stderr or nothing explains the wait.
     disp.pool().notices_to_stderr();
     let mut lines = tokio::io::BufReader::new(tokio::io::stdin()).lines();
@@ -180,6 +198,11 @@ async fn interactive(
     let mut term = live::enter(width, rows, MIN_LIVE)?;
     let _guard = crate::ui::watch::TerminalGuard::with(live::restore_inline);
     term.commit(app.take_welcome())?;
+    if let Some(hint) = board_hint_for(ctx) {
+        term.commit(vec![Line::from(
+            theme.span(format!("  {hint}"), Role::Meta),
+        )])?;
+    }
     let mut keys = EventStream::new();
     // Events read past a resize while waiting for the burst to end, replayed once it is handled.
     let mut queued: std::collections::VecDeque<Event> = std::collections::VecDeque::new();
@@ -543,5 +566,13 @@ mod tests {
         let line = workers_line(&[entry("a", Health::Healthy), entry("b", Health::Disabled)]);
         assert!(line.contains("1 disabled"), "{line}");
         assert!(!line.contains("cooling"), "{line}");
+    }
+
+    #[test]
+    fn the_board_hint_shows_only_in_tmux_with_no_live_board() {
+        assert!(board_hint(true, false).is_some());
+        assert!(board_hint(true, true).is_none());
+        assert!(board_hint(false, false).is_none());
+        assert!(board_hint(false, true).is_none());
     }
 }

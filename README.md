@@ -189,6 +189,9 @@ Commands: `/help`, `/status`, `/accounts`, `/usage [--json]`, `/trace [node]`, `
 (default 3), `chat_history` (default 500 entries, kept in `.swamp/chat_history`), `refresh_hz`
 (default 20), `show_thinking`.
 
+Inside tmux with no `swamp board` attached, chat prints a one-line hint pointing at it.
+`swamp chat --board` splits a pane running `swamp board` for you and carries on into chat.
+
 ## Commands
 
 | Command | What it does |
@@ -196,6 +199,7 @@ Commands: `/help`, `/status`, `/accounts`, `/usage [--json]`, `/trace [node]`, `
 | `swamp run <TASK>` | One-shot. `--no-brain` sends the task straight to one worker. `--tier`, `--provider`, `--account`, `--isolation`, `--detach`. |
 | `swamp trace [RUN\|last\|-2]` | Render a run tree: nodes, attempts, accounts, failures, cost. `--events`, `--raw`, `--follow`, `--failed`, `--json`. |
 | `swamp watch [RUN\|last]` | Live read-only TUI. Attach from a second terminal while a run is going. |
+| `swamp board` | Read-only dispatch board: which account works on what, across every live run. `--run`, `--all`, `--interval`, `--once`, `--json`. Meant to sit in a tmux pane beside `swamp chat`. |
 | `swamp doctor` | Health checks. `--probe` calls each account's CLI, `--schema` reports adapter drift, `--reap` removes stale worktrees and pidfiles, and sweeps `~/.swamp/sock` for sockets no process is listening on, `--fix` creates the directories and the git exclude. Exit 1 on any error, so CI can gate on it. |
 | `swamp chat` | Interactive brain session. |
 | `swamp runs`, `swamp resume`, `swamp cancel` | List runs, recover an interrupted one (`--plan` first, it spends nothing), stop one. |

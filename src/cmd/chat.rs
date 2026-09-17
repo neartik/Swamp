@@ -9,6 +9,9 @@ use tokio::time::Instant;
 
 /// Interactive brain session. The brain is just another account in the same pool.
 pub async fn run(ctx: &Ctx, args: &ChatArgs) -> anyhow::Result<i32> {
+    if args.board {
+        open_board_pane();
+    }
     let cfg = Arc::new(overrides(ctx, args)?);
     let depth = crate::cmd::guard_depth(&cfg)?;
     let resume = match args.resume.as_deref() {
@@ -83,6 +86,21 @@ fn previous_session(ctx: &Ctx, run: RunId) -> Option<crate::model::core::Session
         .values()
         .rfind(|n| n.kind == crate::model::core::NodeKind::Brain)
         .and_then(|n| n.session.clone())
+}
+
+/// docs/BOARD.md §5: `--board` splits a pane for `swamp board` when tmux is available, and
+/// otherwise just names the command, since chat must never fail over a pane it cannot open.
+fn open_board_pane() {
+    if std::env::var_os("TMUX").is_some() {
+        if let Err(e) = std::process::Command::new("tmux")
+            .args(["split-window", "-h", "-l", "46", "-d", "swamp", "board"])
+            .status()
+        {
+            eprintln!("--board: could not start `swamp board` in a tmux split: {e}");
+        }
+    } else {
+        eprintln!("--board only works inside tmux; run `swamp board` in another pane instead");
+    }
 }
 
 fn overrides(ctx: &Ctx, args: &ChatArgs) -> anyhow::Result<Config> {
