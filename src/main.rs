@@ -90,6 +90,7 @@ async fn dispatch(cli: &Cli, root: &Utf8Path) -> Result<i32> {
         Some(Command::Run(a)) => cmd::run::run(&ctx, a).await,
         Some(Command::Trace(a)) => cmd::trace::run(&ctx, a).await,
         Some(Command::Watch(a)) => cmd::watch::run(&ctx, a).await,
+        Some(Command::Board(a)) => cmd::board::run(&ctx, a).await,
         Some(Command::Runs(a)) => cmd::runs::run(&ctx, a).await,
         Some(Command::Resume(a)) => cmd::resume::run(&ctx, a).await,
         Some(Command::Accounts(a)) => cmd::accounts::run(&ctx, a).await,

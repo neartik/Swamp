@@ -45,6 +45,8 @@ pub enum Command {
     Trace(TraceArgs),
     /// Live TUI, read-only, attachable from another terminal
     Watch(WatchArgs),
+    /// Read-only dispatch board: which account works on what, right now
+    Board(BoardArgs),
     /// List runs, newest first
     Runs(RunsArgs),
     /// Recover an interrupted run
@@ -93,6 +95,9 @@ pub struct ChatArgs {
     /// Boot a real brain whose dispatch tools journal and return a fake success
     #[arg(long)]
     pub dry_run: bool,
+    /// Split a tmux pane running `swamp board` beside the chat
+    #[arg(long)]
+    pub board: bool,
 }
 
 #[derive(Debug, Args)]
@@ -155,6 +160,28 @@ pub struct TraceArgs {
 pub struct WatchArgs {
     #[arg(value_name = "RUN")]
     pub run: Option<String>,
+    /// Hidden alias: forwards to `swamp board`, the name people guess
+    #[arg(long, hide = true)]
+    pub board: bool,
+}
+
+#[derive(Debug, Default, Args)]
+pub struct BoardArgs {
+    /// Pin one run: a full id, a unique prefix, `last`, or `-2`. Default: every live run
+    #[arg(long, value_name = "RUN")]
+    pub run: Option<String>,
+    /// Every repo `~/.swamp/runs.json` knows about, not only this one
+    #[arg(long)]
+    pub all: bool,
+    /// Frame period in milliseconds, overriding [ui].refresh_hz
+    #[arg(long, value_name = "MS")]
+    pub interval: Option<u64>,
+    /// Print one frame and exit, for scripts
+    #[arg(long)]
+    pub once: bool,
+    /// Dump the same model as JSON and exit; same as the global --json
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Debug, Args)]
@@ -416,6 +443,51 @@ mod tests {
         assert!(a.no_brain);
         assert!(a.wait);
         assert_eq!(a.tier, Some(Tier::Mid));
+    }
+
+    /// `docs/BOARD.md` §1: the flags the board takes, and the alias people will guess.
+    #[test]
+    fn the_board_flags_parse_and_the_watch_alias_stays_hidden() {
+        let cli = Cli::try_parse_from([
+            "swamp",
+            "board",
+            "--run",
+            "last",
+            "--all",
+            "--interval",
+            "250",
+            "--once",
+            "--json",
+        ])
+        .expect("parses");
+        let Some(Command::Board(a)) = cli.command else {
+            panic!("expected board");
+        };
+        assert_eq!(a.run.as_deref(), Some("last"));
+        assert!(a.all && a.once && a.json);
+        assert_eq!(a.interval, Some(250));
+
+        let cli = Cli::try_parse_from(["swamp", "watch", "--board"]).expect("parses");
+        let Some(Command::Watch(a)) = cli.command else {
+            panic!("expected watch");
+        };
+        assert!(a.board);
+        let help = Cli::command()
+            .find_subcommand_mut("watch")
+            .expect("watch subcommand")
+            .render_help()
+            .to_string();
+        assert!(!help.contains("--board"), "the alias is hidden: {help}");
+    }
+
+    /// WP8 reads it; WP1 only has to make sure the flag is there to read.
+    #[test]
+    fn chat_carries_the_board_flag() {
+        let cli = Cli::try_parse_from(["swamp", "chat", "--board"]).expect("parses");
+        let Some(Command::Chat(a)) = cli.command else {
+            panic!("expected chat");
+        };
+        assert!(a.board);
     }
 
     /// A task made of several words still joins, and `--` still forces literal text.

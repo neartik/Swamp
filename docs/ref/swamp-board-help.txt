@@ -1,0 +1,20 @@
+Read-only dispatch board: which account works on what, right now
+
+Usage: swamp board [OPTIONS]
+
+Options:
+  -C, --cd <DIR>        Project root (default: cwd, walked up to the git root)
+      --run <RUN>       Pin one run: a full id, a unique prefix, `last`, or
+                        `-2`. Default: every live run
+      --all             Every repo `~/.swamp/runs.json` knows about, not only
+                        this one
+      --config <FILE>   Extra config layer, highest priority
+      --interval <MS>   Frame period in milliseconds, overriding [ui].refresh_hz
+      --profile <NAME>  Named profile from [profiles.<name>]
+      --once            Print one frame and exit, for scripts
+      --json            Dump the same model as JSON and exit; same as the global
+                        --json
+  -v, --verbose...      -v info, -vv debug, -vvv trace; logs to .swamp/swamp.log
+  -q, --quiet
+      --no-color
+  -h, --help            Print help

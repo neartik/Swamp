@@ -1,5 +1,6 @@
 pub mod accounts;
 pub mod adopt;
+pub mod board;
 pub mod cancel;
 pub mod chat;
 pub mod config;
