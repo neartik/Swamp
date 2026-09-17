@@ -31,6 +31,9 @@ pub async fn run(ctx: &Ctx, args: &RunArgs) -> anyhow::Result<i32> {
     }
     preflight(ctx, &cfg).await?;
     let session = RunSession::start(ctx, cfg, RunId::new(), Some(&task)).await?;
+    ctx.paths
+        .register_run(session.paths.run, &session.paths.dir)
+        .ok();
     session.pool.notices_to_stderr();
     if !ctx.json {
         println!("run {}", session.paths.run);
@@ -136,6 +139,7 @@ async fn single_node(
     session
         .finish(state, outcome.attempts.len() as u32, usage, cost)
         .await?;
+    ctx.paths.deregister_run(paths.run).ok();
     report(ctx, &paths, &result)?;
     Ok(exit_code(outcome.failure.as_ref(), interrupted))
 }
@@ -240,6 +244,7 @@ async fn with_brain(
             Some(totals.cost_usd),
         )
         .await?;
+    ctx.paths.deregister_run(paths.run).ok();
     let view = ctx.view(&paths, false)?;
     ctx.out(&render(
         &view,

@@ -1,8 +1,10 @@
 //! `/usage` and `swamp usage`: one renderer shared byte-for-byte by the chat block and the
 //! CLI. `render` draws the §3.1 table; `json` builds the §3.3 shape. Neither does any I/O.
 
+use crate::config::Config;
 use crate::config::schema::AccountCfg;
 use crate::dispatch::account::{AccountState, Health, QuotaSource};
+use crate::dispatch::persist::StateMap;
 use crate::model::core::{
     AccountId, CostBasis, LimitReached, LimitScope, LimitWindow, Provider, RateLimitSnapshot, Usage,
 };
@@ -80,6 +82,29 @@ pub fn rows_from(
             .map(|(id, s)| row_of(None, id.clone(), String::new(), None, false, s)),
     );
     out
+}
+
+/// The same rows from the persisted state file rather than a live pool snapshot: one entry
+/// per configured account, plus every account the file remembers that the config no longer
+/// names. `swamp usage` and the board share it so they cannot drift.
+pub fn rows_from_state(cfg: &Config, state: &StateMap) -> Vec<AccountRow> {
+    let pool: Vec<(Provider, AccountId, AccountState)> = cfg
+        .accounts
+        .iter()
+        .map(|a| {
+            (
+                a.provider,
+                a.id.clone(),
+                state.get(&a.id).cloned().unwrap_or_default(),
+            )
+        })
+        .collect();
+    let stale: Vec<(AccountId, AccountState)> = state
+        .iter()
+        .filter(|(id, _)| cfg.account(id).is_none())
+        .map(|(id, s)| (id.clone(), s.clone()))
+        .collect();
+    rows_from(&cfg.accounts, &pool, &stale)
 }
 
 fn row_of(

@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 use swamp::config::{Config, load, resolve, validate};
-use swamp::dispatch::policy::{Rank, Scoring, SelectionPolicy, rank, score};
+use swamp::dispatch::policy::{Rank, Scoring, SelectionPolicy, explain, rank, score};
 use swamp::dispatch::{Account, AccountPool, AccountState, Health, NoCapacity};
 use swamp::journal::JournalHandle;
 use swamp::journal::paths::RunPaths;
@@ -146,6 +146,49 @@ fn utilization_decides_between_two_idle_accounts() {
         ]
     );
     assert_eq!(winner(&pool, now), "main");
+}
+
+/// BOARD 3.4: the reason recorded with the selection is the board's footer - every term with
+/// its weight, then the runner-up and the term it lost on - and it still opens with `score`.
+#[test]
+fn the_dispatch_reason_spells_out_every_term() {
+    let now = OffsetDateTime::now_utc();
+    let main = (
+        account("main", Some(3)),
+        AccountState {
+            quota: Some(quota(vec![
+                window(LimitScope::FiveHour, 0.13, true),
+                window(LimitScope::SevenDay, 0.05, true),
+            ])),
+            ..idle_state(0, 412_000, now)
+        },
+    );
+    let alt = (
+        account("alt", Some(2)),
+        AccountState {
+            quota: Some(quota(vec![
+                window(LimitScope::FiveHour, 0.03, true),
+                window(LimitScope::SevenDay, 0.65, true),
+            ])),
+            ..idle_state(0, 1_200_000, now)
+        },
+    );
+    let pool_window = main.1.window_tokens.billable() + alt.1.window_tokens.billable();
+    let got = explain(
+        SelectionPolicy::QuotaAware,
+        (&main.0, &main.1),
+        Some((&alt.0, &alt.1)),
+        pool_window,
+        &Scoring::default(),
+        now,
+    );
+    assert_eq!(
+        got,
+        "score .08 = util .13\u{d7}.50 + load .00\u{d7}.30 + share .26\u{d7}.15 \
+         \u{2212} weight .00 \u{2212} idle .02; alt scored .42 and lost on util"
+    );
+    // The old reason was `score 0.0833`; anything matching on that word still matches.
+    assert!(got.starts_with("score "), "{got}");
 }
 
 /// 2. Load matters, but utilization outranks it; the cap still gates.

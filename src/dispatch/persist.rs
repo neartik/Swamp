@@ -15,11 +15,35 @@ pub fn load_state(path: &Utf8Path) -> anyhow::Result<StateMap> {
         return Ok(StateMap::new());
     }
     let _guard = lock(path)?;
+    read_state(path)
+}
+
+fn read_state(path: &Utf8Path) -> anyhow::Result<StateMap> {
     let text = std::fs::read_to_string(path).with_context(|| format!("reading {path}"))?;
     if text.trim().is_empty() {
         return Ok(StateMap::new());
     }
     serde_json::from_str(&text).with_context(|| format!("parsing {path}"))
+}
+
+/// `load_state` takes the lock exclusively and blocks; a reader polling every second would
+/// then stall the dispatcher trying to rename a new state file into place. Shared and
+/// non-blocking instead: `Ok(None)` means the file was contended, so keep the numbers you
+/// already had rather than waiting for it.
+pub fn try_load_state(path: &Utf8Path) -> anyhow::Result<Option<StateMap>> {
+    if !path.is_file() {
+        return Ok(Some(StateMap::new()));
+    }
+    let Ok(file) = open_lock_file(path) else {
+        // A read-only directory still holds a readable state file, and the lock is advisory.
+        return read_state(path).map(Some);
+    };
+    if !FileExt::try_lock_shared(&file)? {
+        return Ok(None);
+    }
+    let state = read_state(path);
+    drop(file);
+    state.map(Some)
 }
 
 /// Read-modify-write under the lock. Another repo's run may have learned a cooldown since we
@@ -142,19 +166,24 @@ fn write_locked(path: &Utf8Path, dir: &Utf8Path, s: &StateMap) -> anyhow::Result
 
 /// A sibling lock file, not the state file itself: the lock must outlive the rename.
 fn lock(path: &Utf8Path) -> anyhow::Result<File> {
+    let file = open_lock_file(path)?;
+    FileExt::lock_exclusive(&file)
+        .with_context(|| format!("locking {}", path.with_extension("lock")))?;
+    Ok(file)
+}
+
+fn open_lock_file(path: &Utf8Path) -> anyhow::Result<File> {
     let lock_path = path.with_extension("lock");
     if let Some(dir) = lock_path.parent() {
         std::fs::create_dir_all(dir).with_context(|| format!("creating {dir}"))?;
     }
-    let file = OpenOptions::new()
+    OpenOptions::new()
         .create(true)
         .read(true)
         .truncate(false)
         .write(true)
         .open(&lock_path)
-        .with_context(|| format!("opening {lock_path}"))?;
-    FileExt::lock_exclusive(&file).with_context(|| format!("locking {lock_path}"))?;
-    Ok(file)
+        .with_context(|| format!("opening {lock_path}"))
 }
 
 #[cfg(test)]

@@ -468,6 +468,13 @@ new fold. `swamp replay --reparse` re-derives every node's usage from the retain
 raw stream carries an account's health or the pool's counters, so the rewrite copies the
 `AccountSelected`, `AccountHealth` and `AccountUsage` lines across from the journal it replaces.
 
+`AccountSelected.reason` is no longer `score 0.0833`. `policy::explain` writes the line
+`docs/BOARD.md` §3.4 renders: the score, every term with the weight it was multiplied by, then the
+runner-up and the term it lost on - `score .08 = util .13×.50 + load .00×.30 + share .26×.15 −
+weight .00 − idle .02; alt scored .42 and lost on util`. It is recorded at dispatch, so `swamp
+board` and `swamp trace` show the numbers as they were then rather than a re-scored guess, and it
+still opens with `score`, which is what older readers matched on.
+
 No secrets: `accounts.json` and the journal hold an account **id**, an exec name, counters and
 percentages. No token, no config-dir path beyond what the user put in `accounts[].env`, no email.
 

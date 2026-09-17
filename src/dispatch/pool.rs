@@ -3,7 +3,7 @@ use crate::config::{Config, MAX_COOLDOWN};
 use crate::dispatch::account::{Account, AccountState, Health, QuotaSource, UsageLedger};
 use crate::dispatch::cooldown::cooldown_for;
 use crate::dispatch::persist::{self, StateMap};
-use crate::dispatch::policy::{Scoring, SelectionPolicy, rank, score};
+use crate::dispatch::policy::{Rank, Scoring, SelectionPolicy, explain, rank, score};
 use crate::ids::NodeId;
 use crate::journal::{JournalEvent, JournalHandle};
 use crate::model::core::{
@@ -926,16 +926,28 @@ impl AccountPool {
         };
         // One denominator for the whole selection, computed under the state lock.
         let pool_window = pool_window(&live);
-        let best = live
+        // Ranked, not just minimised: the reason names the runner-up, and rotation makes
+        // `compare` a strict order, so the sort has no ties to resolve.
+        let mut ranked: Vec<(Rank, &Account, &AccountState)> = live
             .iter()
             .enumerate()
             .filter_map(|(i, (a, s))| {
                 let rotation = (i + len - turn % len) % len;
-                rank(self.policy, a, s, pool_window, &self.scoring, now, rotation).map(|r| (r, *a))
+                rank(self.policy, a, s, pool_window, &self.scoring, now, rotation)
+                    .map(|r| (r, *a, s))
             })
-            .min_by(|a, b| a.0.compare(&b.0))
-            .map(|(r, a)| (r.score, a.id.clone(), a.exec.clone(), a.env.clone()))?;
-        let (sc, id, exec, env) = best;
+            .collect();
+        ranked.sort_by(|a, b| a.0.compare(&b.0));
+        let ((_, best, best_state), rest) = ranked.split_first()?;
+        let reason = explain(
+            self.policy,
+            (best, best_state),
+            rest.first().map(|(_, a, s)| (*a, *s)),
+            pool_window,
+            &self.scoring,
+            now,
+        );
+        let (id, exec, env) = (best.id.clone(), best.exec.clone(), best.env.clone());
         let entry = state.entry(id.clone()).or_default();
         entry.inflight += 1;
         entry.last_used = Some(now);
@@ -948,7 +960,7 @@ impl AccountPool {
                 account: id.clone(),
                 exec: exec.clone(),
                 policy: self.policy,
-                reason: format!("score {sc:.4}"),
+                reason,
                 excluded: exclude.iter().cloned().collect(),
             },
         );

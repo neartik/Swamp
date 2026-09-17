@@ -59,6 +59,7 @@ fn parse(raw: &[u8]) -> Parsed {
     }
 }
 
+#[derive(Debug)]
 pub struct Tailer {
     pub path: Utf8PathBuf,
     pub offset: u64,

@@ -16,6 +16,9 @@ pub async fn run(ctx: &Ctx, args: &ChatArgs) -> anyhow::Result<i32> {
         None => None,
     };
     let session = RunSession::start(ctx, cfg.clone(), RunId::new(), None).await?;
+    ctx.paths
+        .register_run(session.paths.run, &session.paths.dir)
+        .ok();
     // The interactive UI prints the run id in its welcome box; the header would leak above it.
     if !crate::ui::chat::interactive_stdout() {
         println!("run {}", session.paths.run);
@@ -58,6 +61,7 @@ pub async fn run(ctx: &Ctx, args: &ChatArgs) -> anyhow::Result<i32> {
 
     let view = ctx.view(&session.paths, false)?;
     let totals = view.totals();
+    let run = session.paths.run;
     session
         .finish(
             NodeState::Succeeded,
@@ -66,6 +70,7 @@ pub async fn run(ctx: &Ctx, args: &ChatArgs) -> anyhow::Result<i32> {
             Some(totals.cost_usd),
         )
         .await?;
+    ctx.paths.deregister_run(run).ok();
     Ok(code)
 }
 

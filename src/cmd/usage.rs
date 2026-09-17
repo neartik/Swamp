@@ -1,7 +1,7 @@
 use crate::cli::UsageArgs;
 use crate::cmd::Ctx;
 use crate::config::resolve::expand_env;
-use crate::dispatch::account::{AccountState, QuotaSource};
+use crate::dispatch::account::QuotaSource;
 use crate::dispatch::persist;
 use crate::dispatch::policy::Scoring;
 use crate::dispatch::pool;
@@ -42,24 +42,7 @@ pub async fn run(ctx: &Ctx, args: &UsageArgs) -> anyhow::Result<i32> {
         }
     }
 
-    let pool: Vec<(Provider, AccountId, AccountState)> = ctx
-        .cfg
-        .accounts
-        .iter()
-        .map(|a| {
-            (
-                a.provider,
-                a.id.clone(),
-                state.get(&a.id).cloned().unwrap_or_default(),
-            )
-        })
-        .collect();
-    let stale: Vec<(AccountId, AccountState)> = state
-        .iter()
-        .filter(|(id, _)| ctx.cfg.account(id).is_none())
-        .map(|(id, s)| (id.clone(), s.clone()))
-        .collect();
-    let rows = usage::rows_from(&ctx.cfg.accounts, &pool, &stale);
+    let rows = usage::rows_from_state(&ctx.cfg, &state);
 
     if ctx.json || args.json {
         ctx.out(&format!(

@@ -81,7 +81,7 @@ fn tmp() -> (tempfile::TempDir, Utf8PathBuf) {
 
 struct Harness {
     _dir: tempfile::TempDir,
-    _events: Events,
+    events: Events,
     pool: Arc<AccountPool>,
     state_path: Utf8PathBuf,
     cfg: Arc<Config>,
@@ -95,7 +95,7 @@ async fn harness(extra: &str) -> Harness {
     let pool = AccountPool::new(Arc::clone(&cfg), state_path.clone(), handle).expect("pool");
     Harness {
         _dir: dir,
-        _events: events,
+        events,
         pool,
         state_path,
         cfg,
@@ -169,6 +169,30 @@ async fn round_robin_alternates_between_equal_accounts() {
     );
     let third = acquire(&h.pool).await.expect("third lease").account.clone();
     assert_eq!(third, first);
+}
+
+/// BOARD 3.4: the selection records the board's footer, not a bare number, so the board can
+/// print the terms as they were at dispatch instead of re-scoring a guess.
+#[tokio::test]
+async fn the_selection_journals_the_term_by_term_reason() {
+    let mut h = harness(TWO_ACCOUNTS).await;
+    let lease = acquire(&h.pool).await.expect("lease");
+    let reason = std::iter::from_fn(|| h.events.try_recv().ok())
+        .find_map(|(_, e)| match e {
+            JournalEvent::AccountSelected { reason, .. } => Some(reason),
+            _ => None,
+        })
+        .expect("the selection is journalled");
+    assert!(reason.starts_with("score "), "{reason}");
+    for term in ["util", "load", "share", "weight", "idle"] {
+        assert!(reason.contains(term), "{term} missing from {reason}");
+    }
+    let runner_up = if lease.account.0 == "main" {
+        "alt"
+    } else {
+        "main"
+    };
+    assert!(reason.contains(runner_up), "{reason}");
 }
 
 #[tokio::test]
