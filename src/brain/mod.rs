@@ -281,8 +281,14 @@ impl Launch {
         t.basis.map(|basis| Cost { usd, basis })
     }
 
-    /// One NodeSpawned so the brain shows up in the run tree like any other node.
+    /// One NodeSpawned so the brain shows up in the run tree like any other node, plus the
+    /// pidfile `swamp board` and `swamp watch` judge the brain alive by. It names this
+    /// supervisor, not the child: a resume-per-turn brain has no process between turns.
     pub async fn journal_spawn(&self) -> anyhow::Result<()> {
+        crate::worker::liveness::write_pidfile(
+            &self.journal.paths().pidfile(self.node()),
+            std::process::id() as i32,
+        )?;
         let record = NodeRecord {
             id: self.node(),
             run_id: self.journal.run(),

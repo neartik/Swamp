@@ -195,6 +195,29 @@ async fn the_selection_journals_the_term_by_term_reason() {
     assert!(reason.contains(runner_up), "{reason}");
 }
 
+/// BOARD 3.4: the reason is drawn on the selected node's row, so the selection line has to
+/// name the node it leased for. Attributed to nothing, the footer has no row to hang off.
+#[tokio::test]
+async fn the_selection_names_the_node_it_leased_for() {
+    let mut h = harness(TWO_ACCOUNTS).await;
+    let node = NodeId::new();
+    let _lease = h
+        .pool
+        .acquire_node(
+            Provider::Anthropic,
+            &HashSet::new(),
+            soon(),
+            Some(node),
+            None,
+        )
+        .await
+        .expect("lease");
+    let at = std::iter::from_fn(|| h.events.try_recv().ok())
+        .find_map(|(n, e)| matches!(e, JournalEvent::AccountSelected { .. }).then_some(n))
+        .expect("the selection is journalled");
+    assert_eq!(at, Some(node), "the selection names no node");
+}
+
 #[tokio::test]
 async fn least_loaded_prefers_the_account_with_fewer_inflight() {
     let h = harness(&format!(
@@ -570,7 +593,7 @@ max_concurrency = 4
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     let brain = h
         .pool
-        .acquire_brain(Provider::Anthropic, Some(&id("main")), deadline)
+        .acquire_brain(Provider::Anthropic, Some(&id("main")), deadline, None)
         .await
         .expect("a brain lease");
     assert_eq!(brain.account, id("main"));
@@ -596,7 +619,7 @@ async fn the_brain_waits_for_a_cooling_account_instead_of_failing() {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     let lease = h
         .pool
-        .acquire_brain(Provider::Anthropic, Some(&id("main")), deadline)
+        .acquire_brain(Provider::Anthropic, Some(&id("main")), deadline, None)
         .await
         .expect("the brain waits out the cooldown");
     assert_eq!(lease.account, id("main"));
@@ -612,7 +635,7 @@ async fn the_brain_does_not_wait_on_a_hard_gate() {
     let started = std::time::Instant::now();
     let got = h
         .pool
-        .acquire_brain(Provider::Anthropic, Some(&id("main")), deadline)
+        .acquire_brain(Provider::Anthropic, Some(&id("main")), deadline, None)
         .await;
     assert!(
         matches!(got, Err(NoCapacity::Exhausted { .. })),
@@ -875,7 +898,7 @@ max_concurrency = 2
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     let _brain = h
         .pool
-        .acquire_brain(Provider::Anthropic, Some(&id("main")), deadline)
+        .acquire_brain(Provider::Anthropic, Some(&id("main")), deadline, None)
         .await
         .expect("a brain lease");
     let worker = acquire(&h.pool).await.expect("a worker lease");

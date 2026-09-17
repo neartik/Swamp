@@ -216,3 +216,40 @@ fn a_piped_chat_runs_the_commands_its_help_lists() {
         "the usage table is missing: {stdout}"
     );
 }
+
+/// `docs/BOARD.md` sections 2.1-2.3: the board and `swamp watch` call a brain orphaned when its
+/// node pidfile is not live. It has to exist, and it has to name the supervisor that drives the
+/// brain: a resume-per-turn brain has no process of its own between turns.
+#[test]
+fn the_brain_node_writes_a_pidfile_naming_its_supervisor() {
+    let h = Harness::new().scenario(
+        "main",
+        Scenario::claude()
+            .edits("worker-{n}.txt", "written by invocation {n}\n")
+            .dispatches("lex", "write the lexer"),
+    );
+    let child = h.spawn(&["run", TASK]);
+    let supervisor = child.id();
+    let out = child.wait_with_output().expect("swamp run exits");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let view = h.last_view();
+    let brain = view
+        .nodes
+        .values()
+        .find(|n| n.kind == NodeKind::Brain)
+        .expect("a brain node");
+    let pidfile = h.last_run().pidfile(brain.id);
+    let text = std::fs::read_to_string(&pidfile)
+        .unwrap_or_else(|e| panic!("the brain has no pidfile at {pidfile}: {e}"));
+    let pid: u32 = text
+        .split_whitespace()
+        .next()
+        .and_then(|p| p.parse().ok())
+        .unwrap_or_else(|| panic!("unreadable pidfile {text:?}"));
+    assert_eq!(pid, supervisor, "the brain pidfile names another process");
+}

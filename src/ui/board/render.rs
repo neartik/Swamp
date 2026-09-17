@@ -526,7 +526,11 @@ fn node_lines(n: &NodeRow, section: Section, spin: &mut usize, c: &Ctx) -> Vec<L
 
     let title_w = c.width().saturating_sub(r.w + tail_w);
     if !c.l.title_own_line && title_w > 0 {
-        r.add(theme, &fmt::pad(&n.title, title_w), title_role(section));
+        r.add(
+            theme,
+            &fmt::pad(title_cell(n), title_w),
+            title_role(section),
+        );
     }
     r.to(c.width().saturating_sub(tail_w));
     for (text, role) in tail {
@@ -542,7 +546,7 @@ fn node_lines(n: &NodeRow, section: Section, spin: &mut usize, c: &Ctx) -> Vec<L
         line.to(4);
         line.add(
             theme,
-            &fmt::truncate(&n.title, c.width().saturating_sub(4)),
+            &fmt::truncate(title_cell(n), c.width().saturating_sub(4)),
             title_role(section),
         );
         out.push(line.line(c.width()));
@@ -616,6 +620,20 @@ fn tier_role(n: &NodeRow) -> Role {
     } else {
         Role::Meta
     }
+}
+
+/// The brain's recorded title is the word "brain", which the id cell already says; the board
+/// shows the working verb instead (`docs/BOARD.md` section 3).
+fn title_cell(n: &NodeRow) -> &str {
+    if n.brain
+        && matches!(
+            n.state,
+            NodeState::Running { .. } | NodeState::Leased { .. }
+        )
+    {
+        return "orchestrating";
+    }
+    &n.title
 }
 
 fn title_role(section: Section) -> Role {

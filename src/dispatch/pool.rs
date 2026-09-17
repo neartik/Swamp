@@ -239,7 +239,7 @@ impl AccountPool {
             tokio::pin!(notified);
             notified.as_mut().enable();
             let wake_at = match self.capacity(provider, exclude) {
-                Capacity::Ready => match self.take(provider, exclude) {
+                Capacity::Ready => match self.take(provider, exclude, node) {
                     Some(lease) => return Ok(lease),
                     // Someone else won the race.
                     None => {
@@ -324,6 +324,7 @@ impl AccountPool {
         provider: Provider,
         pin: Option<&AccountId>,
         deadline: Instant,
+        node: Option<NodeId>,
     ) -> Result<Lease, NoCapacity> {
         let chosen = match pin {
             Some(id) => {
@@ -372,7 +373,7 @@ impl AccountPool {
             notified.as_mut().enable();
             let wake_at = match self.capacity_for(provider, &exclude, chosen.as_ref()) {
                 Capacity::Ready => {
-                    match self.take_from(provider, &exclude, chosen.as_ref(), None) {
+                    match self.take_from(provider, &exclude, chosen.as_ref(), None, node) {
                         Some(mut lease) => {
                             lease._permit = permit.take();
                             lease.brain = true;
@@ -899,16 +900,24 @@ impl AccountPool {
         }
     }
 
-    fn take(self: &Arc<Self>, provider: Provider, exclude: &HashSet<AccountId>) -> Option<Lease> {
-        self.take_from(provider, exclude, None, None)
+    fn take(
+        self: &Arc<Self>,
+        provider: Provider,
+        exclude: &HashSet<AccountId>,
+        node: Option<NodeId>,
+    ) -> Option<Lease> {
+        self.take_from(provider, exclude, None, None, node)
     }
 
+    /// `node` is what `AccountSelected` is attributed to: without it the board has no row to
+    /// hang the dispatch reason on (`docs/BOARD.md` section 3.4).
     fn take_from(
         self: &Arc<Self>,
         provider: Provider,
         exclude: &HashSet<AccountId>,
         pin: Option<&AccountId>,
         permit: Option<OwnedSemaphorePermit>,
+        node: Option<NodeId>,
     ) -> Option<Lease> {
         let now = OffsetDateTime::now_utc();
         let candidates: Vec<&Account> = match pin {
@@ -955,7 +964,7 @@ impl AccountPool {
 
         crate::dispatch::emit(
             &self.journal,
-            None,
+            node,
             JournalEvent::AccountSelected {
                 account: id.clone(),
                 exec: exec.clone(),

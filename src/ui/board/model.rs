@@ -190,9 +190,15 @@ impl RunPane {
     }
 
     /// The note the footer shows for a collapsed row: the newest attempt that recorded one.
+    /// The pool leases before the attempt's id exists, so its line names the logical id; a
+    /// journal that attributed one to an attempt still wins.
     pub fn note_for(&self, logical: NodeId) -> Option<&SelectionNote> {
         let attempts = self.view.by_logical.get(&logical)?;
-        attempts.iter().rev().find_map(|a| self.selection.get(a))
+        attempts
+            .iter()
+            .rev()
+            .find_map(|a| self.selection.get(a))
+            .or_else(|| self.selection.get(&logical))
     }
 
     /// `view.tree()` collapsed by logical id, taking the last attempt as the live record:
@@ -891,6 +897,36 @@ mod tests {
         assert_eq!(r.form, ReasonForm::Other);
         assert_eq!(r.text, "round robin");
         assert_eq!(r.score, None);
+    }
+
+    /// A real lease is taken before the attempt has an id, so `AccountSelected` names the
+    /// logical id. The footer has to find it there too, or no worker row ever explains itself.
+    #[test]
+    fn a_note_attributed_to_the_logical_id_still_reaches_the_row() {
+        let mut lines = fx::running();
+        let mut spawn = match &lines[3].event {
+            JournalEvent::NodeSpawned { node } => (**node).clone(),
+            _ => unreachable!("fixture line 3 spawns a node"),
+        };
+        spawn.id = fx::id(8);
+        spawn.logical = fx::id(7);
+        lines.push(JournalLine {
+            seq: 10,
+            at: fx::at(10),
+            run: fx::run_id(),
+            node: Some(fx::id(8)),
+            event: JournalEvent::NodeSpawned {
+                node: Box::new(spawn),
+            },
+        });
+        lines.push(selected(11, fx::id(7), "score .41 = util .93×.50", &[]));
+        let pane = pane(&lines);
+
+        let note = pane
+            .note_for(fx::id(7))
+            .expect("a note for the logical row");
+        assert_eq!(note.reason.form, ReasonForm::Terms);
+        assert_eq!(note.reason.score, Some(0.41));
     }
 
     /// Notes are keyed by attempt; a retry's own note is the one the footer shows.

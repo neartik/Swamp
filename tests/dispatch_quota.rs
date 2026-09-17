@@ -1202,6 +1202,7 @@ async fn the_brain_reservation_ends_with_the_brain_lease() {
             Provider::Anthropic,
             None,
             Instant::now() + Duration::from_millis(200),
+            None,
         )
         .await
         .expect("the brain acquires");
@@ -1271,6 +1272,7 @@ async fn a_brain_held_account_does_not_mask_an_exhausted_pool() {
             Provider::Anthropic,
             Some(&id("work")),
             Instant::now() + Duration::from_millis(200),
+            None,
         )
         .await
         .expect("the brain leases work");

@@ -1,7 +1,7 @@
 use crate::cli::ChatArgs;
 use crate::cmd::{Ctx, RunSession};
 use crate::config::Config;
-use crate::ids::RunId;
+use crate::ids::{NodeId, RunId};
 use crate::mcp::McpServer;
 use crate::model::core::{AccountId, NodeState, Provider, Tier};
 use std::sync::Arc;
@@ -47,6 +47,7 @@ pub async fn run(ctx: &Ctx, args: &ChatArgs) -> anyhow::Result<i32> {
             provider,
             cfg.brain.account.as_ref(),
             Instant::now() + cfg.node_timeout(tier),
+            Some(NodeId(session.paths.run.0)),
         )
         .await
         .map_err(|e| anyhow::anyhow!("no account for the brain: {e:?}"))?;

@@ -171,8 +171,9 @@ fn running(since: i64) -> NodeState {
     }
 }
 
-fn brain(run: RunId, title: &str) -> Spawn {
-    let mut s = Spawn::new(run, NodeId(run.0), title, running(10));
+/// `brain::build` records the title "brain"; the board is what turns it into a verb.
+fn brain(run: RunId) -> Spawn {
+    let mut s = Spawn::new(run, NodeId(run.0), "brain", running(10));
     s.parent = None;
     s.kind = NodeKind::Brain;
     s.tier = Tier::High;
@@ -212,7 +213,7 @@ fn journal_a() -> Vec<JournalLine> {
     first.account = Some("alt");
 
     vec![
-        brain(run, "orchestrating").line(1),
+        brain(run).line(1),
         Spawn::new(run, fx::id(1), "add pagination to /users", running(10)).line(2),
         second.line(3),
         first.line(4),
@@ -283,7 +284,7 @@ fn journal_b() -> Vec<JournalLine> {
     cancelled.usd = Some(0.0);
 
     vec![
-        brain(run, "orchestrating").line(1),
+        brain(run).line(1),
         blocked.line(2),
         JournalLine {
             seq: 3,

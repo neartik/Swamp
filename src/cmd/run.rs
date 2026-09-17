@@ -193,7 +193,12 @@ async fn with_brain(
     let deadline = Instant::now() + cfg.node_timeout(cfg.brain.tier.unwrap_or(Tier::High));
     let lease = session
         .pool
-        .acquire_brain(provider, cfg.brain.account.as_ref(), deadline)
+        .acquire_brain(
+            provider,
+            cfg.brain.account.as_ref(),
+            deadline,
+            Some(NodeId(session.paths.run.0)),
+        )
         .await
         .map_err(|e| anyhow::anyhow!("no account for the brain: {e:?}"))?;
     let mut brain = crate::brain::build(
