@@ -1,0 +1,42 @@
+---
+source: src/ui/board/screens.rs
+expression: narrow
+---
+swamp board         2 runs · 5 in flight
+────────────────────────────────────────
+anthropic
+● main        4/4  5h ▇▇▇▇░  71% ↻38m
+                   7d ▇▇░░░  32% ↻4d02h
+  ◆ 9g5fav   -             3m10s  ↓ 214k
+    orchestrating
+  ⠋ 9g5f01   mid           3m10s  ↓ 118k
+    add pagination to /users
+  ⠙ 9g5f02   low           1m02s   ↓ 61k
+    rename the fixtures
+  ◆ 9g5fbz   -             3m10s  ↓ 214k
+    orchestrating
+◐ alt         1/-  5h ▇▇▇▇▇  93% ↻12m
+                   7d ▇▇▇░░  54% ↻2d07h
+    degraded
+  ⠹ 9g5f09·2 high          2m48s  ↓ 223k
+    backfill the users index
+openai
+✘ codex-main  0/2  5h ▇▇▇▇▇  99% ↻1h04m
+                   7d ▇▇▇▇░  81% ↻3d01h
+    cooling until 23:20
+
+waiting 1
+  · 9g5f04   mid               -       -
+    rebuild the index
+    anthropic at limit · 22:54
+recent 3
+  ⊘ 9g5f07   low           3m00s    ↓ 2k
+  ✔ 9g5f05   low           2m10s   ↓ 96k
+  ✘ 9g5f06   mid           2m06s   ↓ 12k
+────────────────────────────────────────
+9g5f09 → alt   score .41
+  util .93×.50 + load .33×.30 +
+  share .12×.15 − weight .00 − idle .02
+  excluded main
+────────────────────────────────────────
+↑↓ · ↵ trace · tab run · q quit

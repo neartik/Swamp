@@ -4,4 +4,7 @@
 //! touches the filesystem. Nothing here talks to a supervisor.
 
 pub mod model;
+pub mod render;
+#[cfg(test)]
+mod screens;
 pub mod sources;

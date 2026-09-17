@@ -1,0 +1,30 @@
+---
+source: src/ui/board/screens.rs
+expression: wide
+---
+swamp board                       2 runs · 5 in flight · 3 accounts · ~$0.61 · fresh 0.4s · 22:16:40
+────────────────────────────────────────────────────────────────────────────────────────────────────
+anthropic                                                                   2 accounts · 5 in flight
+● main          healthy     4/4  5h ▇▇▇▇▇▇▇░░░  71% ↻ 38m     7d ▇▇▇░░░░░░░  32% ↻ 4d02h      ↓ 812k
+  ◆ brain    9g5fav -      orchestrating                         opus-4-1      3m10s  ↓ 214k  ~$0.09
+  ⠋ 9g5f01   9g5fav [mid ] add pagination to /users              sonnet-4-5    3m10s  ↓ 118k  ~$0.08
+  ⠙ 9g5f02   9g5fav [low ] rename the fixtures                   haiku-4-5     1m02s   ↓ 61k  ~$0.01
+  ◆ brain    9g5fbz -      orchestrating                         opus-4-1      3m10s  ↓ 214k  ~$0.09
+◐ alt           degraded    1/-  5h ▇▇▇▇▇▇▇▇▇░  93% ↻ 12m     7d ▇▇▇▇▇░░░░░  54% ↻ 2d07h      ↓ 402k
+  ⠹ 9g5f09·2 9g5fav [high] backfill the users index              opus-4-1      2m48s  ↓ 223k  ~$0.21
+openai                                                                       1 account · 0 in flight
+✘ codex-main    cooling     0/2  5h ▇▇▇▇▇▇▇▇▇▇  99% ↻ 1h04m   7d ▇▇▇▇▇▇▇▇░░  81% ↻ 3d01h         ↓ 0
+    until 23:20
+
+waiting 1
+  · 9g5f04   9g5fbz [mid ] rebuild the index                     -                 -       -       -
+    every anthropic account is at its limit · earliest reset 22:54 (in 38m)
+recent 3
+  ⊘ 9g5f07   9g5fbz [low ] probe the migration                   haiku-4-5     3m00s    ↓ 2k  ~$0.00
+  ✔ 9g5f05   9g5fbz [low ] add the /users route                  sonnet-4-5    2m10s   ↓ 96k  ~$0.04
+  ✘ 9g5f06   9g5fbz [mid ] seed script                           sonnet-4-5    2m06s   ↓ 12k  ~$0.01
+────────────────────────────────────────────────────────────────────────────────────────────────────
+9g5f09 → alt   score .41 = util .93×.50 + load .33×.30 + share .12×.15 − weight .00 − idle .02
+               excluded main
+────────────────────────────────────────────────────────────────────────────────────────────────────
+↑↓ select · enter trace · tab run · a accounts · r raw · q quit                        9g5fav 9g5fbz

@@ -419,7 +419,7 @@ fn window_label(w: &LimitWindow) -> String {
 
 /// A window whose reset has passed measures an allowance that has already rolled: dispatch
 /// ignores it, so the table must not report its percentage either.
-fn window_for(
+pub(crate) fn window_for(
     q: &Option<RateLimitSnapshot>,
     scope: LimitScope,
     now: OffsetDateTime,
@@ -431,7 +431,7 @@ fn window_for(
 }
 
 /// A `~` prefix marks an estimated number; a measured one never carries it.
-fn pct_cell(w: Option<&LimitWindow>) -> String {
+pub(crate) fn pct_cell(w: Option<&LimitWindow>) -> String {
     match w {
         None => "-".to_owned(),
         Some(w) => {
@@ -470,7 +470,7 @@ fn cost_cell(usd: f64) -> String {
     format!("~${}", fmt::tokens(usd.round() as u64))
 }
 
-fn health_role(h: Health) -> Role {
+pub(crate) fn health_role(h: Health) -> Role {
     match h {
         Health::Healthy => Role::Ok,
         Health::Degraded => Role::Accent,

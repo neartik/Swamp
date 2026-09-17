@@ -420,7 +420,7 @@ fn account_cell(rec: &NodeRecord) -> String {
     }
 }
 
-fn short_model(model: &str) -> String {
+pub(crate) fn short_model(model: &str) -> String {
     let mut parts: Vec<&str> = model.split('-').collect();
     if parts
         .last()

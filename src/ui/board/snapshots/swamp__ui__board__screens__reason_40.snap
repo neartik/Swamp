@@ -1,0 +1,11 @@
+---
+source: src/ui/board/screens.rs
+expression: text
+---
+────────────────────────────────────────
+9g5f09 → alt   score .41
+  util .93×.50 + load .33×.30 +
+  share .12×.15 − weight .00 − idle .02
+  excluded main
+────────────────────────────────────────
+↑↓ · ↵ trace · tab run · q quit
