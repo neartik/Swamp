@@ -17,6 +17,7 @@ version = 1
 [limits]
 max_nodes_per_run = 32
 max_depth = 2
+brain_read_budget = 8
 worker_timeout = "25m"
 brain_turn_timeout = "15m"
 grace_period = "5s"
@@ -50,6 +51,10 @@ near_exhaustion_penalty = 2.0
   share = 0.15
   weight = 0.05
   idle = 0.02
+
+[providers.anthropic.worker]
+permission_mode = "acceptEdits"
+allow_tools = ["Bash", "Read", "Grep", "Glob", "Edit", "Write", "MultiEdit"]
 
 [providers.openai]
 quota_source = "auto"

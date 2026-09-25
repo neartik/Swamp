@@ -45,6 +45,8 @@ pub struct Schema {
 pub struct Limits {
     pub max_nodes_per_run: Option<u32>,
     pub max_depth: Option<u32>,
+    /// Files the brain may read before its first `swamp_dispatch`.
+    pub brain_read_budget: Option<u32>,
     #[serde(default, with = "humantime_serde")]
     pub worker_timeout: Option<Duration>,
     #[serde(default, with = "humantime_serde")]

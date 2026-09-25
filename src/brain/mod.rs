@@ -30,12 +30,13 @@ use time::OffsetDateTime;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
 
 /// The only transport that works on a subscription alone. `api` needs a key and a feature.
 const CLI_TRANSPORT: &str = "cli";
 const EVENT_QUEUE: usize = 512;
 const DEFAULT_TURN_TIMEOUT: Duration = Duration::from_secs(15 * 60);
-const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
+const DEFAULT_GRACE: Duration = Duration::from_secs(5);
 
 pub enum BrainEvent {
     Ready {
@@ -157,6 +158,7 @@ pub fn build(
             .limits
             .brain_turn_timeout
             .unwrap_or(DEFAULT_TURN_TIMEOUT),
+        grace: cfg.limits.grace_period.unwrap_or(DEFAULT_GRACE),
         session: Arc::new(Mutex::new(None)),
         totals: Arc::new(Mutex::new(Totals::default())),
         lease,
@@ -177,6 +179,8 @@ pub struct Launch {
     pub account: AccountId,
     pub model: String,
     pub turn_timeout: Duration,
+    /// How long shutdown lets a turn wind down before it is cut off.
+    pub grace: Duration,
     pub session: Arc<Mutex<Option<SessionHandle>>>,
     pub totals: Arc<Mutex<Totals>>,
     pub lease: Lease,
@@ -624,17 +628,22 @@ fn append_system_prompt(cfg: &Config, repo: &Utf8Path, mode: BrainMode) -> Strin
     text
 }
 
-/// SIGTERM, then SIGKILL after the grace period: the brain owns a terminal, not a worktree.
-pub(crate) async fn terminate(mut child: Child) -> anyhow::Result<()> {
+/// Gives a task `grace` to finish on its own, then aborts it. False when it had to be aborted.
+pub(crate) async fn settle<T>(mut task: JoinHandle<T>, grace: Duration) -> bool {
+    if tokio::time::timeout(grace, &mut task).await.is_ok() {
+        return true;
+    }
+    task.abort();
+    false
+}
+
+/// Kills the child if it is still there and reaps it within the grace period: the brain owns
+/// a terminal, not a worktree.
+pub(crate) async fn terminate(mut child: Child, grace: Duration) -> anyhow::Result<()> {
     if child.try_wait()?.is_some() {
         return Ok(());
     }
     let _ = child.start_kill();
-    match tokio::time::timeout(SHUTDOWN_GRACE, child.wait()).await {
-        Ok(_) => Ok(()),
-        Err(_) => {
-            let _ = child.kill().await;
-            Ok(())
-        }
-    }
+    let _ = tokio::time::timeout(grace, child.wait()).await;
+    Ok(())
 }

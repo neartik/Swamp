@@ -591,7 +591,8 @@ impl App {
         }
         match k.code {
             KeyCode::Char('c') if ctrl => self.on_ctrl_c(),
-            KeyCode::Char('d') if ctrl && self.editor.is_empty() => vec![Effect::Quit(0)],
+            KeyCode::Char('d') if ctrl && self.editor.is_empty() => self.quit_now(),
+            KeyCode::Char('d') if ctrl => Vec::new(),
             KeyCode::Char('l') if ctrl => vec![Effect::Clear],
             KeyCode::Char('o') if ctrl => self.expand(),
             KeyCode::Char('a') if ctrl => {
@@ -700,12 +701,17 @@ impl App {
             return Vec::new();
         }
         if self.quit_armed.is_some() {
-            let code = if self.working() { 6 } else { 0 };
-            return vec![Effect::Interrupt, Effect::CancelAll, Effect::Quit(code)];
+            return self.quit_now();
         }
         self.quit_armed = Some(self.now + ARM);
         self.note("Press ctrl+c again to exit");
         Vec::new()
+    }
+
+    /// Stops the turn and the workers before leaving, so shutdown has nothing left to wait on.
+    fn quit_now(&self) -> Vec<Effect> {
+        let code = if self.working() { 6 } else { 0 };
+        vec![Effect::Interrupt, Effect::CancelAll, Effect::Quit(code)]
     }
 
     fn on_esc(&mut self) -> Vec<Effect> {
@@ -1323,4 +1329,45 @@ fn lines_of(text: &str) -> Vec<String> {
 /// Whether a node is still one this board should animate.
 pub fn is_running(state: &NodeState) -> bool {
     matches!(state, NodeState::Running { .. })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ui::chat::tests_support as fx;
+
+    fn ctrl_d() -> Msg {
+        Msg::Key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL))
+    }
+
+    fn quit_code(effects: &[Effect]) -> i32 {
+        match effects {
+            [Effect::Interrupt, Effect::CancelAll, Effect::Quit(code)] => *code,
+            _ => panic!("expected interrupt, cancel all, then quit"),
+        }
+    }
+
+    #[test]
+    fn ctrl_d_on_an_empty_editor_quits_like_an_armed_ctrl_c() {
+        let mut app = fx::app(100);
+        assert_eq!(quit_code(&app.reduce(ctrl_d())), 0);
+
+        app.phase = Phase::Working { since: app.now };
+        assert_eq!(
+            quit_code(&app.reduce(ctrl_d())),
+            6,
+            "leaving mid turn is an interrupted exit"
+        );
+    }
+
+    #[test]
+    fn ctrl_d_with_text_in_the_editor_does_nothing() {
+        let mut app = fx::app(100);
+        app.reduce(Msg::Key(KeyEvent::new(
+            KeyCode::Char('x'),
+            KeyModifiers::NONE,
+        )));
+        assert!(app.reduce(ctrl_d()).is_empty());
+        assert_eq!(app.editor.text(), "x", "the buffer is left alone");
+    }
 }

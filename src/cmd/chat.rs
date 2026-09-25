@@ -11,6 +11,7 @@ use tokio::time::Instant;
 pub async fn run(ctx: &Ctx, args: &ChatArgs) -> anyhow::Result<i32> {
     let cfg = Arc::new(overrides(ctx, args)?);
     let depth = crate::cmd::guard_depth(&cfg)?;
+    crate::cmd::warn_permissions(&cfg);
     let resume = match args.resume.as_deref() {
         Some(spec) => Some(ctx.paths.resolve_run(spec)?),
         None => None,

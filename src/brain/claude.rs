@@ -1,4 +1,6 @@
-use crate::brain::{Brain, BrainEvent, EVENT_QUEUE, Launch, drain_stderr, drive, finish};
+use crate::brain::{
+    Brain, BrainEvent, EVENT_QUEUE, Launch, drain_stderr, drive, finish, settle, terminate,
+};
 use crate::journal::JournalEvent;
 use crate::journal::record::TurnRole;
 use crate::model::core::{NodeState, SessionHandle};
@@ -120,11 +122,14 @@ impl Brain for ClaudeBrain {
     async fn shutdown(mut self: Box<Self>) -> anyhow::Result<()> {
         // Closing fd0 is how a stream-json session ends; killing is the fallback.
         self.stdin = None;
-        if let Some(reader) = self.reader.take() {
-            let _ = tokio::time::timeout(self.launch.turn_timeout, reader).await;
+        let grace = self.launch.grace;
+        if let Some(reader) = self.reader.take()
+            && !settle(reader, grace).await
+        {
+            tracing::warn!("the brain did not exit within {grace:?} of its stdin closing");
         }
         if let Some(child) = self.child.take() {
-            crate::brain::terminate(child).await?;
+            terminate(child, grace).await?;
         }
         finish(&self.launch, NodeState::Succeeded).await;
         Ok(())

@@ -29,6 +29,7 @@ pub async fn run(ctx: &Ctx, args: &RunArgs) -> anyhow::Result<i32> {
     for w in &cfg.warnings {
         tracing::warn!("{w}");
     }
+    crate::cmd::warn_permissions(&cfg);
     preflight(ctx, &cfg).await?;
     let session = RunSession::start(ctx, cfg, RunId::new(), Some(&task)).await?;
     ctx.paths

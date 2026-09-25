@@ -727,7 +727,8 @@ handled (Windows consoles repeat otherwise).
 | `ctrl+c` | buffer non-empty | clear the buffer, reset the quit arm |
 | `ctrl+c` | buffer empty, not armed | status shows `Press ctrl+c again to exit`, armed 2 s |
 | `ctrl+c` | armed | interrupt, `cancel_all`, quit (0 when idle, 6 mid-turn) |
-| `ctrl+d` | buffer empty | quit 0 |
+| `ctrl+d` | buffer empty | same as an armed `ctrl+c`: interrupt, `cancel_all`, quit (0 when idle, 6 mid-turn) |
+| `ctrl+d` | buffer non-empty | nothing |
 | `ctrl+l` | | `Clear(All)` + `MoveTo(0,0)`, redraw the live area; scrollback above is untouched |
 | `ctrl+o` | | toggle expansion of the last collapsible block (tool result or board). If it is still live, toggle in place; if it is committed, commit a new `meta` block `  ⎿  expanded: <tool>` with the full text, because scrollback is immutable |
 | `up` / `down` | buffer empty or cursor on the first/last line | history previous/next; the in-progress buffer is stashed at index `len` |

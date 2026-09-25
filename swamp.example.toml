@@ -5,9 +5,10 @@ version = 1
 [limits]
 max_nodes_per_run     = 32
 max_depth             = 2          # brain -> worker -> refused (also via SWAMP_DEPTH)
+brain_read_budget     = 8          # reads the brain may do before its first dispatch
 worker_timeout        = "25m"
 brain_turn_timeout    = "15m"
-grace_period          = "5s"       # SIGTERM -> SIGKILL window
+grace_period          = "5s"       # SIGTERM -> SIGKILL window; also how long quitting chat waits
 max_prompt_bytes      = 200000
 max_result_bytes      = 8000       # cap on worker output fed back to the brain
 unsafe_ack            = false      # required before any --dangerously-* flag is accepted
@@ -102,11 +103,12 @@ tier_extra = { high = { effort = "high" }, mid = { effort = "medium" }, low = { 
 
   [providers.anthropic.worker]
   # "acceptEdits" so edits land, plus Bash by name so the worker can run the tests it was
-  # sent to run. See the note under [brain]: "auto" denies the writes.
+  # sent to run. See the note under [brain]: "auto" denies the writes. Both ship as built-in
+  # defaults; never "bypassPermissions".
   permission_mode = "acceptEdits"
   # Rendered as one --allowed-tools / --disallowed-tools flag. Put tool names here, not raw
-  # flags in `args`.
-  allow_tools = ["Bash"]
+  # flags in `args`. Listing tools here replaces the default list rather than adding to it.
+  allow_tools = ["Bash", "Read", "Grep", "Glob", "Edit", "Write", "MultiEdit"]
   # A worker does the work itself. Left alone it inherits your own CLAUDE.md, spawns a team of
   # subagents and reports on their behalf, which is slower, more expensive and less honest.
   # Swamp's built-in worker role prompt says so too; this makes it unavailable, not just

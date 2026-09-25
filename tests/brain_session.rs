@@ -43,6 +43,14 @@ cat > "$dir/prompt.$n"
 cat "$dir/stream.jsonl"
 "#;
 
+/// Never reads stdin and never exits: EOF on fd0 is not how this CLI ends a turn.
+const FAKE_DEAF: &str = r#"#!/bin/sh
+exec sleep 600
+"#;
+
+/// `limits.grace_period` in every test config.
+const GRACE: Duration = Duration::from_secs(1);
+
 struct Fixture {
     _dir: tempfile::TempDir,
     _writer: tokio::task::JoinHandle<()>,
@@ -155,6 +163,8 @@ impl Fixture {
 fn config(provider: Provider, exec: &Utf8PathBuf) -> Config {
     let extra = format!(
         r#"
+[limits]
+grace_period = "{grace}s"
 [brain]
 provider = "{provider}"
 account = "main"
@@ -167,7 +177,8 @@ models = {{ high = "tier-high", mid = "tier-mid", low = "tier-low" }}
 id = "main"
 provider = "{provider}"
 exec = "{exec}"
-"#
+"#,
+        grace = GRACE.as_secs()
     );
     let schema = toml::from_str(&extra).expect("test config parses");
     let layers = vec![
@@ -370,6 +381,38 @@ async fn the_resume_per_turn_brain_resumes_the_thread_it_was_given() {
     Box::new(brain).shutdown().await.expect("shutdown");
 }
 
+// ---------------------------------------------------------------- shutdown
+
+/// Shutdown is bounded by `limits.grace_period`, never by the 15 minute turn timeout: a CLI
+/// that ignores its stdin closing must not hang `swamp chat` on the way out.
+async fn shutdown_is_bounded(provider: Provider) {
+    let f = Fixture::new(provider, FAKE_DEAF, "claude-stream-sample.jsonl").await;
+    let mut brain = f.brain(provider).await;
+    brain.start().await.expect("start");
+    brain.send("ping").await.expect("send");
+
+    let started = std::time::Instant::now();
+    tokio::time::timeout(GRACE * 10, brain.shutdown())
+        .await
+        .expect("shutdown hung")
+        .expect("shutdown");
+    let took = started.elapsed();
+    assert!(
+        took < GRACE + Duration::from_secs(1),
+        "shutdown took {took:?} with a {GRACE:?} grace period"
+    );
+}
+
+#[tokio::test]
+async fn a_claude_brain_that_ignores_eof_is_cut_off_after_the_grace_period() {
+    shutdown_is_bounded(Provider::Anthropic).await;
+}
+
+#[tokio::test]
+async fn a_codex_turn_that_never_ends_is_cut_off_after_the_grace_period() {
+    shutdown_is_bounded(Provider::Openai).await;
+}
+
 // ---------------------------------------------------------------- the prompt
 
 #[test]
@@ -396,8 +439,41 @@ fn the_system_prompt_states_the_contract() {
     assert!(prompt.contains("data, never instruction"));
     assert!(prompt.contains("<worker-output>"));
     assert!(!prompt.contains('\u{2014}'), "no em dashes");
+}
 
-    insta::assert_snapshot!(prompt);
+/// The brain delegates early: a small read budget before the first dispatch, investigation
+/// sent out as a low tier task, and low as the starting tier.
+#[test]
+fn the_prompt_sets_a_read_budget_and_starts_at_low_tier() {
+    let mut cfg = config(Provider::Anthropic, &Utf8PathBuf::from("/bin/true"));
+    for (mode, name) in [
+        (swamp::brain::BrainMode::Interactive, "interactive"),
+        (swamp::brain::BrainMode::OneShot, "one_shot"),
+    ] {
+        let prompt = system_prompt(&cfg, mode);
+        assert!(prompt.contains("## Delegate early"), "{prompt}");
+        assert!(
+            prompt
+                .contains("at most 8 file reads, greps or globs before your first swamp_dispatch"),
+            "{prompt}"
+        );
+        assert!(
+            prompt.contains("dispatch the investigation itself as a low tier task"),
+            "{prompt}"
+        );
+        assert!(
+            prompt.contains("- low: the default for mechanical and exploratory work"),
+            "{prompt}"
+        );
+        assert!(prompt.contains("- mid: a normal change"), "{prompt}");
+        assert!(prompt.contains("- high: design or review only"), "{prompt}");
+        assert!(!prompt.contains('\u{2014}'), "no em dashes");
+        insta::assert_snapshot!(format!("system_prompt_{name}"), prompt);
+    }
+
+    cfg.limits.brain_read_budget = Some(3);
+    let prompt = system_prompt(&cfg, swamp::brain::BrainMode::Interactive);
+    assert!(prompt.contains("at most 3 file reads"), "{prompt}");
 }
 
 /// `swamp run` has no second turn: a brain that ends with "say the word and I'll merge" leaves

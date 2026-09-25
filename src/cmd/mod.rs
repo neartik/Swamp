@@ -245,6 +245,14 @@ pub fn guard_depth(cfg: &Config) -> anyhow::Result<u32> {
     Ok(depth)
 }
 
+/// A permission mode that denies Bash is a warning, never a refusal: the run still starts.
+pub fn warn_permissions(cfg: &Config) {
+    for check in crate::doctor::permission_checks(cfg) {
+        tracing::warn!("{}: {}", check.name, check.detail);
+        eprintln!("warning: {}", check.detail);
+    }
+}
+
 /// Resolves on SIGINT or SIGTERM. Workers run in their own process groups, so a terminal
 /// Ctrl-C never reaches them: the shutdown path has to cancel them itself.
 pub async fn shutdown_signal() {

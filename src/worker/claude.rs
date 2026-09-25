@@ -615,3 +615,90 @@ fn model_usage_of(u: &ModelUsage) -> Usage {
         reasoning_tokens: u.thinking_tokens,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{load, resolve};
+    use crate::ids::{NodeId, NodeIds};
+    use crate::model::core::Tier;
+
+    fn default_worker(isolation: IsolationMode) -> LaunchSpec {
+        let cfg = resolve::from_schema(load::merge(vec![load::default_layer()]));
+        let worker = cfg.providers[&Provider::Anthropic].worker.clone();
+        LaunchSpec {
+            node: NodeIds {
+                id: NodeId::new(),
+                session_uuid: uuid::Uuid::new_v4(),
+            },
+            provider: Provider::Anthropic,
+            exec: "claude".into(),
+            env: BTreeMap::new(),
+            model: "tier-mid".into(),
+            tier: Tier::Mid,
+            cwd: Utf8PathBuf::from("/tmp/wt"),
+            isolation,
+            session: SessionPlan::New { preassigned: None },
+            kind: NodeKind::Worker,
+            permission_mode: worker.permission_mode.clone().unwrap_or_default(),
+            sandbox: String::new(),
+            append_system_prompt: None,
+            allow_tools: worker.allow_tools.clone(),
+            deny_tools: worker.deny_tools.clone(),
+            mcp: None,
+            last_message_path: Utf8PathBuf::from("/tmp/wt/last-message.txt"),
+            extra_args: worker.args_for(isolation),
+            extra: BTreeMap::new(),
+            partial_messages: false,
+            attempt: 1,
+        }
+    }
+
+    fn argv(spec: &LaunchSpec) -> Vec<String> {
+        ClaudeAdapter
+            .build_argv(spec)
+            .expect("argv")
+            .into_iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    /// The values that follow `flag`, up to the next flag.
+    fn values<'a>(argv: &'a [String], flag: &str) -> Vec<&'a str> {
+        let at = argv
+            .iter()
+            .position(|a| a == flag)
+            .unwrap_or_else(|| panic!("{flag} missing: {argv:?}"));
+        argv[at + 1..]
+            .iter()
+            .take_while(|a| !a.starts_with("--"))
+            .map(String::as_str)
+            .collect()
+    }
+
+    #[test]
+    fn the_default_worker_accepts_edits_and_may_run_bash_without_bypassing_permissions() {
+        let argv = argv(&default_worker(IsolationMode::Worktree));
+        assert_eq!(values(&argv, "--permission-mode"), ["acceptEdits"]);
+        assert_eq!(values(&argv, "--permission-prompts"), ["none"]);
+        assert_eq!(
+            values(&argv, "--allowed-tools"),
+            ["Bash", "Read", "Grep", "Glob", "Edit", "Write", "MultiEdit"]
+        );
+        assert!(
+            !argv
+                .iter()
+                .any(|a| a.contains("bypassPermissions") || a.contains("dangerously")),
+            "{argv:?}"
+        );
+    }
+
+    #[test]
+    fn read_only_isolation_still_denies_the_edit_tools_the_default_allows() {
+        let argv = argv(&default_worker(IsolationMode::ReadOnly));
+        let denied = values(&argv, "--disallowed-tools");
+        for tool in EDIT_TOOLS {
+            assert!(denied.contains(&tool), "{tool} not denied: {argv:?}");
+        }
+    }
+}

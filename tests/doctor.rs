@@ -336,6 +336,12 @@ async fn a_permission_mode_that_denies_bash_warns_until_bash_is_allowed() {
     let f = Fixture::new();
     let mut cfg = healthy(&f);
     let anthropic = swamp::model::core::Provider::Anthropic;
+    cfg.providers
+        .get_mut(&anthropic)
+        .expect("the anthropic provider")
+        .worker
+        .allow_tools
+        .clear();
 
     for mode in ["acceptEdits", "plan", "manual", "dontAsk"] {
         cfg.providers
@@ -386,6 +392,22 @@ async fn a_permission_mode_that_denies_bash_warns_until_bash_is_allowed() {
             .any(|c| c.name == "providers/anthropic/permission_mode"),
         "--allowedTools Bash in worker.args must not warn"
     );
+}
+
+/// The shipped defaults are the recommended pair for both the worker and the brain, so a fresh
+/// install starts with no permission warning, offline or in `swamp chat`.
+#[tokio::test]
+async fn the_default_config_gives_no_permission_warning() {
+    let f = Fixture::new();
+    let cfg = healthy(&f);
+    let out = checks(&cfg, &f.paths, false, false).await;
+    let warned: Vec<String> = warnings(&out)
+        .into_iter()
+        .filter(|c| c.name.ends_with("permission_mode"))
+        .map(|c| format!("{}: {}", c.name, c.detail))
+        .collect();
+    assert!(warned.is_empty(), "{warned:?}");
+    assert!(swamp::doctor::permission_checks(&cfg).is_empty());
 }
 
 /// The brain runs the same way, and needs Bash for git and for the tests it verifies with.
