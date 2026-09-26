@@ -85,13 +85,13 @@ impl Ctx {
             // attempt's, so both spellings are on screen and both have to resolve.
             let mut logical: Vec<NodeId> = Vec::new();
             for n in view.nodes.values() {
-                if node_matches(n.id, spec) {
+                if n.id.matches(spec) {
                     // A full id is unique by construction; only a prefix can collide.
                     if exact {
                         return Ok((rp, n.clone()));
                     }
                     hits.push((rp.clone(), n.clone()));
-                } else if node_matches(n.logical, spec) && !logical.contains(&n.logical) {
+                } else if n.logical.matches(spec) && !logical.contains(&n.logical) {
                     logical.push(n.logical);
                 }
             }
@@ -190,10 +190,6 @@ fn candidates(hits: &[(RunPaths, NodeRecord)]) -> String {
         })
         .collect::<Vec<_>>()
         .join(", ")
-}
-
-fn node_matches(id: NodeId, spec: &str) -> bool {
-    id.matches(spec)
 }
 
 /// "25m" on the command line; config uses the same spelling through humantime.

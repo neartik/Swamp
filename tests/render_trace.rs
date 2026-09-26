@@ -538,3 +538,38 @@ fn the_account_id_survives_the_column_the_provider_prefix_does_not() {
     };
     assert_eq!(width(&text), width(&render(&view(), &TraceOpts::default())));
 }
+
+/// Tasks with no attempt lead with their logical id, dash their numbers and still say why.
+#[test]
+fn unstarted_tasks_render_their_state_and_reason() {
+    let mut v = RunView::default();
+    for l in common::journal::schema_2() {
+        v.apply(&l);
+    }
+    let text = render(&v, &TraceOpts::default());
+    let row = |title: &str| -> (String, Option<String>) {
+        let mut it = text.lines().skip_while(|l| !l.contains(title));
+        let row = it
+            .next()
+            .unwrap_or_else(|| panic!("no {title} row:\n{text}"));
+        (row.to_owned(), it.next().map(str::to_owned))
+    };
+
+    let (rejected, why) = row(" docs ");
+    assert!(rejected.trim_end().ends_with("rejected"), "{rejected}");
+    let why = why.expect("a reason line");
+    assert!(
+        why.contains("WorkerError(max_nodes_per_run)"),
+        "{why}\n{text}"
+    );
+
+    let (queued, _) = row(" bench ");
+    assert!(queued.trim_end().ends_with("queued"), "{queued}");
+    let cells: Vec<&str> = queued.split_whitespace().collect();
+    let dashes = cells.iter().filter(|c| **c == "-").count();
+    assert_eq!(dashes, 5, "account, model, time, tokens and cost: {queued}");
+    assert!(
+        queued.contains(&common::journal::nid(4).short()),
+        "{queued}"
+    );
+}

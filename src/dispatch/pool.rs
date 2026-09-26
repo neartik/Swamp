@@ -798,16 +798,12 @@ impl AccountPool {
             let ledger = self.ledger.lock();
             live_states(&state, &ledger, &candidates)
         };
-        let pool_window = pool_window(&live);
         let (mut busy, mut retry_at) = (false, None::<OffsetDateTime>);
         let mut why: Vec<String> = Vec::new();
         let mut ineligible = Vec::new();
         let brain_held = self.brain_held.lock().clone();
         for (a, s) in &live {
-            if score(self.policy, a, s, pool_window, &self.scoring, now).is_some() {
-                return Capacity::Ready;
-            }
-            if let Some(g) = gate(
+            match gate(
                 s.health,
                 s.cooldown_until,
                 s.quota.as_ref(),
@@ -816,7 +812,8 @@ impl AccountPool {
                 &self.scoring,
                 now,
             ) {
-                ineligible.push((a.id.clone(), g));
+                None => return Capacity::Ready,
+                Some(g) => ineligible.push((a.id.clone(), g)),
             }
             match self.block_reason(a, s, now) {
                 // A slot the brain holds for the whole run comes back to nobody, so it must

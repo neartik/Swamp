@@ -354,6 +354,31 @@ fn identical_dispatch_calls_are_distinct_dispatches() {
         assert_eq!(d.tasks.len(), 1);
     }
 
+    // A waiting task is visible before it is leased or spawned.
+    for logical in ids.iter().flat_map(|id| &view.dispatches[id].tasks) {
+        let at = |pred: &dyn Fn(&JournalLine) -> bool| {
+            lines
+                .iter()
+                .position(pred)
+                .unwrap_or_else(|| panic!("no such line for {logical}"))
+        };
+        let queued = at(
+            &|l| matches!(&l.event, JournalEvent::TaskQueued { logical: q, .. } if q == logical),
+        );
+        let spawned = at(
+            &|l| matches!(&l.event, JournalEvent::NodeSpawned { node } if node.logical == *logical),
+        );
+        let changed = at(&|l| {
+            l.node == Some(*logical) && matches!(l.event, JournalEvent::NodeStateChanged { .. })
+        });
+        assert!(queued < spawned && queued < changed, "{logical}");
+        assert_eq!(
+            view.transitions[logical][0].from,
+            Phase::Queued,
+            "{logical}"
+        );
+    }
+
     // Chained per node, and never out of a terminal state.
     assert!(!view.transitions.is_empty());
     for (node, chain) in &view.transitions {

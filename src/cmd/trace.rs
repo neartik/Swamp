@@ -88,12 +88,12 @@ fn resolve(ctx: &Ctx, paths: &RunPaths, spec: &str) -> anyhow::Result<NodeId> {
     let hit = view
         .nodes
         .values()
-        .find(|n| super::node_matches(n.id, spec))
+        .find(|n| n.id.matches(spec))
         .map(|n| n.id)
         .or_else(|| {
             view.nodes
                 .values()
-                .find(|n| super::node_matches(n.logical, spec))
+                .find(|n| n.logical.matches(spec))
                 .and_then(|n| super::attempt_of(&view, n.logical))
                 .map(|n| n.id)
         });

@@ -88,9 +88,7 @@ pub async fn run(ctx: &Ctx, args: &ResumeArgs) -> anyhow::Result<i32> {
     crate::cmd::guard_depth(&ctx.cfg)?;
     let paths = ctx.run_paths(args.run.as_deref())?;
     let view = ctx.view(&paths, false)?;
-    let wanted = |id: NodeId| {
-        args.only.is_empty() || args.only.iter().any(|spec| super::node_matches(id, spec))
-    };
+    let wanted = |id: NodeId| args.only.is_empty() || args.only.iter().any(|spec| id.matches(spec));
     let mut steps = plan(&view, &paths);
     steps.retain(|s| wanted(s.node()));
     let ends: Vec<TaskEnd> = open_tasks(&view)

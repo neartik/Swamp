@@ -17,7 +17,7 @@ use swamp::model::core::NodeState;
 use swamp::model::core::{
     AccountId, LimitScope, NodeKind, Provider, SessionHandle, Tier, WorkspaceRef,
 };
-use swamp::model::dispatch::{DispatchState, Phase};
+use swamp::model::dispatch::{DispatchState, NodeTransition, Phase};
 use swamp::model::failure::{Detector, Failure};
 use swamp::model::node::WorkResultRef;
 use swamp::model::result::{IsolationMode, TaskRequest};
@@ -294,6 +294,14 @@ async fn fixture(extra: &str) -> Fixture {
 impl Fixture {
     /// The durable lines on disk, then everything still queued for the writer, in emit order.
     fn view(&self) -> RunView {
+        let mut view = RunView::default();
+        for l in &self.lines() {
+            view.apply(l);
+        }
+        view
+    }
+
+    fn lines(&self) -> Vec<JournalLine> {
         let mut lines = swamp::journal::replay(&self.journal.paths.journal(), Collect::default())
             .expect("replay");
         let mut seq = lines.last().map_or(0, |l| l.seq + 1);
@@ -308,11 +316,7 @@ impl Fixture {
             });
             seq += 1;
         }
-        let mut view = RunView::default();
-        for l in &lines {
-            view.apply(l);
-        }
-        view
+        lines
     }
 
     fn ctx(&self, runner: Arc<dyn NodeRunner>, deadline: Duration) -> NodeCtx {
@@ -423,6 +427,12 @@ impl Projection for Collect {
     fn finish(self) -> Vec<JournalLine> {
         self.0
     }
+}
+
+/// Chained (each `from` is the previous `to`) and never leaving a terminal state.
+fn well_formed(chain: &[NodeTransition]) -> bool {
+    chain.iter().all(|t| !t.from.is_terminal())
+        && chain.windows(2).all(|w| Phase::from(&w[0].to) == w[1].from)
 }
 
 // ---------------------------------------------------------------- tests
@@ -1069,6 +1079,49 @@ async fn a_rotate_retry_shares_its_logical_id_and_dispatch() {
     assert_eq!((r.nodes, r.failed), (1, 0));
 }
 
+/// A task that waits out a pool-wide cooldown goes Queued, Blocked, Leased, then settles.
+#[tokio::test]
+async fn a_task_blocked_on_every_account_is_leased_once_one_frees_up() {
+    let f = fixture(TWO_ACCOUNTS).await;
+    for who in ["main", "alt"] {
+        f.pool
+            .cooldown(&AccountId(who.into()), Duration::from_millis(200), "test");
+    }
+    let runner = Scripted::new(&f.root, vec![success()]);
+    let cx = f.ctx(runner.clone(), Duration::from_secs(5));
+    let logical = cx.logical;
+    let out = run_node(&cx, spec(), &task("wait for a window")).await;
+    assert!(out.failure.is_none(), "{:?}", out.failure);
+    assert_eq!(runner.calls().len(), 1);
+
+    let lines = f.lines();
+    let ineligible = lines
+        .iter()
+        .find_map(|l| match &l.event {
+            JournalEvent::NodeBlocked { ineligible, .. } if l.node == Some(logical) => {
+                Some(ineligible.clone())
+            }
+            _ => None,
+        })
+        .expect("a NodeBlocked line for the task");
+    assert!(!ineligible.is_empty(), "the block names no account");
+
+    let mut view = RunView::default();
+    for l in &lines {
+        view.apply(l);
+    }
+    let chain = &view.transitions[&logical];
+    let phases: Vec<Phase> = chain.iter().map(|t| Phase::from(&t.to)).collect();
+    assert_eq!(
+        phases,
+        vec![Phase::Blocked, Phase::Leased, Phase::Succeeded]
+    );
+    assert_eq!(chain[0].from, Phase::Queued);
+    for (id, chain) in &view.transitions {
+        assert!(well_formed(chain), "{id}: {chain:?}");
+    }
+}
+
 /// A refused task is still a fact: it is journaled and the fold can name it.
 #[tokio::test]
 async fn a_max_nodes_overflow_journals_a_rejection_the_fold_can_see() {
@@ -1173,4 +1226,45 @@ async fn a_seeded_dispatcher_continues_the_run_it_resumes() {
     journaled.call_seq = Some(swamp::CallSeq(7));
     seeded.seed(&journaled);
     assert_eq!(seeded.next_call_seq().0, 8);
+}
+
+/// A nested task under a seeded dispatcher is stored one level below its parent.
+#[tokio::test]
+async fn a_seeded_nested_task_is_journaled_at_depth_two() {
+    let f = fixture(&format!("{TWO_ACCOUNTS}\n[limits]\nmax_depth = 2\n")).await;
+    let runner = Scripted::new(&f.root, vec![]);
+    let first = f.dispatcher(runner.clone()).await;
+    let caller = NodeId(f.journal.run().0);
+    let done = first.dispatch_one(caller, task("first")).await;
+    assert!(done.ok);
+
+    let seeded = f.dispatcher(runner.clone()).await;
+    seeded.seed(&f.view());
+    let nested = seeded.dispatch_one(done.node, task("nested")).await;
+    assert!(nested.ok, "{:?}", nested.failure);
+
+    let mut brain = f.view().attempts(done.node)[0].clone();
+    (brain.id, brain.logical, brain.parent) = (caller, caller, None);
+    (brain.kind, brain.dispatch, brain.depth) = (NodeKind::Brain, None, 0);
+    f.journal
+        .tx
+        .send((
+            Some(caller),
+            JournalEvent::NodeSpawned {
+                node: Box::new(brain),
+            },
+        ))
+        .expect("journal channel");
+
+    let view = f.view();
+    let attempts = view.attempts(nested.node);
+    assert_eq!(attempts.len(), 1);
+    assert_eq!(attempts[0].depth, 2);
+    assert_eq!(view.tasks[&nested.node].depth, Some(2));
+    let row = view
+        .tree()
+        .into_iter()
+        .find(|r| r.logical == nested.node)
+        .expect("a row for the nested task");
+    assert_eq!(row.depth, 2);
 }
