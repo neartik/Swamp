@@ -8,7 +8,7 @@ use crate::ids::RunId;
 use crate::journal::paths::RunPaths;
 use crate::journal::record::JournalLine;
 use crate::model::core::AccountId;
-use crate::ui::actions::CancelTarget;
+use crate::ui::actions::{CancelDone, CancelTarget};
 use crate::ui::board::app::{Action, App, BoardPid, json, tail_lines};
 use crate::ui::board::model::{Board, RunPane, Selection};
 use crate::ui::board::render;
@@ -387,6 +387,14 @@ fn the_accounts_view_and_quit() {
 
     app.on_key(&mut b, ch('a'));
     assert!(!app.accounts_only);
+
+    // `esc` is the hinted way back from the view `enter` on an account opens.
+    b.selected = Selection::Account(AccountId("main".into()));
+    app.on_key(&mut b, key(KeyCode::Enter));
+    assert!(app.accounts_only);
+    app.on_key(&mut b, key(KeyCode::Esc));
+    assert!(!app.accounts_only, "esc leaves the accounts view");
+
     assert_eq!(app.on_key(&mut b, ch('q')), Action::Quit);
     assert!(app.quit);
     assert_eq!(
@@ -403,7 +411,7 @@ fn the_accounts_view_and_quit() {
 #[test]
 fn the_hints_are_the_key_tables() {
     let b = board();
-    let lines = render::frame(&b, 200, &Theme::plain(), 0, MAX_AGE);
+    let lines = render::frame(&b, 200, &Theme::plain(), 0, MAX_AGE, &[]);
     let last = text_of(&lines).pop().expect("a hint line");
     assert_eq!(last, keys::hints(Surface::Board, 200, &[]));
 
@@ -544,6 +552,84 @@ fn what_cannot_be_cancelled_says_why() {
         let lines = app.lines(&b, Rect::new(0, 0, 60, 40), &Theme::plain(), 0, MAX_AGE);
         assert_eq!(text_of(&lines).pop().as_deref(), Some(want));
     }
+}
+
+/// A row that is not drawn is never the one `k` acts on, and the selection moves to what is.
+#[test]
+fn a_hidden_selection_is_never_cancelled() {
+    let mut b = board();
+    let mut app = App::new(true);
+    app.touched = true;
+    b.selected = task(1);
+    app.folds.insert((fx::run_id(), fx::did("18")), false);
+    app.on_key(&mut b, ch('k'));
+    assert!(app.confirm.is_none(), "the task is folded away");
+    let lines = app.lines(&b, Rect::new(0, 0, 60, 40), &Theme::plain(), 0, MAX_AGE);
+    assert_eq!(
+        text_of(&lines).pop().as_deref(),
+        Some("select a task or dispatch to cancel")
+    );
+    app.sync(&mut b);
+    assert_eq!(
+        b.selected,
+        Selection::Dispatch {
+            run: fx::run_id(),
+            id: fx::did("18"),
+        },
+        "a folded task gives way to its header"
+    );
+
+    // `follow` never pins into a dispatch the user folded.
+    app.follow = true;
+    app.sync(&mut b);
+    assert_ne!(b.selected, task(1));
+    assert_ne!(b.selected, task(2));
+
+    // The accounts view never picks a task on its own.
+    let mut b = board();
+    let mut app = App::new(true);
+    app.on_key(&mut b, ch('a'));
+    app.sync(&mut b);
+    assert_eq!(b.selected, Selection::None);
+}
+
+/// A run that stopped being tailed, and a cancel that found nothing live, say so.
+#[test]
+fn a_cancel_that_stopped_nothing_says_why() {
+    let b = board();
+    let mut app = App::new(true);
+    let target = CancelTarget::Task {
+        run: fx::run_id(),
+        logical: fx::p4_task(3),
+    };
+    app.cancel_done(
+        &b,
+        CancelDone {
+            target,
+            result: Ok(0),
+        },
+    );
+    let text = app
+        .notice
+        .as_ref()
+        .map(|n| n.text.clone())
+        .unwrap_or_default();
+    assert!(text.ends_with("had already ended"), "{text}");
+
+    let target = CancelTarget::Dispatch {
+        run: fx::run_id(),
+        id: fx::did("18"),
+    };
+    app.cancel_done(
+        &b,
+        CancelDone {
+            target,
+            result: Ok(0),
+        },
+    );
+    let n = app.notice.clone().expect("a notice");
+    assert_eq!(n.text, "#1 9g5f18: nothing left to cancel");
+    assert!(n.until.is_some(), "it expires");
 }
 
 /// §5: the pid file is what tells `swamp chat` a board is already attached.

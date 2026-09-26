@@ -1,12 +1,11 @@
-//! One key table for every surface: it drives the board, pager and watch hints, the key
-//! overlays and the README table, so the same action is the same key everywhere.
+//! One key table for every surface's hints, overlays and the README, so keys never drift.
 
 use crate::ui::chat::theme::{Role, Theme};
+use crate::ui::order::SEP;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
-const SEP: &str = " \u{b7} ";
 /// Past this a key cell pushes its help right instead of widening every row.
 const KEY_W: usize = 16;
 
@@ -54,10 +53,10 @@ impl Surfaces {
     }
 }
 
-const B: u8 = 1;
-const P: u8 = 2;
-const W: u8 = 4;
-const C: u8 = 8;
+const B: u8 = Surface::Board.bit();
+const P: u8 = Surface::Pager.bit();
+const W: u8 = Surface::Watch.bit();
+const C: u8 = Surface::Chat.bit();
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KeyAction {
@@ -406,8 +405,7 @@ pub fn entries(s: Surface, hide: &[KeyAction]) -> Vec<(String, &'static str)> {
         .collect()
 }
 
-/// Two pairs per line where they fit `width`, one per line otherwise: `(key, help)` cells,
-/// each already padded to its column.
+/// Padded `(key, help)` cells, two pairs per line where they fit `width`.
 pub fn overlay_rows(s: Surface, width: usize, hide: &[KeyAction]) -> Vec<Vec<(String, String)>> {
     let entries = entries(s, hide);
     let key_w = |col: &[&(String, &str)]| {

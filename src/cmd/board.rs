@@ -32,7 +32,8 @@ pub async fn run(ctx: &Ctx, args: &BoardArgs) -> anyhow::Result<i32> {
         }
         let width = terminal_width();
         let theme = Theme::detect(ctx.color, ctx.cfg.ui.chat_theme.as_deref());
-        let lines = render::frame(&board, width, &theme, 0, ctx.cfg.quota_max_age());
+        let hide = app::hidden_keys(ctx.cfg.ui.board_actions.unwrap_or(true));
+        let lines = render::frame(&board, width, &theme, 0, ctx.cfg.quota_max_age(), &hide);
         ctx.out(&format!("{}\n", text_of(&lines).join("\n")));
         return Ok(0);
     }

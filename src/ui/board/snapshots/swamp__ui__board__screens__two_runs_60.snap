@@ -8,7 +8,7 @@ swamp board  4 running · 1 stuck · ~$0.62+ · observed 4s ago
 
   ▾ #1 9g5f18 · 2 running · 1 blocked          3m20s  ~$0.34
     ⠋ 9g5f01   add pagination to /u… main      3m10s  ~$0.08
-▌   ⠙ 9g5f09·2 backfill the users i… alt       2m48s  ~$0.21
+▌   ⠙ 9g5f09·2 backfill the users i… alt       2m48s  ~$0.22
     ⏸ 9g5f04   rebuild the index               3m20s
       until 22:54 · main at capacity · alt quota stop
     · 9g5f0a   write the changelog             3m20s

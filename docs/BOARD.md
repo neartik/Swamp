@@ -250,7 +250,7 @@ swamp board   2 running · 1 stuck · ~$0.43 · observed 4s ago
 
   ▾ #1 9g5f18 · 2 running · 1 blocked          3m20s  ~$0.34
     ⠋ 9g5f01   add pagination to /u… main      3m10s  ~$0.08
-▌   ⠙ 9g5f09·2 backfill the users i… alt       2m48s  ~$0.21
+▌   ⠙ 9g5f09·2 backfill the users i… alt       2m48s  ~$0.22
     ⏸ 9g5f04   rebuild the index               3m20s
       until 22:54 · main at capacity · alt quota stop
     · 9g5f0a   write the changelog             3m20s
@@ -281,7 +281,7 @@ swamp board                                                                     
 
   ▾ #1 9g5f18 · 5 tasks · 2 running · 1 blocked · 1 queued · 1 done                                                    3m20s  ↓ 437k  ~$0.34
     ⠋ 9g5f01   [mid ] add pagination to /users                                                  main       sonnet-4-5  3m10s  ↓ 118k  ~$0.08
-▌   ⠙ 9g5f09·2 [high] backfill the users index                                                  alt        opus-4-1    2m48s  ↓ 223k  ~$0.21
+▌   ⠙ 9g5f09·2 [high] backfill the users index                                                  alt        opus-4-1    2m48s  ↓ 223k  ~$0.22
     ⏸ 9g5f04   [mid ] rebuild the index                                                                                3m20s
       until 22:54 (in 38m) · main at capacity (2/2) · alt quota stop (93%)
     · 9g5f0a   [low ] write the changelog                                                                              3m20s
@@ -313,7 +313,7 @@ swamp board   2 running · 1 stuck · ~$0.43 · observed 4s ago
 ▌     ▾ #3 9g5f1k · by 9g5f01 · 2 queued       1m02s
         · 9g5f1m   split the handler           1m02s
         · 9g5f1n   write the tests             1m02s
-    ⠙ 9g5f09·2 backfill the users i… alt       2m48s  ~$0.21
+    ⠙ 9g5f09·2 backfill the users i… alt       2m48s  ~$0.22
     ⏸ 9g5f04   rebuild the index               3m20s
       until 22:54 · main at capacity · alt quota stop
     · 9g5f0a   write the changelog             3m20s
@@ -388,7 +388,7 @@ board, in the pagers and in `swamp watch`.
 | `k` | cancel the selected task or dispatch, after `y` / `n` |
 | `tab` / `shift+tab`, `0` | next / previous run, all runs merged |
 | `a`, `f`, `?` | accounts view, follow the newest running task, the key list |
-| `esc` | back from a pager; `q`, `ctrl+c`, `ctrl+d` quit |
+| `esc` | back from a pager or the accounts view; `q`, `ctrl+c`, `ctrl+d` quit |
 
 `k` is the one key that changes anything. It asks first (`cancel 9g5f04 "rebuild the index"? y /
 n`, or `cancel #1 9g5f18 · 4 live tasks? y / n`); `y` runs `dispatch::cancel::cancel_node` for the

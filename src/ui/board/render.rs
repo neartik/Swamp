@@ -1,9 +1,4 @@
-//! WP4: the three layout tiers of `docs/BOARD.md` §3. Pure: it turns a `Board` into `Line`s
-//! and reads no clock and no file of its own.
-//!
-//! Everything it formats comes from the shared helpers - `ui::fmt`, `ui::order`, `ui::keys`,
-//! `watch::shown_health`, `ui::usage` - so the board, `/usage`, chat and `swamp watch` cannot
-//! drift apart.
+//! The three layout tiers of `docs/BOARD.md` §3: a `Board` into `Line`s, no clock or file read.
 
 use crate::dispatch::account::Health;
 use crate::dispatch::policy::{self, Ineligible, Scoring};
@@ -213,18 +208,18 @@ impl<'a> Ctx<'a> {
 
 // ---------------------------------------------------------------- frame
 
-/// One frame at the model's own fold state, the key hints at the bottom: what `--once`
-/// prints and what the snapshots hold.
+/// One frame at the model's own fold state, the hints bar `hide` at the bottom: `--once`.
 pub fn frame(
     b: &Board,
     width: u16,
     theme: &Theme,
     tick: u64,
     max_age: StdDuration,
+    hide: &[KeyAction],
 ) -> Vec<Line<'static>> {
     let c = Ctx::new(b, width, theme, tick, max_age);
     let rows = b.rows();
-    let bottom = hints(&c, &[]);
+    let bottom = hints(&c, hide);
     compose(b, &rows, &rows, &c, bottom, None, &mut 0)
 }
 
@@ -345,31 +340,7 @@ fn header_cells(s: &Summary) -> Vec<Cell> {
             Role::Err,
         ));
     }
-    cells.push(Cell::new(
-        "running",
-        format!("{} running", s.tally.running),
-        Role::Meta,
-    ));
-    if s.tally.stuck() > 0 {
-        cells.push(Cell::new(
-            "stuck",
-            format!("{} stuck", s.tally.stuck()),
-            Role::Err,
-        ));
-    }
-    if s.tally.queued > 0 {
-        cells.push(Cell::new(
-            "queued",
-            format!("{} queued", s.tally.queued),
-            Role::Meta,
-        ));
-    }
-    let plus = if s.cost_complete { "" } else { "+" };
-    cells.push(Cell::new(
-        "cost",
-        format!("~${:.2}{plus}", s.cost_usd),
-        Role::Meta,
-    ));
+    cells.extend(s.tally.summary_cells(s.cost_usd, s.cost_complete));
     cells
 }
 
@@ -393,8 +364,6 @@ fn freshness(b: &Board, c: &Ctx) -> Cell {
     Cell::new("fresh", text, role)
 }
 
-// ---------------------------------------------------------------- body
-
 #[derive(Default)]
 pub struct Body {
     pub lines: Vec<Line<'static>>,
@@ -415,8 +384,7 @@ impl Body {
     }
 }
 
-/// Per run: the brain, its open dispatches with their tasks, then `recent`. `all` is the
-/// unfolded model, for the account numbers the stuck lines quote.
+/// Per run: the brain, its open dispatches with their tasks, then `recent`.
 pub fn body(shown: &Rows, sel: &Selection, all: &Rows, c: &Ctx) -> Body {
     let mut out = Body::default();
     let mut spin = 0usize;
@@ -620,17 +588,17 @@ fn right_cells(n: &NodeRow, c: &Ctx) -> Vec<String> {
     let elapsed = n.elapsed(c.now).map(fmt::duration).unwrap_or_default();
     out.push(right(&elapsed, 6));
     if c.l.tokens {
-        out.push(right(&tokens(n.usage.billable(), c), 7));
+        out.push(right(&tokens(n.spend.usage.billable(), false, c), 7));
     }
     if c.l.cost_col {
-        let cost = n.cost.map(|_| fmt::cost(n.cost)).unwrap_or_default();
-        out.push(right(&cost, 7));
+        out.push(right(&dispatches::cost_cell(&n.spend), 7));
     }
     out
 }
 
-fn tokens(n: u64, c: &Ctx) -> String {
-    if n == 0 {
+/// `↓ 1.2k`; blank for zero unless `always`.
+fn tokens(n: u64, always: bool, c: &Ctx) -> String {
+    if n == 0 && !always {
         return String::new();
     }
     format!("{} {}", c.theme.g(Glyph::TokenArrow), fmt::tokens(n))
@@ -672,9 +640,9 @@ fn dispatch_line(g: &DispatchGroup, recent: bool, selected: bool, c: &Ctx) -> Li
     } else {
         Role::Name
     };
-    let mut cells = vec![Cell::new("label", g.label(), label_role)];
-    if c.l.dispatch_id && g.seq.is_some() && !g.is_legacy() {
-        cells.push(Cell::new("id", g.id.short(), Role::Meta).joined());
+    let mut cells = order::label_cells(g.seq, g.id, label_role);
+    if !c.l.dispatch_id {
+        cells.retain(|cell| cell.key != "id");
     }
     if let Some(by) = g.caller {
         cells.push(Cell::new("by", format!("by {}", by.short()), Role::Meta));
@@ -688,7 +656,7 @@ fn dispatch_line(g: &DispatchGroup, recent: bool, selected: bool, c: &Ctx) -> Li
     if recent && let Some(reason) = reason_cell(g) {
         cells.push(Cell::new("reason", reason, Role::Err));
     }
-    let cost = rollup_cost(g);
+    let cost = dispatches::cost_cell(&g.cost);
     if !c.l.cost_col && !cost.is_empty() {
         cells.push(Cell::new("cost", cost.clone(), Role::Meta));
     }
@@ -703,7 +671,7 @@ fn dispatch_line(g: &DispatchGroup, recent: bool, selected: bool, c: &Ctx) -> Li
         };
         right_block.push(right(&age, 6));
         if c.l.tokens {
-            right_block.push(right(&tokens(g.cost.usage.billable(), c), 7));
+            right_block.push(right(&tokens(g.cost.usage.billable(), false, c), 7));
         }
         right_block.push(right(&cost, 7));
     }
@@ -735,11 +703,6 @@ fn dispatch_line(g: &DispatchGroup, recent: bool, selected: bool, c: &Ctx) -> Li
         }
     }
     r.line(c.w())
-}
-
-fn rollup_cost(g: &DispatchGroup) -> String {
-    let cost = dispatches::cost(&g.cost);
-    if cost == "-" { String::new() } else { cost }
 }
 
 /// Why a settled dispatch went wrong, from its first failed or rejected task.
@@ -793,10 +756,11 @@ fn blocked_text(
     all: &Rows,
     c: &Ctx,
 ) -> String {
-    let mut out = format!("until {}", fmt::clock_day(until, c.now));
-    if c.l.blocked == BlockedLine::Full {
-        out.push_str(&format!(" (in {})", until_word(until, c)));
-    }
+    let mut out = if c.l.blocked == BlockedLine::Full {
+        fmt::until_at(until, c.now)
+    } else {
+        format!("until {}", fmt::clock_day(until, c.now))
+    };
     match c.l.blocked {
         BlockedLine::First => {
             if let Some((id, g)) = list.first() {
@@ -813,7 +777,7 @@ fn blocked_text(
         }
         BlockedLine::Full => {
             for (id, g) in list {
-                let text = usage::ineligible_text(*g, all.account(id), true, c.now);
+                let text = recorded_text(*g, all.account(id), c);
                 out.push_str(&format!("{SEP}{} {text}", id.0));
             }
         }
@@ -821,8 +785,10 @@ fn blocked_text(
     out
 }
 
-fn until_word(at: OffsetDateTime, c: &Ctx) -> String {
-    fmt::until(StdDuration::try_from(at - c.now).unwrap_or(StdDuration::ZERO))
+/// A recorded refusal, its figures only while the live gate still agrees with it.
+fn recorded_text(g: Ineligible, row: Option<&AccountRow>, c: &Ctx) -> String {
+    let row = row.filter(|r| gate_of(r, c) == Some(g));
+    usage::ineligible_text(g, row, c.now)
 }
 
 // ---------------------------------------------------------------- accounts
@@ -912,17 +878,11 @@ pub fn account_line(r: &AccountRow, selected: bool, c: &Ctx) -> Line<'static> {
             window(&mut line, "7d", w7, r, c);
             line.pad(2);
             let (status, role) = status_cell(r, health, c);
-            let tok = format!(
-                "{} {}",
-                t.g(Glyph::TokenArrow),
-                fmt::tokens(r.window_tokens.billable())
-            );
+            let tok = tokens(r.window_tokens.billable(), true, c);
             // The gate says why the account is out; its tokens give way first.
             let room = c.w().saturating_sub(line.w + tok.width() + 1);
-            if status.width() > room {
-                line.add(t, &status, role);
-            } else {
-                line.add(t, &status, role);
+            line.add(t, &status, role);
+            if status.width() <= room {
                 line.tail(t, &tok, Role::Meta, c.w());
             }
         }
@@ -961,10 +921,7 @@ fn pct_role(r: &AccountRow, w: Option<&LimitWindow>, c: &Ctx) -> Role {
 
 fn service_word(r: &AccountRow, health: Health, c: &Ctx) -> String {
     match health {
-        Health::Cooling => match r.cooldown_until.filter(|t| *t > c.now) {
-            Some(t) => format!("cooling until {}", fmt::clock_day(t, c.now)),
-            None => "cooling".to_owned(),
-        },
+        Health::Cooling => usage::ineligible_text(Ineligible::Cooling, Some(r), c.now),
         Health::AuthBroken => "auth broken".to_owned(),
         Health::Disabled => "disabled".to_owned(),
         h => watch::health_word(h).to_owned(),
@@ -974,10 +931,7 @@ fn service_word(r: &AccountRow, health: Health, c: &Ctx) -> String {
 /// At Wide: the gate that holds the account back, else its health when it is not healthy.
 fn status_cell(r: &AccountRow, health: Health, c: &Ctx) -> (String, Role) {
     if let Some(g) = gate_of(r, c) {
-        return (
-            usage::ineligible_text(g, Some(r), true, c.now),
-            gate_role(g),
-        );
+        return (usage::ineligible_text(g, Some(r), c.now), gate_role(g));
     }
     if health == Health::Healthy {
         return (String::new(), Role::Meta);
@@ -1020,10 +974,6 @@ fn reset_cell(w: Option<&LimitWindow>, c: &Ctx) -> String {
     }
 }
 
-fn token_cell(r: &AccountRow) -> String {
-    format!("\u{2193} {}", fmt::tokens(r.window_tokens.billable()))
-}
-
 /// `watch::gauge_bar`-shaped: the same rounding, the board's own glyphs and width.
 pub fn gauge(util: f64, cells: usize, theme: &Theme) -> String {
     let (on, off) = if theme.ascii {
@@ -1050,8 +1000,7 @@ fn health_glyph(theme: &Theme, h: Health) -> &'static str {
     }
 }
 
-/// The dispatcher's own gate, over the row's live numbers: `inflight` here is the journal
-/// count `rows()` recomputed, not the zero the state file carries.
+/// The dispatcher's own gate over the row's live numbers, `inflight` recounted from journals.
 fn gate_of(r: &AccountRow, c: &Ctx) -> Option<Ineligible> {
     policy::gate(
         r.health,
@@ -1064,13 +1013,10 @@ fn gate_of(r: &AccountRow, c: &Ctx) -> Option<Ineligible> {
     )
 }
 
-// ---------------------------------------------------------------- detail
-
 /// A detail line: styled pieces, the indent already in the first one.
 type Segs = Vec<(String, Role)>;
 
-/// What the selected row is, and why: the account a task won and the ones passed over, why
-/// a blocked task waits, a dispatch's totals and the command that lists it.
+/// What the selected row is, and why.
 pub fn detail(b: &Board, rows: &Rows, c: &Ctx) -> Vec<Line<'static>> {
     let lines = match &b.selected {
         Selection::Node { run, logical } => match rows.brain(*run, *logical) {
@@ -1154,11 +1100,7 @@ fn task_detail(b: &Board, t: &TaskRow, rows: &Rows, c: &Ctx) -> Vec<Segs> {
             let mut out = vec![vec![
                 (format!("  {id}"), Role::Text),
                 (
-                    format!(
-                        " blocked{SEP}until {} (in {})",
-                        fmt::clock_day(*until, c.now),
-                        until_word(*until, c)
-                    ),
+                    format!(" blocked{SEP}{}", fmt::until_at(*until, c.now)),
                     Role::Meta,
                 ),
             ]];
@@ -1170,10 +1112,7 @@ fn task_detail(b: &Board, t: &TaskRow, rows: &Rows, c: &Ctx) -> Vec<Segs> {
                         format!("    {}  ", fmt::pad(&account.0, longest)),
                         Role::Meta,
                     ),
-                    (
-                        usage::ineligible_text(*g, rows.account(account), true, c.now),
-                        gate_role(*g),
-                    ),
+                    (recorded_text(*g, rows.account(account), c), gate_role(*g)),
                 ]);
             }
             out
@@ -1200,8 +1139,7 @@ fn task_detail(b: &Board, t: &TaskRow, rows: &Rows, c: &Ctx) -> Vec<Segs> {
     }
 }
 
-/// A task that got an account: why that one, what went wrong, who else was passed over, and
-/// the attempts before this one.
+/// A task that got an account: why that one, what went wrong, who else was passed over.
 fn ran_detail(b: &Board, t: &TaskRow, rows: &Rows, c: &Ctx) -> Vec<Segs> {
     let n = &t.row;
     let id = n.short();
@@ -1261,8 +1199,14 @@ fn ran_detail(b: &Board, t: &TaskRow, rows: &Rows, c: &Ctx) -> Vec<Segs> {
     out
 }
 
-/// §3.4: every account the pool passed over, with the gate recorded when the task was
-/// blocked, else the live one tagged `now`.
+struct Passed {
+    text: String,
+    role: Role,
+    live: bool,
+    eligible: bool,
+}
+
+/// §3.4: every account passed over, the gate recorded at block time, else the live one.
 fn passed_over(
     b: &Board,
     t: &TaskRow,
@@ -1277,19 +1221,24 @@ fn passed_over(
         .and_then(|p| p.view.tasks.get(&t.row.logical))
         .map(|t| t.ineligible.clone())
         .unwrap_or_default();
-    // (text, role, live, eligible)
-    let items: Vec<(String, Role, bool, bool)> = note
+    let passed = |text: String, role: Role, live: bool, eligible: bool| Passed {
+        text,
+        role,
+        live,
+        eligible,
+    };
+    let items: Vec<Passed> = note
         .excluded
         .iter()
         .map(|id| {
             let name = fmt::sanitize(&id.0);
             let row = rows.account(id);
             if let Some((_, g)) = recorded.iter().find(|(a, _)| a == id) {
-                let text = usage::ineligible_text(*g, row, true, c.now);
-                return (format!("{name} {text}"), gate_role(*g), false, false);
+                let text = recorded_text(*g, row, c);
+                return passed(format!("{name} {text}"), gate_role(*g), false, false);
             }
             let Some(r) = row else {
-                return (
+                return passed(
                     format!("{name} not in accounts.json"),
                     Role::Err,
                     true,
@@ -1297,20 +1246,20 @@ fn passed_over(
                 );
             };
             match gate_of(r, c) {
-                Some(g) => (
-                    format!("{name} {}", usage::ineligible_text(g, Some(r), true, c.now)),
+                Some(g) => passed(
+                    format!("{name} {}", usage::ineligible_text(g, Some(r), c.now)),
                     gate_role(g),
                     true,
                     false,
                 ),
-                None => (format!("{name} eligible now"), Role::Meta, true, true),
+                None => passed(format!("{name} eligible now"), Role::Meta, true, true),
             }
         })
         .collect();
     if items.is_empty() {
         return Vec::new();
     }
-    let all_live = items.iter().all(|i| i.2);
+    let all_live = items.iter().all(|i| i.live);
     let tag = |live: bool, eligible: bool| {
         if live && !eligible && !all_live {
             " (now)"
@@ -1325,20 +1274,20 @@ fn passed_over(
     };
     if narrow {
         let mut out = vec![vec![(prefix.trim_end().to_owned(), Role::Meta)]];
-        for (text, role, live, eligible) in items {
+        for i in items {
             out.extend(wrap(
-                &[(format!("{text}{}", tag(live, eligible)), role)],
+                &[(format!("{}{}", i.text, tag(i.live, i.eligible)), i.role)],
                 room,
             ));
         }
         return out;
     }
     let mut segs: Segs = vec![(prefix.trim_end().to_owned(), Role::Meta)];
-    for (i, (text, role, live, eligible)) in items.into_iter().enumerate() {
-        if i > 0 {
+    for (n, i) in items.into_iter().enumerate() {
+        if n > 0 {
             segs.push(("\u{b7}".to_owned(), Role::Meta));
         }
-        segs.push((format!("{text}{}", tag(live, eligible)), role));
+        segs.push((format!("{}{}", i.text, tag(i.live, i.eligible)), i.role));
     }
     wrap(&segs, room)
 }
@@ -1358,26 +1307,24 @@ fn dispatch_detail(g: &DispatchGroup, c: &Ctx) -> Vec<Segs> {
     if !counts.is_empty() {
         phrase.push(counts);
     }
-    let cost = rollup_cost(g);
+    let cost = dispatches::cost_cell(&g.cost);
     if !cost.is_empty() {
         phrase.push(cost);
     }
+    let mut head: Segs = order::label_cells(g.seq, g.id, label_role(g))
+        .into_iter()
+        .enumerate()
+        .map(|(i, cell)| {
+            let lead = if i == 0 { "  " } else { cell.glue };
+            (format!("{lead}{}", cell.text), cell.role)
+        })
+        .collect();
+    head.push((
+        format!("{SEP}by {by}{SEP}{state}{SEP}{} ago", fmt::duration(age)),
+        Role::Meta,
+    ));
     vec![
-        vec![
-            (format!("  {}", g.label()), label_role(g)),
-            (
-                format!(
-                    "{}{SEP}by {by}{SEP}{state}{SEP}{} ago",
-                    if g.seq.is_some() && !g.is_legacy() {
-                        format!(" {}", g.id.short())
-                    } else {
-                        String::new()
-                    },
-                    fmt::duration(age)
-                ),
-                Role::Meta,
-            ),
-        ],
+        head,
         plain(&phrase.join(SEP), Role::Meta),
         plain(&format!("swamp dispatch {}", short_of(g.id)), Role::Accent),
     ]
@@ -1407,21 +1354,20 @@ fn account_detail(rows: &Rows, id: &AccountId, c: &Ctx) -> Vec<Segs> {
             fmt::sanitize(&r.account.0),
             watch::health_word(health),
             r.inflight,
-            token_cell(r)
+            tokens(r.window_tokens.billable(), true, c)
         ),
         Role::Meta,
     )];
     if let Some(g) = gate_of(r, c) {
         out.push(plain(
-            &usage::ineligible_text(g, Some(r), true, c.now),
+            &usage::ineligible_text(g, Some(r), c.now),
             gate_role(g),
         ));
     }
     out
 }
 
-/// At Narrow the score stays on the head line and the terms wrap under it; wider layouts keep
-/// the recorded string whole and let it wrap on the hanging indent.
+/// At Narrow the score stays on the head line and the terms wrap under it.
 fn split_reason(reason: &Reason, narrow: bool) -> (String, String) {
     if !narrow || reason.form != ReasonForm::Terms {
         return (reason.text.clone(), String::new());
@@ -1432,8 +1378,7 @@ fn split_reason(reason: &Reason, narrow: bool) -> (String, String) {
     }
 }
 
-/// Greedy word wrap that keeps each word's role. A word wider than `room` gets a line of its
-/// own and is cut when drawn.
+/// Greedy word wrap that keeps each word's role; an overlong word is cut when drawn.
 fn wrap(segs: &[(String, Role)], room: usize) -> Vec<Segs> {
     let mut out: Vec<Segs> = Vec::new();
     let mut line: Segs = Vec::new();

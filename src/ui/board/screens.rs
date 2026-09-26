@@ -50,7 +50,10 @@ fn screen(lines: Vec<Line<'static>>, width: u16) -> String {
 }
 
 fn draw(b: &Board, width: u16) -> String {
-    screen(render::frame(b, width, &Theme::plain(), 0, MAX_AGE), width)
+    screen(
+        render::frame(b, width, &Theme::plain(), 0, MAX_AGE, &[]),
+        width,
+    )
 }
 
 /// What the loop draws: `App::lines` in a pane tall enough for the whole board.
@@ -501,7 +504,7 @@ fn the_cancel_prompt_replaces_the_hints() {
     let mut app = App::new(true);
     app.touched = true;
     app.on_key(&mut b, key(KeyCode::Char('k')));
-    let height = render::frame(&b, 40, &Theme::plain(), 0, MAX_AGE).len() as u16;
+    let height = render::frame(&b, 40, &Theme::plain(), 0, MAX_AGE, &[]).len() as u16;
     let text = app_screen(&mut app, &b, 40, height);
     assert_eq!(text, {
         let mut frame = draw(&b, 40);

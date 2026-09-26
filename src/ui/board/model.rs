@@ -1,8 +1,4 @@
-//! WP2: what a board frame is made of. Pure by construction: every byte arrives through a
-//! loader the caller hands in, so the whole model is testable without a filesystem.
-//!
-//! Work is grouped by dispatch: each run is its brain row, its open root dispatches with their
-//! tasks (and whatever those tasks dispatched in turn), then the dispatches that settled.
+//! What a board frame is made of, grouped by dispatch; pure, so testable without a filesystem.
 
 use crate::dispatch::policy::{Ineligible, Scoring, SelectionPolicy};
 use crate::ids::{CallSeq, DispatchId, NodeId, RunId};
@@ -15,6 +11,7 @@ use crate::model::dispatch::DispatchState;
 use crate::model::failure::Failure;
 use crate::model::node::NodeRecord;
 use crate::ui::board::sources::Tail;
+use crate::ui::chat::theme::Role;
 use crate::ui::order::{self, Tally};
 use crate::ui::usage::AccountRow;
 use crate::ui::{dispatches, fmt};
@@ -196,9 +193,7 @@ impl RunPane {
         }
     }
 
-    /// The note the detail shows for a task: the newest attempt that recorded one. The pool
-    /// leases before the attempt's id exists, so its line names the logical id; a journal
-    /// that attributed one to an attempt still wins.
+    /// The newest attempt's note, else the logical id's: the pool leases before an attempt exists.
     pub fn note_for(&self, logical: NodeId) -> Option<&SelectionNote> {
         let attempts = self.view.by_logical.get(&logical);
         attempts
@@ -209,8 +204,7 @@ impl RunPane {
             .or_else(|| self.selection.get(&logical))
     }
 
-    /// A task by its logical id, the last attempt taken as the live record: the same
-    /// `latest()` rule `trace.rs` uses, so a retry changes the id in place.
+    /// A task by its logical id, its last attempt the live record, as `trace.rs` reads it.
     pub fn node_row(&self, logical: NodeId) -> Option<NodeRow> {
         let state = self.view.state_of(logical)?;
         let dispatch = self.view.tasks.get(&logical).map(|t| t.dispatch);
@@ -253,13 +247,13 @@ impl RunPane {
             ended_at: n.ended_at,
             usage: n.usage,
             cost: n.cost,
+            spend: self.view.rollup(Scope::Task(logical)).into(),
             stale: self.stale.is_some(),
             dispatch,
         }
     }
 
-    /// A task queued, blocked or rejected before its first attempt existed. What it counts
-    /// its wait from is the dispatch that asked for it.
+    /// A task with no attempt yet; it waits from when its dispatch was issued.
     fn unstarted(&self, logical: NodeId, state: NodeState) -> Option<NodeRow> {
         let t = self.view.tasks.get(&logical)?;
         let record = self
@@ -295,6 +289,7 @@ impl RunPane {
             ended_at: None,
             usage: Usage::default(),
             cost: None,
+            spend: self.view.rollup(Scope::Task(logical)).into(),
             stale: self.stale.is_some(),
             dispatch: Some(t.dispatch),
         })
@@ -342,14 +337,10 @@ impl RunPane {
         Some(self.row(n, self.brain, state, None))
     }
 
-    /// Whether `caller` is this run's brain rather than a task that dispatched work itself.
     fn is_root(&self, d: &DispatchView) -> bool {
-        match &d.record {
-            None => true,
-            Some(r) => {
-                r.caller == self.brain || inspect::caller(&self.view, r.caller).kind == "brain"
-            }
-        }
+        d.record
+            .as_ref()
+            .is_none_or(|r| inspect::is_brain_caller(&self.view, r.caller))
     }
 
     /// Dispatches a task issued, by the task's logical id.
@@ -368,7 +359,7 @@ impl RunPane {
             out.entry(of).or_default().push(d);
         }
         for list in out.values_mut() {
-            list.sort_by_key(|d| dispatch_key(d));
+            list.sort_by_key(|d| inspect::dispatch_key(d));
         }
         out
     }
@@ -382,7 +373,7 @@ impl RunPane {
             .values()
             .filter(|d| d.id == DispatchId::LEGACY || self.is_root(d))
             .collect();
-        roots.sort_by_key(|d| dispatch_key(d));
+        roots.sort_by_key(|d| inspect::dispatch_key(d));
         let mut active = Vec::new();
         let mut recent = Vec::new();
         for d in roots {
@@ -423,19 +414,14 @@ impl RunPane {
                 })
                 .collect()
         } else {
-            let mut rows: Vec<(usize, TaskRow)> = d
+            let rows = d
                 .tasks
                 .iter()
                 .filter_map(|t| self.task_row(*t, level, now))
-                .enumerate()
                 .collect();
-            rows.sort_by_key(|(i, t)| (order::rank(&t.row.state), *i));
-            rows.into_iter().map(|(_, t)| t).collect()
+            order::ranked(rows, |t: &TaskRow| &t.row.state)
         };
-        let mut tally = Tally::default();
-        for t in &tasks {
-            tally.add(&t.row.state);
-        }
+        let tally = Tally::of(tasks.iter().map(|t| &t.row.state));
         let settled_at = tasks
             .iter()
             .filter_map(|t| t.row.ended_at)
@@ -461,7 +447,7 @@ impl RunPane {
         DispatchGroup {
             run: self.run,
             id: d.id,
-            seq: d.record.as_ref().and_then(|r| r.call_seq),
+            seq: d.call_seq(),
             caller,
             level,
             state: d.state,
@@ -474,36 +460,6 @@ impl RunPane {
             expanded: d.state == DispatchState::Open,
         }
     }
-
-    /// Every task of every open dispatch, the legacy bucket included while it is open.
-    pub fn open_tally(&self) -> Tally {
-        let mut t = Tally::default();
-        for d in self
-            .view
-            .dispatches
-            .values()
-            .filter(|d| d.state == DispatchState::Open)
-        {
-            for task in &d.tasks {
-                if let Some(s) = self.view.state_of(*task) {
-                    t.add(&s);
-                }
-            }
-        }
-        t
-    }
-}
-
-/// Stable dispatch order: by call, then by when it was issued; the legacy bucket last.
-fn dispatch_key(d: &DispatchView) -> (bool, bool, Option<CallSeq>, OffsetDateTime, DispatchId) {
-    let r = d.record.as_ref();
-    (
-        d.id == DispatchId::LEGACY,
-        r.and_then(|r| r.call_seq).is_none(),
-        r.and_then(|r| r.call_seq),
-        r.map_or(OffsetDateTime::UNIX_EPOCH, |r| r.at),
-        d.id,
-    )
 }
 
 /// A run is live while it has not written `RunFinished` and either a non-terminal node's
@@ -545,28 +501,25 @@ pub struct NodeRow {
     pub ended_at: Option<OffsetDateTime>,
     pub usage: Usage,
     pub cost: Option<Cost>,
+    /// Every attempt of the task: what its row prints and its dispatch's rollup sums.
+    pub spend: Rollup,
     pub stale: bool,
     pub dispatch: Option<DispatchId>,
 }
 
 impl NodeRow {
-    /// Recomputed every frame, never accumulated: time on the account once a task started,
-    /// its wait before that, and nothing for a task that ended without ever starting.
     pub fn elapsed(&self, now: OffsetDateTime) -> Option<StdDuration> {
-        match self.started_at {
-            Some(from) => (self.ended_at.unwrap_or(now) - from).try_into().ok(),
-            None if self.state.is_terminal() => None,
-            None => (now - self.created_at).try_into().ok(),
-        }
+        order::elapsed(
+            self.started_at,
+            self.ended_at,
+            self.state.is_terminal(),
+            Some(self.created_at),
+            now,
+        )
     }
 
-    /// `9g5f09·2` for a retry, the plain short id otherwise.
     pub fn short(&self) -> String {
-        if self.attempt > 1 {
-            format!("{}\u{b7}{}", self.id.short(), self.attempt)
-        } else {
-            self.id.short()
-        }
+        fmt::attempt_id(self.id, self.attempt)
     }
 }
 
@@ -607,28 +560,46 @@ pub struct DispatchGroup {
     pub expanded: bool,
 }
 
+/// A row `DispatchGroup::walk` visits.
+#[derive(Clone, Copy)]
+pub enum Item<'a> {
+    Group(&'a DispatchGroup),
+    Task(&'a TaskRow),
+}
+
 impl DispatchGroup {
     /// `#3`, the short id when there is no call behind it, or `legacy`.
     pub fn label(&self) -> String {
-        if self.id == DispatchId::LEGACY {
-            return inspect::LEGACY.to_owned();
-        }
-        match self.seq {
-            Some(seq) => format!("#{seq}"),
-            None => self.id.short(),
-        }
-    }
-
-    /// The label and, when it is a call number, the short id beside it.
-    pub fn full_label(&self) -> String {
-        match (self.id == DispatchId::LEGACY, self.seq) {
-            (false, Some(_)) => format!("{} {}", self.label(), self.id.short()),
-            _ => self.label(),
-        }
+        order::label_cells(self.seq, self.id, Role::Meta)
+            .swap_remove(0)
+            .text
     }
 
     pub fn is_legacy(&self) -> bool {
         self.id == DispatchId::LEGACY
+    }
+
+    /// This group, its tasks and their nested groups in draw order; folded ones only if `folded`.
+    pub fn walk<'a>(&'a self, folded: bool, f: &mut impl FnMut(Item<'a>)) {
+        f(Item::Group(self));
+        if !folded && !self.expanded {
+            return;
+        }
+        for t in &self.tasks {
+            f(Item::Task(t));
+            for sub in &t.nested {
+                sub.walk(folded, f);
+            }
+        }
+    }
+
+    pub fn walk_mut(&mut self, f: &mut impl FnMut(&mut DispatchGroup)) {
+        f(self);
+        for t in &mut self.tasks {
+            for sub in &mut t.nested {
+                sub.walk_mut(f);
+            }
+        }
     }
 }
 
@@ -652,40 +623,41 @@ pub struct Rows {
 }
 
 impl Rows {
-    /// Every task row the runs hold, nested and recent ones included, in draw order.
-    pub fn tasks(&self) -> Vec<&TaskRow> {
-        fn walk<'a>(g: &'a DispatchGroup, out: &mut Vec<&'a TaskRow>) {
-            for t in &g.tasks {
-                out.push(t);
-                for sub in &t.nested {
-                    walk(sub, out);
-                }
-            }
-        }
-        let mut out = Vec::new();
+    /// Every group and task of every run in draw order, recent included.
+    pub fn walk<'a>(&'a self, folded: bool, f: &mut impl FnMut(Item<'a>)) {
         for r in &self.runs {
             for g in r.active.iter().chain(&r.recent) {
-                walk(g, &mut out);
+                g.walk(folded, f);
             }
         }
+    }
+
+    pub fn walk_mut(&mut self, f: &mut impl FnMut(&mut DispatchGroup)) {
+        for r in &mut self.runs {
+            for g in r.active.iter_mut().chain(r.recent.iter_mut()) {
+                g.walk_mut(f);
+            }
+        }
+    }
+
+    /// Every task row, nested, folded and recent ones included, in draw order.
+    pub fn tasks(&self) -> Vec<&TaskRow> {
+        let mut out = Vec::new();
+        self.walk(true, &mut |i| {
+            if let Item::Task(t) = i {
+                out.push(t);
+            }
+        });
         out
     }
 
     pub fn groups(&self) -> Vec<&DispatchGroup> {
-        fn walk<'a>(g: &'a DispatchGroup, out: &mut Vec<&'a DispatchGroup>) {
-            out.push(g);
-            for t in &g.tasks {
-                for sub in &t.nested {
-                    walk(sub, out);
-                }
-            }
-        }
         let mut out = Vec::new();
-        for r in &self.runs {
-            for g in r.active.iter().chain(&r.recent) {
-                walk(g, &mut out);
+        self.walk(true, &mut |i| {
+            if let Item::Group(g) = i {
+                out.push(g);
             }
-        }
+        });
         out
     }
 
@@ -755,22 +727,13 @@ impl Selection {
 /// Where the cursor goes until the user moves it: the first task stuck for good, else the
 /// first blocked one, else the first running one, else the brain.
 pub fn attention(rows: &Rows) -> Option<Selection> {
-    fn walk<'a>(g: &'a DispatchGroup, out: &mut Vec<&'a TaskRow>) {
-        if !g.expanded {
-            return;
-        }
-        for t in &g.tasks {
-            out.push(t);
-            for sub in &t.nested {
-                walk(sub, out);
-            }
-        }
-    }
     let mut shown = Vec::new();
-    for r in &rows.runs {
-        for g in &r.active {
-            walk(g, &mut shown);
-        }
+    for g in rows.runs.iter().flat_map(|r| &r.active) {
+        g.walk(false, &mut |i| {
+            if let Item::Task(t) = i {
+                shown.push(t);
+            }
+        });
     }
     let pick = |want: &dyn Fn(&NodeState) -> bool| {
         shown
@@ -793,16 +756,21 @@ pub fn attention(rows: &Rows) -> Option<Selection> {
         })
 }
 
-/// What `follow` pins to: the running task that started last.
+/// What `follow` pins to: the drawn running task that started last.
 pub fn newest_running(rows: &Rows) -> Option<Selection> {
-    rows.tasks()
-        .into_iter()
-        .filter(|t| order::rank(&t.row.state) == 1)
-        .max_by_key(|t| (t.row.started_at, t.row.id))
-        .map(|t| Selection::Node {
-            run: t.row.run,
-            logical: t.row.logical,
-        })
+    let mut best: Option<&TaskRow> = None;
+    rows.walk(false, &mut |i| {
+        if let Item::Task(t) = i
+            && order::rank(&t.row.state) == 1
+            && best.is_none_or(|b| (t.row.started_at, t.row.id) > (b.row.started_at, b.row.id))
+        {
+            best = Some(t);
+        }
+    });
+    best.map(|t| Selection::Node {
+        run: t.row.run,
+        logical: t.row.logical,
+    })
 }
 
 pub struct Board {
@@ -912,7 +880,7 @@ impl Board {
     pub fn rows(&self) -> Rows {
         let mut tally = Tally::default();
         for p in &self.runs {
-            tally.absorb(&p.open_tally());
+            tally.absorb(&order::open_work(&p.view).1);
         }
         let carried = self.in_flight_counts();
         let accounts = self
@@ -920,8 +888,7 @@ impl Board {
             .iter()
             .map(|r| {
                 let mut r = r.clone();
-                // `persist::merge_state` zeroes `inflight` in the file, because it is one
-                // process's runtime state: the only honest count is the one the journals show.
+                // The state file zeroes `inflight`; the journals hold the real count.
                 r.inflight = carried.get(&r.account).copied().unwrap_or(0);
                 r
             })
@@ -933,8 +900,7 @@ impl Board {
         }
     }
 
-    /// Tasks and brains on each account over every tailed run. `focus` narrows what a frame
-    /// draws; an account running three nodes in the run `tab` hid is still at three.
+    /// Tasks and brains on each account over every tailed run, whatever the focus.
     fn in_flight_counts(&self) -> BTreeMap<AccountId, usize> {
         let mut counts: BTreeMap<AccountId, usize> = BTreeMap::new();
         for pane in &self.runs {
@@ -1083,7 +1049,10 @@ mod tests {
         assert_eq!(run.brain.as_ref().map(|r| r.short()), Some("9g5fav".into()));
         assert_eq!(run.active.len(), 1);
         assert_eq!(run.active[0].label(), "#1");
-        assert_eq!(run.active[0].full_label(), "#1 9g5f18");
+        assert_eq!(
+            order::dispatch_label(run.active[0].seq, run.active[0].id),
+            "#1 9g5f18"
+        );
         assert_eq!(run.recent.len(), 1, "the rejected dispatch settled");
         assert_eq!(run.recent[0].seq, Some(CallSeq(2)));
         assert_eq!(

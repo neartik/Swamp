@@ -1,18 +1,11 @@
-//! WP6: the keys, the pagers and the loop of `docs/BOARD.md` §4-5.
-//!
-//! The pane state is pure and testable: `on_key` takes a `Board` and returns what the outer
-//! loop has to do, and `lines` turns the two of them into a frame. Only `run_tui` touches a
-//! terminal, and it enters the alternate screen behind `watch::TerminalGuard`, so neither a
-//! panic nor a ctrl+c leaves a wrecked tty. The one thing it changes is a confirmed cancel,
-//! run through `ui::actions` off the loop.
+//! The keys, the pagers and the loop of `docs/BOARD.md` §4-5; only `run_tui` touches a tty.
 
-use crate::dispatch::cancel::dispatch_tasks;
 use crate::ids::{DispatchId, NodeId, RunId};
 use crate::journal::inspect;
 use crate::journal::paths::{self, write_board_pid};
 use crate::model::core::NodeState;
-use crate::ui::actions::{CancelDone, CancelTarget, spawn_cancel};
-use crate::ui::board::model::{Board, DispatchGroup, Rows, Selection, attention, newest_running};
+use crate::ui::actions::{self, CancelDone, CancelTarget, NOTICE_TTL, Notice, spawn_cancel};
+use crate::ui::board::model::{Board, Item, Rows, Selection, attention, newest_running};
 use crate::ui::board::render;
 use crate::ui::board::sources::Sources;
 use crate::ui::chat::theme::{Role, Theme};
@@ -46,9 +39,6 @@ const RAW_LINES: usize = 200;
 /// lines are enormous stops at the cap rather than pulling the whole file into the loop.
 const RAW_CHUNK: u64 = 64 * 1024;
 const RAW_MAX: u64 = 4 * 1024 * 1024;
-
-/// How long a notice stays in place of the hints.
-pub const NOTICE_TTL: StdDuration = StdDuration::from_secs(5);
 
 // ---------------------------------------------------------------- state
 
@@ -96,10 +86,8 @@ pub struct App {
     pub follow: bool,
     pub scroll: usize,
     pub overlay: Option<Pager>,
-    /// `k` asked about this; the next key answers.
     pub confirm: Option<CancelTarget>,
-    /// Shown in place of the hints until it expires.
-    pub notice: Option<(String, Role, Instant)>,
+    pub notice: Option<Notice>,
     pub quit: bool,
 }
 
@@ -125,71 +113,66 @@ impl App {
         }
     }
 
-    /// Per frame: drop a selection the journals no longer carry, then re-pin it: to the
-    /// newest running task under `follow`, to what needs attention until the user moved.
+    /// Per frame: drop what is gone, re-pin under `follow` or until touched, keep it drawn.
     pub fn sync(&mut self, board: &mut Board) {
         board.clamp();
         if self
             .notice
             .as_ref()
-            .is_some_and(|(_, _, until)| *until <= Instant::now())
+            .is_some_and(|n| !n.live(Instant::now()))
         {
             self.notice = None;
         }
-        let rows = self.visible(&board.rows());
+        if self.accounts_only {
+            return;
+        }
+        let rows = board.rows();
+        let shown = self.visible(&rows);
         let pick = if self.follow {
-            newest_running(&rows)
+            newest_running(&shown)
         } else if !self.touched {
-            attention(&rows)
+            attention(&shown)
         } else {
             None
         };
         if let Some(sel) = pick {
             board.selected = sel;
         }
+        self.keep_drawn(board, &rows);
+    }
+
+    /// A selection that is not drawn moves to the nearest header that is.
+    fn keep_drawn(&self, board: &mut Board, rows: &Rows) {
+        if board.selected == Selection::None {
+            return;
+        }
+        let targets = self.targets(rows);
+        let mut sel = board.selected.clone();
+        for _ in 0..2 * (dispatches::MAX_NESTING + 2) {
+            if sel == Selection::None || targets.contains(&sel) {
+                break;
+            }
+            sel = parent(board, &sel);
+        }
+        if !targets.contains(&sel) {
+            sel = targets.first().cloned().unwrap_or_default();
+        }
+        board.selected = sel;
     }
 
     /// `rows` with the viewer's folds applied.
     pub fn visible(&self, rows: &Rows) -> Rows {
-        fn apply(g: &mut DispatchGroup, folds: &BTreeMap<(RunId, DispatchId), bool>) {
-            if let Some(open) = folds.get(&(g.run, g.id)) {
+        let mut out = rows.clone();
+        out.walk_mut(&mut |g| {
+            if let Some(open) = self.folds.get(&(g.run, g.id)) {
                 g.expanded = *open;
             }
-            for t in &mut g.tasks {
-                for sub in &mut t.nested {
-                    apply(sub, folds);
-                }
-            }
-        }
-        let mut out = rows.clone();
-        for run in &mut out.runs {
-            for g in run.active.iter_mut().chain(run.recent.iter_mut()) {
-                apply(g, &self.folds);
-            }
-        }
+        });
         out
     }
 
     /// Every row the cursor can land on, in draw order.
     pub fn targets(&self, rows: &Rows) -> Vec<Selection> {
-        fn walk(g: &DispatchGroup, out: &mut Vec<Selection>) {
-            out.push(Selection::Dispatch {
-                run: g.run,
-                id: g.id,
-            });
-            if !g.expanded {
-                return;
-            }
-            for t in &g.tasks {
-                out.push(Selection::Node {
-                    run: t.row.run,
-                    logical: t.row.logical,
-                });
-                for sub in &t.nested {
-                    walk(sub, out);
-                }
-            }
-        }
         let mut out = Vec::new();
         if !self.accounts_only {
             let shown = self.visible(rows);
@@ -201,7 +184,7 @@ impl App {
                     });
                 }
                 for g in run.active.iter().chain(&run.recent) {
-                    walk(g, &mut out);
+                    g.walk(false, &mut |i| out.push(selection(i)));
                 }
             }
         }
@@ -213,13 +196,12 @@ impl App {
         out
     }
 
-    /// The keys `?` and the hints leave out: cancel, when the board may not cancel.
     pub fn hidden(&self) -> Vec<KeyAction> {
-        if self.actions {
-            Vec::new()
-        } else {
-            vec![KeyAction::Cancel, KeyAction::Confirm, KeyAction::Decline]
-        }
+        hidden_keys(self.actions)
+    }
+
+    fn say(&mut self, text: String, role: Role, ttl: Option<StdDuration>) {
+        self.notice = Some(Notice::new(text, role, ttl));
     }
 
     // ------------------------------------------------------------ keys
@@ -229,12 +211,7 @@ impl App {
             return match keys::action(Surface::Board, &key) {
                 Some(KeyAction::ClearOrQuit | KeyAction::Leave) => self.stop(),
                 Some(KeyAction::Confirm) => {
-                    let label = target_label(board, &target);
-                    self.notice = Some((
-                        format!("cancelling {label}\u{2026}"),
-                        Role::Meta,
-                        Instant::now() + StdDuration::from_secs(3600),
-                    ));
+                    self.notice = Some(Notice::cancelling(&target_label(board, &target)));
                     Action::Cancel(target)
                 }
                 _ => Action::None,
@@ -304,6 +281,10 @@ impl App {
             }
             KeyAction::Back => {
                 self.notice = None;
+                if self.accounts_only {
+                    self.accounts_only = false;
+                    self.scroll = 0;
+                }
                 Action::None
             }
             _ => Action::None,
@@ -374,26 +355,26 @@ impl App {
         Action::None
     }
 
-    /// `!`: the next task that failed, was refused, lost its process or is blocked, and any
-    /// folded dispatch hiding a failure, in draw order and wrapping.
+    /// `!`: the next stuck task or folded dispatch hiding a failure, in draw order, wrapping.
     fn next_stuck(&mut self, board: &mut Board) -> Action {
+        if self.accounts_only {
+            return Action::None;
+        }
         let rows = board.rows();
-        let shown = self.visible(&rows);
-        let stuck: Vec<Selection> = self
-            .targets(&rows)
-            .into_iter()
-            .filter(|t| match t {
-                Selection::Node { run, logical } => shown.task(*run, *logical).is_some_and(|t| {
+        let all = self.targets(&rows);
+        let mut stuck: Vec<Selection> = Vec::new();
+        self.visible(&rows).walk(false, &mut |i| {
+            let hit = match i {
+                Item::Task(t) => {
                     order::rank(&t.row.state) == 0
                         || matches!(t.row.state, NodeState::Blocked { .. })
-                }),
-                Selection::Dispatch { run, id } => shown
-                    .group(*run, *id)
-                    .is_some_and(|g| !g.expanded && g.tally.failed + g.tally.rejected > 0),
-                _ => false,
-            })
-            .collect();
-        let all = self.targets(&rows);
+                }
+                Item::Group(g) => !g.expanded && g.tally.failed + g.tally.rejected > 0,
+            };
+            if hit {
+                stuck.push(selection(i));
+            }
+        });
         let here = all.iter().position(|t| *t == board.selected);
         let next = stuck
             .iter()
@@ -432,8 +413,7 @@ impl App {
         Action::None
     }
 
-    /// `←` folds the selected dispatch, or the one the selected task belongs to, and takes
-    /// the cursor to its header; `→` unfolds it.
+    /// `←` folds the selected dispatch or the selected task's, moving to its header; `→` unfolds.
     fn fold(&mut self, board: &mut Board, collapse: bool) -> Action {
         let rows = board.rows();
         let Some((run, id)) = dispatch_of(&rows, &board.selected) else {
@@ -487,13 +467,7 @@ impl App {
         };
         let mut title = vec![id];
         if let Some(d) = row.as_ref().and_then(|r| r.dispatch) {
-            title.push(dispatch_label(
-                pane.view
-                    .dispatches
-                    .get(&d)
-                    .and_then(|v| v.record.as_ref().and_then(|r| r.call_seq)),
-                d,
-            ));
+            title.push(order::label_in(&pane.view, d));
         }
         title.push(format!("run {}", run.short()));
         self.overlay = Some(pager(
@@ -510,14 +484,9 @@ impl App {
             return;
         };
         let text = dispatches::render_detail(&pane.view, id, false, board.now);
-        let seq = pane
-            .view
-            .dispatches
-            .get(&id)
-            .and_then(|v| v.record.as_ref().and_then(|r| r.call_seq));
         let title = format!(
             "{}{}run {}",
-            dispatch_label(seq, id),
+            order::label_in(&pane.view, id),
             order::SEP,
             run.short()
         );
@@ -538,68 +507,55 @@ impl App {
         ));
     }
 
-    // ------------------------------------------------------------ cancel
-
-    /// `k`: a prompt for a task or a dispatch that has something live, a one-line notice
-    /// for everything else.
+    /// `k`: a prompt for a drawn task or dispatch with something live, else a notice.
     fn ask_cancel(&mut self, board: &Board) {
-        let say = |app: &mut App, text: String| {
-            app.notice = Some((text, Role::Meta, Instant::now() + NOTICE_TTL));
-        };
+        let ttl = Some(NOTICE_TTL);
         if !self.actions {
-            return say(self, "read-only: ui.board_actions = false".to_owned());
+            return self.say(
+                "read-only: ui.board_actions = false".to_owned(),
+                Role::Meta,
+                ttl,
+            );
         }
+        let drawn = self.targets(&board.rows()).contains(&board.selected);
         match board.selected.clone() {
-            Selection::Node { run, logical } => {
+            Selection::Node { run, logical } if drawn => {
                 let Some(pane) = board.pane(run) else { return };
                 if logical == pane.brain {
-                    return say(
-                        self,
-                        format!("the brain stops with swamp cancel {}", run.short()),
-                    );
+                    return self.say(actions::brain_text(run), Role::Meta, ttl);
                 }
                 let Some(row) = pane.node_row(logical) else {
                     return;
                 };
                 if row.state.is_terminal() {
-                    return say(
-                        self,
-                        format!("{} is already {}", row.short(), fmt::state_word(&row.state)),
+                    return self.say(
+                        actions::already_text(&row.short(), &row.state),
+                        Role::Meta,
+                        ttl,
                     );
                 }
                 self.confirm = Some(CancelTarget::Task { run, logical });
             }
-            Selection::Dispatch { run, id } => {
+            Selection::Dispatch { run, id } if drawn => {
                 let target = CancelTarget::Dispatch { run, id };
                 if live_tasks(board, &target) == 0 {
-                    return say(
-                        self,
-                        format!("{} has no live tasks", target_label(board, &target)),
-                    );
+                    let text = format!("{} has no live tasks", target_label(board, &target));
+                    return self.say(text, Role::Meta, ttl);
                 }
                 self.confirm = Some(target);
             }
-            Selection::Account(_) | Selection::None => {
-                say(self, "select a task or dispatch to cancel".to_owned())
-            }
+            _ => self.say(
+                "select a task or dispatch to cancel".to_owned(),
+                Role::Meta,
+                ttl,
+            ),
         }
     }
 
     /// What the spawned cancel reported.
     pub fn cancel_done(&mut self, board: &Board, done: CancelDone) {
         let label = target_label(board, &done.target);
-        self.notice = Some(match done.result {
-            Ok(_) => (
-                format!("cancelled {label}"),
-                Role::Meta,
-                Instant::now() + NOTICE_TTL,
-            ),
-            Err(e) => (
-                format!("cancel {label} failed: {e}"),
-                Role::Err,
-                Instant::now() + NOTICE_TTL,
-            ),
-        });
+        self.notice = Some(Notice::done(&done.target, &label, &done.result));
     }
 
     /// The prompt, a live notice, or the key hints.
@@ -612,10 +568,10 @@ impl App {
                 c,
             );
         }
-        if let Some((text, role, until)) = &self.notice
-            && Instant::now() < *until
+        if let Some(n) = &self.notice
+            && n.live(Instant::now())
         {
-            return render::bottom(text, *role, false, c);
+            return render::bottom(&n.text, n.role, false, c);
         }
         render::hints(c, &self.hidden())
     }
@@ -722,7 +678,49 @@ impl App {
     }
 }
 
-/// `cancel 9g5f04 "rebuild the index"? y / n`, the title cut so the whole line fits.
+/// The keys `?` and the hints leave out when the board may not cancel.
+pub fn hidden_keys(actions: bool) -> Vec<KeyAction> {
+    if actions {
+        Vec::new()
+    } else {
+        vec![KeyAction::Cancel, KeyAction::Confirm, KeyAction::Decline]
+    }
+}
+
+fn selection(i: Item) -> Selection {
+    match i {
+        Item::Group(g) => Selection::Dispatch {
+            run: g.run,
+            id: g.id,
+        },
+        Item::Task(t) => Selection::Node {
+            run: t.row.run,
+            logical: t.row.logical,
+        },
+    }
+}
+
+/// The dispatch header a task sits under, or the task a nested dispatch hangs from.
+fn parent(board: &Board, sel: &Selection) -> Selection {
+    let found = match *sel {
+        Selection::Node { run, logical } => board.pane(run).and_then(|p| {
+            let id = p.view.tasks.get(&logical)?.dispatch;
+            Some(Selection::Dispatch { run, id })
+        }),
+        Selection::Dispatch { run, id } => board.pane(run).and_then(|p| {
+            let caller = p.view.dispatches.get(&id)?.record.as_ref()?.caller;
+            let logical = p
+                .view
+                .attempts(caller)
+                .first()
+                .map_or(caller, |n| n.logical);
+            (logical != p.brain).then_some(Selection::Node { run, logical })
+        }),
+        _ => None,
+    };
+    found.unwrap_or_default()
+}
+
 pub fn prompt(board: &Board, target: &CancelTarget, width: usize) -> String {
     let label = target_label(board, target);
     match target {
@@ -732,9 +730,7 @@ pub fn prompt(board: &Board, target: &CancelTarget, width: usize) -> String {
                 .and_then(|p| p.node_row(*logical))
                 .map(|r| r.title)
                 .unwrap_or_default();
-            let frame = format!("cancel {label} \"\"? y / n");
-            let room = width.saturating_sub(frame.chars().count()).max(1);
-            format!("cancel {label} \"{}\"? y / n", fmt::truncate(&title, room))
+            actions::prompt_text(&label, &title, width)
         }
         CancelTarget::Dispatch { .. } => {
             let n = live_tasks(board, target);
@@ -751,20 +747,9 @@ pub fn target_label(board: &Board, target: &CancelTarget) -> String {
             .pane(run)
             .and_then(|p| p.node_row(logical))
             .map_or_else(|| logical.short(), |r| r.short()),
-        CancelTarget::Dispatch { run, id } => {
-            let seq = board
-                .pane(run)
-                .and_then(|p| p.view.dispatches.get(&id))
-                .and_then(|d| d.record.as_ref().and_then(|r| r.call_seq));
-            dispatch_label(seq, id)
-        }
-    }
-}
-
-fn dispatch_label(seq: Option<crate::ids::CallSeq>, id: DispatchId) -> String {
-    match seq {
-        Some(seq) if id != DispatchId::LEGACY => format!("#{seq} {}", id.short()),
-        _ => inspect::short(id),
+        CancelTarget::Dispatch { run, id } => board
+            .pane(run)
+            .map_or_else(|| inspect::short(id), |p| order::label_in(&p.view, id)),
     }
 }
 
@@ -773,11 +758,8 @@ fn live_tasks(board: &Board, target: &CancelTarget) -> usize {
     let Some(pane) = board.pane(target.run()) else {
         return 0;
     };
-    let tasks = match *target {
-        CancelTarget::Task { logical, .. } => vec![logical],
-        CancelTarget::Dispatch { id, .. } => dispatch_tasks(&pane.view, id),
-    };
-    tasks
+    target
+        .tasks(&pane.view)
         .iter()
         .filter(|t| pane.view.state_of(**t).is_some_and(|s| !s.is_terminal()))
         .count()
@@ -850,8 +832,7 @@ fn animating(board: &Board) -> bool {
 
 // ---------------------------------------------------------------- json
 
-/// `--json`: the frame's own model, each run's dispatches in the shape `swamp dispatches
-/// --json` publishes, and the accounts in the shape `swamp usage --json` publishes.
+/// `--json`: the frame's model, dispatches and accounts in their `--json` shapes.
 pub fn json(b: &Board) -> Value {
     let rows = b.rows();
     let s = b.summary(&rows);
@@ -1037,15 +1018,19 @@ pub async fn run_tui(
             Wake::Key(Some(Ok(Event::Key(k)))) if k.kind == KeyEventKind::Press => {
                 match app.on_key(&mut board, k) {
                     Action::LoadRaw(run) => app.load_raw(&board, run),
-                    Action::Cancel(target) => {
-                        if let Some(pane) = board.pane(target.run()) {
-                            let tasks = match target {
-                                CancelTarget::Task { logical, .. } => vec![logical],
-                                CancelTarget::Dispatch { id, .. } => dispatch_tasks(&pane.view, id),
-                            };
+                    Action::Cancel(target) => match board.pane(target.run()) {
+                        Some(pane) => {
+                            let tasks = target.tasks(&pane.view);
                             spawn_cancel(pane.paths.clone(), target, tasks, grace, tx.clone());
                         }
-                    }
+                        None => {
+                            let gone = CancelDone {
+                                target,
+                                result: Err("run is no longer tailed".to_owned()),
+                            };
+                            app.cancel_done(&board, gone);
+                        }
+                    },
                     Action::None | Action::Quit => {}
                 }
             }

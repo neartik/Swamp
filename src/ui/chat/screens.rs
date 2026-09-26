@@ -652,3 +652,107 @@ fn two_dispatches_never_steal_each_others_nodes() {
     assert_eq!(batches, vec![2, 1], "{batches:?}");
     assert_eq!(workers::MAX_ROWS, 8);
 }
+
+/// `ToolDone` comes over the brain channel before the tail poll brings the dispatch: the call
+/// still binds, and nothing is left behind as a loose `workers` block.
+#[test]
+fn a_call_that_returned_before_its_dispatch_was_read_still_binds() {
+    let mut app = fx::app(100);
+    app.take_welcome();
+    app.reduce(Msg::Brain(BrainEvent::ToolCall {
+        id: "d1".into(),
+        name: "mcp__swamp__swamp_dispatch".into(),
+        preview: r#"{"tasks":[{},{},{},{},{}],"wait":false}"#.into(),
+    }));
+    app.reduce(Msg::Brain(BrainEvent::ToolDone {
+        id: "d1".into(),
+        name: "swamp_dispatch".into(),
+        ok: true,
+        detail: None,
+    }));
+    app.reduce(Msg::Journal(p4_split().0));
+    let bound: Vec<(bool, Option<crate::ids::DispatchId>)> = app
+        .blocks
+        .iter()
+        .filter_map(|b| match b {
+            crate::ui::chat::blocks::Block::Dispatch(batch) => Some((batch.loose, batch.dispatch)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(bound, vec![(false, Some(fx::did("18")))]);
+
+    app.reduce(Msg::Brain(BrainEvent::ToolCall {
+        id: "d2".into(),
+        name: "swamp_dispatch".into(),
+        preview: r#"{"tasks":[{}]}"#.into(),
+    }));
+    app.reduce(Msg::Brain(BrainEvent::ToolDone {
+        id: "d2".into(),
+        name: "swamp_dispatch".into(),
+        ok: true,
+        detail: None,
+    }));
+    let text = committed(app.reduce(Msg::Journal(p4_split().1)), 100);
+    assert!(text.contains("swamp_dispatch("), "{text}");
+    assert!(!text.contains("workers"), "{text}");
+    assert!(text.contains("(swamp dispatch 9g5f1c)"), "{text}");
+    assert_eq!(
+        app.blocks
+            .iter()
+            .filter(|b| matches!(b, crate::ui::chat::blocks::Block::Dispatch(_)))
+            .count(),
+        1,
+        "#1 is still open"
+    );
+}
+
+/// A call refused before it issued anything commits, and never takes the next dispatch.
+#[test]
+fn a_failed_dispatch_call_neither_lingers_nor_steals() {
+    let mut app = fx::app(100);
+    app.take_welcome();
+    app.reduce(Msg::Brain(BrainEvent::ToolCall {
+        id: "bad".into(),
+        name: "swamp_dispatch".into(),
+        preview: r#"{"tasks":[]}"#.into(),
+    }));
+    let out = app.reduce(Msg::Brain(BrainEvent::ToolDone {
+        id: "bad".into(),
+        name: "swamp_dispatch".into(),
+        ok: false,
+        detail: None,
+    }));
+    assert!(!committed(out, 100).is_empty(), "the failed call commits");
+    app.reduce(Msg::Brain(BrainEvent::ToolCall {
+        id: "d1".into(),
+        name: "swamp_dispatch".into(),
+        preview: r#"{"tasks":[{},{},{},{},{}]}"#.into(),
+    }));
+    app.reduce(Msg::Journal(p4_split().0));
+    let tools: Vec<String> = app
+        .blocks
+        .iter()
+        .filter_map(|b| match b {
+            crate::ui::chat::blocks::Block::Dispatch(batch) if batch.dispatch.is_some() => {
+                Some(batch.tool_id.clone())
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(tools, vec!["d1".to_owned()]);
+}
+
+/// The zones never touch: at least two spaces between them, whatever the width.
+#[test]
+fn the_status_zones_keep_their_gap() {
+    let mut app = p4_live(100);
+    app.pending_send = Some("and the docs".into());
+    for w in 30u16..=100 {
+        app.set_width(w);
+        let line = screen(vec![app.status_line()], w);
+        assert!(
+            !line.contains("shortcuts1") && !line.contains("shortcuts 1"),
+            "{w}: {line:?}"
+        );
+    }
+}

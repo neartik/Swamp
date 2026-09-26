@@ -1,5 +1,5 @@
 use crate::ids::{CallSeq, DispatchId, NodeId};
-use crate::journal::fold::RunView;
+use crate::journal::fold::{RunView, Scope};
 use crate::journal::inspect::{self, Rollup, TaskDetail};
 use crate::model::core::{NodeState, Tier};
 use crate::model::dispatch::DispatchState;
@@ -12,6 +12,7 @@ use ratatui::text::{Line, Span};
 use std::collections::BTreeSet;
 use std::time::Duration;
 use time::OffsetDateTime;
+use unicode_width::UnicodeWidthStr;
 
 /// Where a board row starts: two spaces, the connector, two spaces.
 pub const BODY: u16 = 5;
@@ -51,20 +52,12 @@ impl WorkerRow {
         self.state.is_terminal()
     }
 
-    /// `9g5f09·2` for a retry.
     pub fn short(&self) -> String {
-        if self.attempt > 1 {
-            format!("{}\u{b7}{}", self.id.short(), self.attempt)
-        } else {
-            self.id.short()
-        }
+        fmt::attempt_id(self.id, self.attempt)
     }
 }
 
-/// One `swamp_dispatch` call and the tasks it owns. Bound to its `DispatchId` once the fold
-/// has one; before that, and for a schema-1 run, it owns the brain's children as they appear.
-/// A batch with no call behind it is `loose`: a retry, a resumed node, a dispatch the call
-/// was never seen for.
+/// One `swamp_dispatch` call, bound to its dispatch once the fold has one; `loose` without a call.
 #[derive(Debug, Clone)]
 pub struct Batch {
     pub tool_id: String,
@@ -144,31 +137,31 @@ impl Batch {
                 .filter_map(|logical| row(view, *logical, now))
                 .collect(),
         };
-        let mut ranked: Vec<(usize, WorkerRow)> = rows.into_iter().enumerate().collect();
-        ranked.sort_by_key(|(i, r)| (order::rank(&r.state), *i));
-        self.rows = ranked.into_iter().map(|(_, r)| r).collect();
-        // A batch is at least as old as its oldest task: a resumed run has tasks that started
-        // before this process ever opened the board.
+        self.rows = order::ranked(rows, |r: &WorkerRow| &r.state);
+        // A resumed run has tasks older than this process.
         let oldest = self.rows.iter().filter_map(|r| r.elapsed).max();
         let since: Duration = (now - self.started).try_into().unwrap_or(Duration::ZERO);
         self.elapsed = oldest.unwrap_or(Duration::ZERO).max(since);
     }
 
-    /// Committed only when the call is done and its dispatch settled, or, with no dispatch
-    /// behind it, every owned task is terminal.
+    /// The call returned and its work ended, or it failed before issuing any.
     pub fn done(&self) -> bool {
         if self.dispatch.is_some() {
             return self.closed && self.settled;
         }
+        if self.closed && self.ok == Some(false) && self.owned.is_empty() {
+            return true;
+        }
         self.closed && !self.rows.is_empty() && self.rows.iter().all(WorkerRow::terminal)
     }
 
+    /// A call a fresh dispatch may still bind to.
+    pub fn unbound(&self) -> bool {
+        !self.loose && self.dispatch.is_none() && self.owned.is_empty() && self.ok != Some(false)
+    }
+
     pub fn tally(&self) -> Tally {
-        let mut t = Tally::default();
-        for r in &self.rows {
-            t.add(&r.state);
-        }
-        t
+        Tally::of(self.rows.iter().map(|r| &r.state))
     }
 
     /// Running or leased tasks, what the working line and `esc` count.
@@ -179,8 +172,7 @@ impl Batch {
     /// The dispatch's rollup, or the rows' own costs summed.
     fn cost(&self) -> String {
         if let Some(r) = &self.rollup {
-            let cost = dispatches::cost(r);
-            return if cost == "-" { String::new() } else { cost };
+            return dispatches::cost_cell(r);
         }
         let mut usd = 0.0;
         let mut complete = true;
@@ -193,18 +185,10 @@ impl Batch {
         format!("~${usd:.2}{}", if complete { "" } else { "+" })
     }
 
-    /// `#1 9g5f18`, or the short id without a call number.
     fn label(&self) -> Vec<Cell> {
-        let Some(id) = self.dispatch else {
-            return Vec::new();
-        };
-        match self.seq {
-            Some(seq) => vec![
-                Cell::new("label", format!("#{seq}"), Role::Name),
-                Cell::new("id", id.short(), Role::Meta).joined(),
-            ],
-            None => vec![Cell::new("label", id.short(), Role::Name)],
-        }
+        self.dispatch
+            .map(|id| order::label_cells(self.seq, id, Role::Name))
+            .unwrap_or_default()
     }
 
     pub fn render(&self, width: u16, t: &Theme, tick: u64, committed: bool) -> Vec<Line<'static>> {
@@ -372,24 +356,24 @@ impl Batch {
     /// `1 task · 1 rejected · 0s   (swamp dispatch 9g5f1c)`
     fn totals(&self, width: u16, t: &Theme) -> Line<'static> {
         let tally = self.tally();
-        let mut parts = vec![dispatches::tasks_word(tally.total() as u32)];
-        let phrase = order::text(&tally.cells());
-        if !phrase.is_empty() {
-            parts.push(phrase);
-        }
-        parts.push(fmt::duration(self.elapsed));
+        let mut cells = vec![Cell::new(
+            "tasks",
+            dispatches::tasks_word(tally.total() as u32),
+            Role::Meta,
+        )];
+        cells.extend(tally.cells().into_iter().map(|c| Cell {
+            role: Role::Meta,
+            ..c
+        }));
+        cells.push(Cell::new(
+            "elapsed",
+            fmt::duration(self.elapsed),
+            Role::Meta,
+        ));
         let cost = self.cost();
         if !cost.is_empty() {
-            parts.push(cost);
+            cells.push(Cell::new("cost", cost, Role::Meta));
         }
-        let text = parts.join(SEP);
-        let mut spans = vec![
-            Span::raw("     "),
-            t.span(
-                fmt::truncate(&text, width.saturating_sub(BODY) as usize),
-                Role::Meta,
-            ),
-        ];
         // The one string in the block meant to be copied.
         let copy = match self.rows.iter().find(|r| r.branch.is_some()) {
             Some(adopt) => Some(format!("swamp adopt {}", adopt.id.short())),
@@ -397,9 +381,20 @@ impl Batch {
                 .dispatch
                 .map(|id| format!("swamp dispatch {}", id.short())),
             None => None,
-        };
+        }
+        .map(|c| format!("   ({c})"));
+        let body = (width as usize).saturating_sub(BODY as usize);
+        let copy_w = copy.as_deref().map_or(0, str::width);
+        let cells = order::fit(
+            cells,
+            body.saturating_sub(copy_w),
+            &[Drop::Tail, Drop::Key("cost")],
+        );
+        let copy = copy.filter(|_| order::width(&cells) + copy_w <= body);
+        let mut spans = vec![Span::raw(" ".repeat(BODY as usize))];
+        spans.extend(order::spans(&cells, t, body));
         if let Some(copy) = copy {
-            spans.push(t.span(format!("   ({copy})"), Role::Accent));
+            spans.push(t.span(copy, Role::Accent));
         }
         Line::from(spans)
     }
@@ -445,26 +440,23 @@ fn task_row(
 ) -> WorkerRow {
     let latest = t.attempts.last();
     let rec = latest.and_then(|a| view.nodes.get(&a.node));
-    let elapsed = match latest {
-        Some(a) if a.started_at.is_some() => a.elapsed_ms.map(Duration::from_millis),
-        _ if t.detail.is_terminal() => None,
-        _ => at.and_then(|at| (now - at).try_into().ok()),
-    };
-    let cost = dispatches::cost(&t.cost);
+    let elapsed = order::elapsed(
+        latest.and_then(|a| a.started_at),
+        latest.and_then(|a| a.ended_at),
+        t.detail.is_terminal(),
+        rec.map(|r| r.created_at).or(at),
+        now,
+    );
+    let spend: Rollup = view.rollup(Scope::Task(t.node)).into();
     let mut notes: Vec<(String, Role)> =
         order::attempt_lines(&t.attempts[..t.attempts.len().saturating_sub(1)])
             .into_iter()
             .map(|l| (l, Role::Meta))
             .collect();
     if let Some(b) = &t.blocked {
-        let secs = (b.until - now).whole_seconds().max(0) as u64;
-        let mut line = format!(
-            "until {} (in {})",
-            fmt::clock_day(b.until, now),
-            fmt::until(Duration::from_secs(secs))
-        );
+        let mut line = fmt::until_at(b.until, now);
         for r in &b.ineligible {
-            let word = usage::ineligible_text(r.reason, None, false, now);
+            let word = usage::ineligible_text(r.reason, None, now);
             line.push_str(&format!("{SEP}{} {word}", r.account.0));
         }
         notes.push((line, Role::Meta));
@@ -487,8 +479,8 @@ fn task_row(
         account: rec.map(account_cell).unwrap_or_default(),
         state: t.detail.clone(),
         elapsed,
-        cost: if cost == "-" { String::new() } else { cost },
-        usd: Some(t.cost.usd),
+        cost: dispatches::cost_cell(&spend),
+        usd: Some(spend.usd),
         notes,
         branch: rec.and_then(branch_line),
     }

@@ -11,7 +11,7 @@ swamp board   2 running · 1 stuck · ~$0.43 · observed 4s ago
 ▌     ▾ #3 9g5f1k · by 9g5f01 · 2 queued       1m02s
         · 9g5f1m   split the handler           1m02s
         · 9g5f1n   write the tests             1m02s
-    ⠙ 9g5f09·2 backfill the users i… alt       2m48s  ~$0.21
+    ⠙ 9g5f09·2 backfill the users i… alt       2m48s  ~$0.22
     ⏸ 9g5f04   rebuild the index               3m20s
       until 22:54 · main at capacity · alt quota stop
     · 9g5f0a   write the changelog             3m20s

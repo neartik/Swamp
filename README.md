@@ -230,7 +230,7 @@ exists: `k` cancels on the board and in `swamp watch`, `r` is the raw view, `?` 
 | `swamp trace [RUN\|last\|-2]` | Render a run tree: nodes, attempts, accounts, failures, cost. `--events`, `--raw`, `--follow`, `--failed`, `--json`, `--dispatch <ID>` for one dispatch, `--group-by dispatch` for one section per dispatch. |
 | `swamp dispatches [RUN\|last]` | One row per dispatch of a run: call seq, age, tasks, per-state counts, cost, caller. `--failed`, `--follow`, `--json`. |
 | `swamp dispatch <ID>` | One dispatch's task tree: attempts, accounts, models, why a task is blocked or was rejected, and what it dispatched in turn. `--json`; the shape is in [docs/DISPATCH.md](docs/DISPATCH.md). |
-| `swamp watch [RUN\|last]` | Live read-only TUI. Attach from a second terminal while a run is going. |
+| `swamp watch [RUN\|last]` | Live TUI; `k` cancels the selected node after a y / n. Attach from a second terminal while a run is going. |
 | `swamp board` | Dispatch board: every live run's dispatches, their tasks ranked stuck first, why a task is blocked and why its account won, and the account strip. Read-only except a confirmed cancel (`k`, then `y`; off with `ui.board_actions = false`). `--run`, `--all`, `--interval`, `--once`, `--json`. Meant to sit in a tmux pane beside `swamp chat`. |
 | `swamp doctor` | Health checks. `--probe` calls each account's CLI, `--schema` reports adapter drift, `--reap` removes stale worktrees and pidfiles, and sweeps `~/.swamp/sock` for sockets no process is listening on, `--fix` creates the directories and the git exclude. Exit 1 on any error, so CI can gate on it. |
 | `swamp chat` | Interactive brain session. |

@@ -187,6 +187,25 @@ pub fn clock_day(at: OffsetDateTime, now: OffsetDateTime) -> String {
     format!("{} on {}", clock_hm(at), at.date())
 }
 
+/// `until 22:54 (in 38m)`.
+pub fn until_at(until: OffsetDateTime, now: OffsetDateTime) -> String {
+    let secs = (until - now).whole_seconds().max(0) as u64;
+    format!(
+        "until {} (in {})",
+        clock_day(until, now),
+        self::until(Duration::from_secs(secs))
+    )
+}
+
+/// `9g5f09·2` for a retry, the plain short id otherwise.
+pub fn attempt_id(id: crate::ids::NodeId, attempt: u32) -> String {
+    if attempt > 1 {
+        format!("{}\u{b7}{attempt}", id.short())
+    } else {
+        id.short()
+    }
+}
+
 /// The one line a node blocked on an exhausted pool gets. `cancel` is the only part chat and
 /// `swamp run` disagree on, so the wording cannot drift between them.
 pub fn blocked_notice(

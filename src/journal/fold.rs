@@ -96,6 +96,10 @@ impl DispatchView {
         }
     }
 
+    pub fn call_seq(&self) -> Option<CallSeq> {
+        self.record.as_ref().and_then(|r| r.call_seq)
+    }
+
     fn add(&mut self, logical: NodeId) {
         if !self.tasks.contains(&logical) {
             self.tasks.push(logical);

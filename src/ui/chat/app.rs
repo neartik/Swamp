@@ -1,18 +1,18 @@
 use crate::brain::BrainEvent;
 use crate::config::schema::AccountCfg;
 use crate::dispatch::account::AccountState;
-use crate::ids::{CallSeq, DispatchId, NodeId, RunId};
-use crate::journal::fold::RunView;
+use crate::ids::{DispatchId, NodeId, RunId};
+use crate::journal::fold::{DispatchView, RunView};
+use crate::journal::inspect;
 use crate::journal::record::{JournalEvent, JournalLine};
 use crate::model::core::{AccountId, NodeState, Provider, Tier};
-use crate::model::dispatch::DispatchState;
 use crate::ui::chat::blocks::{Block, Ctx, ToolState, WelcomeInfo, bullet_first, tool_args};
 use crate::ui::chat::input::{Editor, History};
 use crate::ui::chat::markdown::MdStream;
 use crate::ui::chat::theme::{Glyph, Role, Theme};
 use crate::ui::chat::workers::{Batch, brain_children, expected_tasks};
 use crate::ui::chat::{slash, spinner};
-use crate::ui::order::{self, Cell, Drop, Tally};
+use crate::ui::order::{self, Cell, Drop};
 use crate::ui::{dispatches, fmt, trace, watch};
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::text::Line;
@@ -501,32 +501,25 @@ impl App {
             .map_or(Provider::Anthropic, |a| a.provider)
     }
 
-    /// Every dispatch the brain issued binds to the newest open `swamp_dispatch` block, or
-    /// to a block of its own when no call is waiting for one. Any other brain child (a
-    /// schema-1 run) joins the open batch, else the loose one. Dispatch calls from one brain
-    /// are serial, so this is exact.
+    /// Brain calls are serial: the i-th fresh dispatch binds to the i-th unbound call block.
     fn admit(&mut self) {
-        let mut fresh_dispatches: Vec<(Option<CallSeq>, OffsetDateTime, DispatchId)> = self
+        let mut fresh_dispatches: Vec<&DispatchView> = self
             .view
             .dispatches
             .values()
             .filter(|d| d.id != DispatchId::LEGACY && !self.bound.contains(&d.id))
-            .filter_map(|d| {
-                let r = d.record.as_ref()?;
-                let brain = r.caller == self.brain
-                    || crate::journal::inspect::caller(&self.view, r.caller).kind == "brain";
-                brain.then_some((r.call_seq, r.at, d.id))
+            .filter(|d| {
+                d.record
+                    .as_ref()
+                    .is_some_and(|r| inspect::is_brain_caller(&self.view, r.caller))
             })
             .collect();
-        fresh_dispatches.sort();
-        for (_, _, id) in fresh_dispatches {
+        fresh_dispatches.sort_by_key(|d| inspect::dispatch_key(d));
+        let fresh_dispatches: Vec<DispatchId> = fresh_dispatches.iter().map(|d| d.id).collect();
+        for id in fresh_dispatches {
             self.bound.insert(id);
-            let open = self.blocks.iter_mut().rev().find_map(|b| match b {
-                Block::Dispatch(batch)
-                    if !batch.closed && !batch.loose && batch.dispatch.is_none() =>
-                {
-                    Some(batch)
-                }
+            let open = self.blocks.iter_mut().find_map(|b| match b {
+                Block::Dispatch(batch) if batch.unbound() => Some(batch),
                 _ => None,
             });
             match open {
@@ -1331,31 +1324,7 @@ impl App {
         ]))
     }
 
-    /// Open dispatches of this run, the legacy bucket excluded, and every task of every open
-    /// dispatch, the legacy bucket included: the board header's own definitions.
-    fn open_work(&self) -> (usize, Tally) {
-        let mut tally = Tally::default();
-        let mut open = 0;
-        for d in self
-            .view
-            .dispatches
-            .values()
-            .filter(|d| d.state == DispatchState::Open)
-        {
-            if d.id != DispatchId::LEGACY {
-                open += 1;
-            }
-            for t in &d.tasks {
-                if let Some(s) = self.view.state_of(*t) {
-                    tally.add(&s);
-                }
-            }
-        }
-        (open, tally)
-    }
-
-    /// Three zones on one row. While work is open the right zone counts it; the centre goes
-    /// first when the terminal narrows, then the optional counts, then the left zone.
+    /// Three zones on one row; the centre goes first as it narrows, then counts, then the left.
     pub fn status_line(&self) -> Line<'static> {
         let t = &self.theme;
         let width = self.width as usize;
@@ -1368,7 +1337,7 @@ impl App {
         }
         let centre = format!("{} dispatch {}", t.g(Glyph::Mode), self.tier);
         let total = self.cost_usd + self.view.cost_usd;
-        let (open, tally) = self.open_work();
+        let (open, tally) = order::open_work(&self.view);
         let pending = self.pending_send.is_some();
         let mut cells: Vec<Cell> = Vec::new();
         let drops: &[Drop] = if open > 0 || tally.live() > 0 {
@@ -1383,26 +1352,7 @@ impl App {
                     Role::Meta,
                 ));
             }
-            cells.push(Cell::new(
-                "running",
-                format!("{} running", tally.running),
-                Role::Meta,
-            ));
-            if tally.stuck() > 0 {
-                cells.push(Cell::new(
-                    "stuck",
-                    format!("{} stuck", tally.stuck()),
-                    Role::Err,
-                ));
-            }
-            if tally.queued > 0 {
-                cells.push(Cell::new(
-                    "queued",
-                    format!("{} queued", tally.queued),
-                    Role::Meta,
-                ));
-            }
-            cells.push(Cell::new("cost", format!("~${total:.2}"), Role::Meta));
+            cells.extend(tally.summary_cells(total, self.view.cost_complete));
             &[
                 Drop::Key("dispatches"),
                 Drop::Key("queued"),
@@ -1439,11 +1389,10 @@ impl App {
             }
             &[Drop::Key("cost"), Drop::Key("state")]
         };
-        // Display width throughout: the popup hint and the separators are multi-byte, so
-        // byte lengths would drop or misplace the centre segment.
-        let cells = order::fit(cells, width.saturating_sub(left.width() + 2), drops);
+        // Display widths; two columns of gap between the zones, two of trailing margin.
+        let cells = order::fit(cells, width.saturating_sub(left.width() + 2 + 2), drops);
         let rw = order::width(&cells);
-        if left.width() + rw + 2 > width {
+        if left.width() + 2 + rw + 2 > width {
             left.clear();
         }
         let (lw, cw) = (left.width(), centre.width());

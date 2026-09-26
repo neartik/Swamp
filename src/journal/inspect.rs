@@ -367,6 +367,23 @@ pub fn caller(view: &RunView, node: NodeId) -> Caller {
     }
 }
 
+/// Whether a dispatch's caller is the run's brain rather than a task.
+pub fn is_brain_caller(view: &RunView, caller: NodeId) -> bool {
+    self::caller(view, caller).kind == "brain"
+}
+
+/// Stable dispatch order: by call, then by when it was issued; no call, then legacy, last.
+pub fn dispatch_key(d: &DispatchView) -> (bool, bool, Option<CallSeq>, OffsetDateTime, DispatchId) {
+    let r = d.record.as_ref();
+    (
+        d.id == DispatchId::LEGACY,
+        r.and_then(|r| r.call_seq).is_none(),
+        r.and_then(|r| r.call_seq),
+        r.map_or(OffsetDateTime::UNIX_EPOCH, |r| r.at),
+        d.id,
+    )
+}
+
 pub fn attempt(n: &NodeRecord, now: OffsetDateTime) -> AttemptDetail {
     let (pid, pgid) = process(Some(n));
     AttemptDetail {

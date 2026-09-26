@@ -471,15 +471,9 @@ fn cost_cell(usd: f64) -> String {
     format!("~${}", fmt::tokens(usd.round() as u64))
 }
 
-/// Why the pool would pass over an account. With `numbers` and a row it carries the figures
-/// that tripped the gate: `at capacity (2/2)`, `quota stop (93%)`, `cooling until 23:20`.
-pub fn ineligible_text(
-    g: Ineligible,
-    row: Option<&AccountRow>,
-    numbers: bool,
-    now: OffsetDateTime,
-) -> String {
-    let Some(r) = row.filter(|_| numbers) else {
+/// Why the pool passes over an account; with a row, its figures: `at capacity (2/2)`.
+pub fn ineligible_text(g: Ineligible, row: Option<&AccountRow>, now: OffsetDateTime) -> String {
+    let Some(r) = row else {
         return g.word().to_owned();
     };
     match g {

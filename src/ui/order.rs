@@ -1,11 +1,15 @@
 //! Task ranking, per-state tallies and the cell fitting shared by the board and chat.
 
-use crate::journal::inspect::AttemptDetail;
+use crate::ids::{CallSeq, DispatchId};
+use crate::journal::fold::RunView;
+use crate::journal::inspect::{self, AttemptDetail};
 use crate::model::core::NodeState;
+use crate::model::dispatch::DispatchState;
 use crate::ui::chat::theme::{Role, Theme};
 use crate::ui::{fmt, trace};
 use ratatui::text::Span;
 use std::time::Duration;
+use time::OffsetDateTime;
 use unicode_width::UnicodeWidthStr;
 
 pub const SEP: &str = " \u{b7} ";
@@ -19,6 +23,69 @@ pub fn rank(s: &NodeState) -> u8 {
         NodeState::Queued => 3,
         NodeState::Succeeded | NodeState::Cancelled { .. } => 4,
     }
+}
+
+/// A stable sort on rank: failures first, finished last, ties in the order given.
+pub fn ranked<T>(mut items: Vec<T>, state: impl Fn(&T) -> &NodeState) -> Vec<T> {
+    items.sort_by_key(|t| rank(state(t)));
+    items
+}
+
+/// Time on the account once started, the wait before that, none if it ended unstarted.
+pub fn elapsed(
+    started: Option<OffsetDateTime>,
+    ended: Option<OffsetDateTime>,
+    terminal: bool,
+    waiting_since: Option<OffsetDateTime>,
+    now: OffsetDateTime,
+) -> Option<Duration> {
+    match started {
+        Some(from) => (ended.unwrap_or(now) - from).try_into().ok(),
+        None if terminal => None,
+        None => (now - waiting_since?).try_into().ok(),
+    }
+}
+
+/// Open dispatches bar the legacy bucket, and every task of every open dispatch.
+pub fn open_work(view: &RunView) -> (usize, Tally) {
+    let mut tally = Tally::default();
+    let mut open = 0;
+    for d in view
+        .dispatches
+        .values()
+        .filter(|d| d.state == DispatchState::Open)
+    {
+        if d.id != DispatchId::LEGACY {
+            open += 1;
+        }
+        for t in &d.tasks {
+            if let Some(s) = view.state_of(*t) {
+                tally.add(&s);
+            }
+        }
+    }
+    (open, tally)
+}
+
+/// `#1` and the short id joined to it, the short id alone without a call, or `legacy`.
+pub fn label_cells(seq: Option<CallSeq>, id: DispatchId, role: Role) -> Vec<Cell> {
+    match seq {
+        Some(seq) if id != DispatchId::LEGACY => vec![
+            Cell::new("label", format!("#{seq}"), role),
+            Cell::new("id", id.short(), Role::Meta).joined(),
+        ],
+        _ => vec![Cell::new("label", inspect::short(id), role)],
+    }
+}
+
+/// `#1 9g5f18`, as `label_cells` spells it.
+pub fn dispatch_label(seq: Option<CallSeq>, id: DispatchId) -> String {
+    text(&label_cells(seq, id, Role::Meta))
+}
+
+/// `dispatch_label` for a dispatch of `view`.
+pub fn label_in(view: &RunView, id: DispatchId) -> String {
+    dispatch_label(view.dispatches.get(&id).and_then(|d| d.call_seq()), id)
 }
 
 /// Tasks by state, in rank order. Running counts leased tasks too.
@@ -49,6 +116,14 @@ impl Tally {
         *n += 1;
     }
 
+    pub fn of<'a>(states: impl IntoIterator<Item = &'a NodeState>) -> Tally {
+        let mut t = Tally::default();
+        for s in states {
+            t.add(s);
+        }
+        t
+    }
+
     pub fn absorb(&mut self, o: &Tally) {
         self.failed += o.failed;
         self.rejected += o.rejected;
@@ -73,26 +148,67 @@ impl Tally {
         self.live() + self.failed + self.rejected + self.done + self.cancelled
     }
 
+    fn counts(&self) -> [usize; 8] {
+        [
+            self.failed,
+            self.rejected,
+            self.orphaned,
+            self.running,
+            self.blocked,
+            self.queued,
+            self.done,
+            self.cancelled,
+        ]
+    }
+
     /// The non-zero counts, in rank order.
     pub fn cells(&self) -> Vec<Cell> {
-        [
-            ("failed", self.failed, Role::Err),
-            ("rejected", self.rejected, Role::Err),
-            ("orphaned", self.orphaned, Role::Err),
-            ("running", self.running, Role::Meta),
-            ("blocked", self.blocked, Role::Err),
-            ("queued", self.queued, Role::Meta),
-            ("done", self.done, Role::Meta),
-            ("cancelled", self.cancelled, Role::Meta),
-        ]
-        .into_iter()
-        .filter(|(_, n, _)| *n > 0)
-        .map(|(key, n, role)| Cell::new(key, format!("{n} {key}"), role))
-        .collect()
+        const ROLES: [Role; 8] = [
+            Role::Err,
+            Role::Err,
+            Role::Err,
+            Role::Meta,
+            Role::Err,
+            Role::Meta,
+            Role::Meta,
+            Role::Meta,
+        ];
+        KEYS.into_iter()
+            .zip(self.counts())
+            .zip(ROLES)
+            .filter(|((_, n), _)| *n > 0)
+            .map(|((key, n), role)| Cell::new(key, format!("{n} {key}"), role))
+            .collect()
+    }
+
+    /// `2 running · 1 stuck · 1 queued · ~$0.43`, as the board header and chat status count.
+    pub fn summary_cells(&self, usd: f64, complete: bool) -> Vec<Cell> {
+        let mut cells = vec![Cell::new(
+            "running",
+            format!("{} running", self.running),
+            Role::Meta,
+        )];
+        if self.stuck() > 0 {
+            cells.push(Cell::new(
+                "stuck",
+                format!("{} stuck", self.stuck()),
+                Role::Err,
+            ));
+        }
+        if self.queued > 0 {
+            cells.push(Cell::new(
+                "queued",
+                format!("{} queued", self.queued),
+                Role::Meta,
+            ));
+        }
+        let plus = if complete { "" } else { "+" };
+        cells.push(Cell::new("cost", format!("~${usd:.2}{plus}"), Role::Meta));
+        cells
     }
 }
 
-const COUNTS: [&str; 8] = [
+const KEYS: [&str; 8] = [
     "failed",
     "rejected",
     "orphaned",
@@ -146,8 +262,7 @@ pub fn width(cells: &[Cell]) -> usize {
         .sum()
 }
 
-/// Drops cells in `order` until the line fits `room`; what still does not fit is truncated
-/// when it is drawn.
+/// Drops cells in `order` until the line fits `room`; `spans` cuts whatever still overflows.
 pub fn fit(mut cells: Vec<Cell>, room: usize, order: &[Drop]) -> Vec<Cell> {
     for d in order {
         if width(&cells) <= room {
@@ -161,10 +276,10 @@ pub fn fit(mut cells: Vec<Cell>, room: usize, order: &[Drop]) -> Vec<Cell> {
             }
             Drop::Tail => {
                 while width(&cells) > room {
-                    let Some(i) = cells.iter().rposition(|c| COUNTS.contains(&c.key)) else {
+                    let Some(i) = cells.iter().rposition(|c| KEYS.contains(&c.key)) else {
                         break;
                     };
-                    if !matches!(cells[i].key, "queued" | "done" | "cancelled") {
+                    if !KEYS[5..].contains(&cells[i].key) {
                         break;
                     }
                     cells.remove(i);
@@ -208,8 +323,7 @@ pub fn spans(cells: &[Cell], t: &Theme, room: usize) -> Vec<Span<'static>> {
     out
 }
 
-/// `attempt 1 9g5f08 on main: rate_limited (five_hour) after 41s`, one per earlier attempt,
-/// or one summary line once there are more than two.
+/// `attempt 1 9g5f08 on main: rate_limited (five_hour) after 41s`, summarised past two.
 pub fn attempt_lines(prior: &[AttemptDetail]) -> Vec<String> {
     let line = |a: &AttemptDetail| {
         let why = match &a.failure {

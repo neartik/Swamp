@@ -7,7 +7,8 @@ use crate::journal::reader::Tailer;
 use crate::journal::record::JournalLine;
 use crate::model::core::{AccountId, NodeState};
 use crate::model::node::NodeRecord;
-use crate::ui::actions::{CancelDone, CancelTarget, spawn_cancel};
+use crate::ui::actions::{self, CancelDone, CancelTarget, NOTICE_TTL, Notice, spawn_cancel};
+use crate::ui::chat::theme::Role;
 use crate::ui::fmt;
 use crate::ui::keys::{self, KeyAction, Surface};
 use crate::ui::trace;
@@ -26,7 +27,6 @@ use time::OffsetDateTime;
 const TAIL_LINES: usize = 200;
 const TREE_WIDTH: u16 = 46;
 const REFRESH_HZ: u16 = 20;
-const NOTICE_TTL: Duration = Duration::from_secs(5);
 
 /// What a keypress asks the outer loop to do. The pane state itself stays pure.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -51,11 +51,9 @@ pub struct App {
     pub raw_lines: Vec<String>,
     pub tail_lines: usize,
     pub tree_width: u16,
-    /// `k` asked about this task; the next key answers.
     pub confirm: Option<NodeId>,
-    /// `?`: the key list in the node pane until `esc`.
     pub keys: bool,
-    pub notice: Option<(String, Instant)>,
+    pub notice: Option<Notice>,
     /// Set by the TUI; without it a dead node would render as running forever.
     paths: Option<RunPaths>,
 }
@@ -213,33 +211,23 @@ impl App {
         };
         let (logical, state) = (row.logical, row.state.clone());
         if crate::dispatch::cancel::is_brain(&self.view, logical) {
-            self.note(format!(
-                "the brain stops with swamp cancel {}",
-                self.run.short()
-            ));
+            self.note(actions::brain_text(self.run));
         } else if state.is_terminal() {
-            self.note(format!(
-                "{} is already {}",
-                logical.short(),
-                fmt::state_word(&state)
-            ));
+            self.note(actions::already_text(&logical.short(), &state));
         } else {
             self.confirm = Some(logical);
         }
     }
 
     pub fn note(&mut self, text: String) {
-        self.notice = Some((text, Instant::now()));
+        self.notice = Some(Notice::new(text, Role::Meta, Some(NOTICE_TTL)));
     }
 
     pub fn cancel_done(&mut self, done: CancelDone) {
         let CancelTarget::Task { logical, .. } = done.target else {
             return;
         };
-        self.note(match done.result {
-            Ok(_) => format!("cancelled {}", logical.short()),
-            Err(e) => format!("cancel {} failed: {e}", logical.short()),
-        });
+        self.notice = Some(Notice::done(&done.target, &logical.short(), &done.result));
     }
 
     /// The footer's first line: the prompt, a fresh notice, or the totals and key hints.
@@ -252,16 +240,12 @@ impl App {
                 .map(|t| t.title.clone())
                 .or_else(|| self.selected_node().map(|n| n.title.clone()))
                 .unwrap_or_default();
-            return format!(
-                "cancel {} \"{}\"? y / n",
-                node.short(),
-                fmt::truncate(&title, width.saturating_sub(24).max(8))
-            );
+            return actions::prompt_text(&node.short(), &title, width);
         }
-        if let Some((text, at)) = &self.notice
-            && at.elapsed() < NOTICE_TTL
+        if let Some(n) = &self.notice
+            && n.live(Instant::now())
         {
-            return text.clone();
+            return n.text.clone();
         }
         let totals = self.view.totals();
         let head = format!(
@@ -545,7 +529,7 @@ pub fn install_panic_hook(restore: Restore) {
     }));
 }
 
-/// Live TUI: tree pane, node pane, account footer. Read-only.
+/// Live TUI: tree pane, node pane, account footer; `k` cancels the selected node after a y / n.
 pub async fn run_tui(paths: RunPaths, cfg: Arc<Config>) -> anyhow::Result<()> {
     use crossterm::execute;
     use crossterm::terminal::{EnterAlternateScreen, enable_raw_mode};
@@ -603,12 +587,13 @@ pub async fn run_tui(paths: RunPaths, cfg: Arc<Config>) -> anyhow::Result<()> {
                 terminal.clear()?;
             }
             Action::Cancel(logical) => {
-                app.note(format!("cancelling {}\u{2026}", logical.short()));
+                app.notice = Some(Notice::cancelling(&logical.short()));
                 let target = CancelTarget::Task {
                     run: paths.run,
                     logical,
                 };
-                spawn_cancel(paths.clone(), target, vec![logical], grace, tx.clone());
+                let tasks = target.tasks(&app.view);
+                spawn_cancel(paths.clone(), target, tasks, grace, tx.clone());
             }
             Action::None => {}
         }

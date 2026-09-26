@@ -133,6 +133,12 @@ pub fn cost(r: &inspect::Rollup) -> String {
     format!("~${:.2}{plus}", r.usd)
 }
 
+/// `cost`, blank where it would print `-`.
+pub fn cost_cell(r: &inspect::Rollup) -> String {
+    let cost = cost(r);
+    if cost == "-" { String::new() } else { cost }
+}
+
 pub fn render_detail(view: &RunView, id: DispatchId, json: bool, now: OffsetDateTime) -> String {
     let Some(detail) = inspect::detail(view, id, now) else {
         return format!("no dispatch {} in this run\n", inspect::label(id));
