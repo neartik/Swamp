@@ -37,10 +37,8 @@ pub struct WorkerRow {
     pub account: String,
     pub state: NodeState,
     pub elapsed: Option<Duration>,
-    /// What the row prints, blank when nothing reported a cost.
-    pub cost: String,
-    /// For a batch with no dispatch behind it, the sum it shows.
-    pub usd: Option<f64>,
+    /// Every attempt of the task.
+    pub spend: Rollup,
     /// The `└` lines a live block shows: earlier attempts, the wait, the refusal, the failure.
     pub notes: Vec<(String, Role)>,
     /// `branch {b}   +{i} -{d}   {n} files`, exactly as `swamp trace` words it.
@@ -174,14 +172,8 @@ impl Batch {
         if let Some(r) = &self.rollup {
             return dispatches::cost_cell(r);
         }
-        let mut usd = 0.0;
-        let mut complete = true;
-        for r in &self.rows {
-            match r.usd {
-                Some(c) => usd += c,
-                None => complete = false,
-            }
-        }
+        let usd = self.rows.iter().map(|r| r.spend.usd).sum();
+        let complete = self.rows.iter().all(|r| r.spend.complete);
         fmt::usd(usd, complete)
     }
 
@@ -326,7 +318,8 @@ impl Batch {
         spans.push(t.span(format!("{elapsed:>ELAPSED_WIDTH$}"), Role::Meta));
         if cols.cost {
             spans.push(Span::raw("  "));
-            spans.push(t.span(format!("{:>COST_WIDTH$}", r.cost), Role::Meta));
+            let cost = dispatches::cost_cell(&r.spend);
+            spans.push(t.span(format!("{cost:>COST_WIDTH$}"), Role::Meta));
         }
         Line::from(spans)
     }
@@ -438,21 +431,28 @@ fn task_row(
     at: Option<OffsetDateTime>,
     now: OffsetDateTime,
 ) -> WorkerRow {
-    let latest = t.attempts.last();
+    let last = t.attempts.last();
+    // A retry waiting for an account has no live attempt: it waits from the last one's end.
+    let waiting = last
+        .and_then(|a| view.nodes.get(&a.node))
+        .is_some_and(|r| r.state.is_terminal())
+        && !t.detail.is_terminal();
+    let latest = last.filter(|_| !waiting);
     let rec = latest.and_then(|a| view.nodes.get(&a.node));
     let elapsed = order::elapsed(
         latest.and_then(|a| a.started_at),
         latest.and_then(|a| a.ended_at),
         t.detail.is_terminal(),
-        rec.map(|r| r.created_at).or(at),
+        rec.map(|r| r.created_at)
+            .or(last.and_then(|a| a.ended_at))
+            .or(at),
         now,
     );
-    let spend: Rollup = view.rollup(Scope::Task(t.node)).into();
-    let mut notes: Vec<(String, Role)> =
-        order::attempt_lines(&t.attempts[..t.attempts.len().saturating_sub(1)])
-            .into_iter()
-            .map(|l| (l, Role::Meta))
-            .collect();
+    let prior = t.attempts.len() - usize::from(latest.is_some());
+    let mut notes: Vec<(String, Role)> = order::attempt_lines(&t.attempts[..prior])
+        .into_iter()
+        .map(|l| (l, Role::Meta))
+        .collect();
     if let Some(b) = &t.blocked {
         let mut line = fmt::until_at(b.until, now);
         for r in &b.ineligible {
@@ -479,8 +479,7 @@ fn task_row(
         account: rec.map(account_cell).unwrap_or_default(),
         state: t.detail.clone(),
         elapsed,
-        cost: dispatches::cost_cell(&spend),
-        usd: Some(spend.usd),
+        spend: view.rollup(Scope::Task(t.node)).into(),
         notes,
         branch: rec.and_then(branch_line),
     }
@@ -504,8 +503,7 @@ fn row(view: &RunView, logical: NodeId, now: OffsetDateTime) -> Option<WorkerRow
         account: account_cell(rec),
         state: rec.state.clone(),
         elapsed: elapsed(rec, now),
-        cost: rec.cost.map(|_| fmt::cost(rec.cost)).unwrap_or_default(),
-        usd: rec.cost.map(|c| c.usd),
+        spend: view.rollup(Scope::Task(logical)).into(),
         notes,
         branch: branch_line(rec),
     })
@@ -636,7 +634,11 @@ mod tests {
             ids,
             vec!["9g5f01", "9g5f09·2", "9g5f04", "9g5f0a", "9g5f05"]
         );
-        assert_eq!(b.rows[1].cost, "~$0.22", "the task rollup, both attempts");
+        assert_eq!(
+            dispatches::cost_cell(&b.rows[1].spend),
+            "~$0.22",
+            "the task rollup, both attempts"
+        );
         assert_eq!(b.running(), 2);
         b.closed = true;
         assert!(!b.done(), "open until DispatchSettled");
@@ -645,6 +647,55 @@ mod tests {
         rejected.refresh(&view, fx::now());
         assert!(rejected.done());
         assert_eq!(rejected.rows[0].elapsed, None);
+    }
+
+    /// A rotated retry waiting on every account keeps attempt 1's reason in its `└` lines.
+    #[test]
+    fn a_blocked_retry_keeps_its_rate_limit_note() {
+        use crate::journal::record::JournalLine;
+        use crate::model::dispatch::Phase;
+        use crate::ui::chat::tests_support as fx;
+        let mut lines: Vec<JournalLine> = fx::p4_journal()
+            .into_iter()
+            .filter(|l| l.node != Some(fx::nid("09")))
+            .collect();
+        let seq = lines.len() as u64 + 10;
+        let at = |seq: u64, event| JournalLine {
+            seq,
+            at: fx::at(100),
+            run: fx::run_id(),
+            node: Some(fx::p4_task(2)),
+            event,
+        };
+        lines.push(at(
+            seq,
+            crate::journal::record::JournalEvent::NodeStateChanged {
+                from: Phase::Running,
+                to: NodeState::Queued,
+                why: "rate_limited: rotating".into(),
+            },
+        ));
+        lines.push(at(
+            seq + 1,
+            crate::journal::record::JournalEvent::NodeBlocked {
+                until: fx::at(2_480),
+                why: "main at capacity".into(),
+                ineligible: Vec::new(),
+            },
+        ));
+        let mut b = Batch::for_dispatch(fx::did("18"), fx::now());
+        b.refresh(&view_of(lines), fx::now());
+        let row = b
+            .rows
+            .iter()
+            .find(|r| r.logical == fx::p4_task(2))
+            .expect("the retried task");
+        assert!(row.account.is_empty());
+        assert_eq!(row.elapsed, Some(Duration::from_secs(168)));
+        assert_eq!(
+            row.notes[0].0,
+            "attempt 1 9g5f08 on main: rate_limited (five_hour) after 41s"
+        );
     }
 
     #[test]

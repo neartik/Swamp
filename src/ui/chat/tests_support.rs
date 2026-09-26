@@ -91,7 +91,7 @@ fn brain() -> NodeRecord {
     }
 }
 
-fn record(node: NodeId, title: &str, state: NodeState) -> NodeRecord {
+pub fn record(node: NodeId, title: &str, state: NodeState) -> NodeRecord {
     NodeRecord {
         id: node,
         run_id: run_id(),

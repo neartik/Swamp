@@ -162,7 +162,8 @@ to answer a follow-up, so it is told to end by naming the nodes worth landing an
 terminal's own scrollback, where the mouse can still select them, and only the live tail is
 redrawn. Assistant text renders as markdown while it streams, and a `swamp_dispatch` call opens
 a live block for the dispatch it issued, folded from the same journal `swamp watch` reads: one
-row per task, queued, blocked and rejected ones included, stuck ones first, with its tier,
+row per task, queued, blocked and rejected ones included, failures first, then running,
+blocked, queued and done, with its tier,
 account, model, elapsed time and cost, why it waits or was refused, and, when it lands, its
 branch and `+N -M`. The status line counts open dispatches and running, stuck and queued tasks. When stdout is not a terminal the whole thing falls back to the plain transcript, so
 pipes, CI and `swamp run` are unaffected.
@@ -231,7 +232,7 @@ exists: `k` cancels on the board and in `swamp watch`, `r` is the raw view, `?` 
 | `swamp dispatches [RUN\|last]` | One row per dispatch of a run: call seq, age, tasks, per-state counts, cost, caller. `--failed`, `--follow`, `--json`. |
 | `swamp dispatch <ID>` | One dispatch's task tree: attempts, accounts, models, why a task is blocked or was rejected, and what it dispatched in turn. `--json`; the shape is in [docs/DISPATCH.md](docs/DISPATCH.md). |
 | `swamp watch [RUN\|last]` | Live TUI; `k` cancels the selected node after a y / n. Attach from a second terminal while a run is going. |
-| `swamp board` | Dispatch board: every live run's dispatches, their tasks ranked stuck first, why a task is blocked and why its account won, and the account strip. Read-only except a confirmed cancel (`k`, then `y`; off with `ui.board_actions = false`). `--run`, `--all`, `--interval`, `--once`, `--json`. Meant to sit in a tmux pane beside `swamp chat`. |
+| `swamp board` | Dispatch board: every live run's dispatches, their tasks ranked failures first, then running, blocked, queued, done, why a task is blocked and why its account won, and the account strip. Read-only except a confirmed cancel (`k`, then `y`; off with `ui.board_actions = false`). `--run`, `--all`, `--interval`, `--once`, `--json`. Meant to sit in a tmux pane beside `swamp chat`. |
 | `swamp doctor` | Health checks. `--probe` calls each account's CLI, `--schema` reports adapter drift, `--reap` removes stale worktrees and pidfiles, and sweeps `~/.swamp/sock` for sockets no process is listening on, `--fix` creates the directories and the git exclude. Exit 1 on any error, so CI can gate on it. |
 | `swamp chat` | Interactive brain session. |
 | `swamp runs`, `swamp resume`, `swamp cancel` | List runs, recover an interrupted one (`--plan` first, it spends nothing), stop one. `swamp cancel` takes a run, a node or a dispatch id and works from any terminal: every live node it names is killed and journaled as cancelled, and the supervising run does not retry it. |

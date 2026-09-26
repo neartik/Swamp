@@ -193,6 +193,9 @@ decision. Within a tier only the title width and the header and hint cells that 
 | account name width | 10 | 11 | 12 |
 | `detail_max` | 5 | 6 | 4 |
 
+The cost cell is 8 wide, room for `~$12.34+`; the title takes what the tier's fixed cells leave,
+never less than `title_min`.
+
 The header reads the same at every width: `N running · N stuck · N queued · ~$X · observed Xs
 ago`, with `N runs` first when more than one run is tailed and `N stale` in `err`. When the cells
 do not fit, `queued`, then `runs`, then the cost drop; `running`, `stuck`, `stale` and the
@@ -247,15 +250,15 @@ swamp board              observed 4s ago
 ```
 swamp board   2 running · 1 stuck · ~$0.43 · observed 4s ago
 ────────────────────────────────────────────────────────────
-  ◆ brain      orchestrating         main      4m12s  ~$0.09
+  ◆ brain      orchestrating        main      4m12s   ~$0.09
 
-  ▾ #1 9g5f18 · 2 running · 1 blocked          3m20s  ~$0.34
-    ⠋ 9g5f01   add pagination to /u… main      3m10s  ~$0.08
-▌   ⠙ 9g5f09·2 backfill the users i… alt       2m48s  ~$0.22
-    ⏸ 9g5f04   rebuild the index               3m20s
+  ▾ #1 9g5f18 · 2 running · 1 blocked         3m20s   ~$0.34
+    ⠋ 9g5f01   add pagination to /… main      3m10s   ~$0.08
+▌   ⠙ 9g5f09·2 backfill the users … alt       2m48s   ~$0.22
+    ⏸ 9g5f04   rebuild the index              3m20s
       until 22:54 · main at capacity · alt quota stop
-    · 9g5f0a   write the changelog             3m20s
-    ✔ 9g5f05   add the /users route  main      2m10s  ~$0.04
+    · 9g5f0a   write the changelog            3m20s
+    ✔ 9g5f05   add the /users route main      2m10s   ~$0.04
 
   recent
   ▸ #2 9g5f1c · 1 task · 1 rejected · max_nodes_per_run
@@ -278,15 +281,15 @@ swamp board   2 running · 1 stuck · ~$0.43 · observed 4s ago
 ```
 swamp board                                                                        2 running · 1 stuck · 1 queued · ~$0.43 · observed 4s ago
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-  ◆ brain             orchestrating                                                             main       opus-4-1    4m12s  ↓ 214k  ~$0.09
+  ◆ brain             orchestrating                                                            main       opus-4-1    4m12s  ↓ 214k   ~$0.09
 
-  ▾ #1 9g5f18 · 5 tasks · 2 running · 1 blocked · 1 queued · 1 done                                                    3m20s  ↓ 437k  ~$0.34
-    ⠋ 9g5f01   [mid ] add pagination to /users                                                  main       sonnet-4-5  3m10s  ↓ 118k  ~$0.08
-▌   ⠙ 9g5f09·2 [high] backfill the users index                                                  alt        opus-4-1    2m48s  ↓ 223k  ~$0.22
-    ⏸ 9g5f04   [mid ] rebuild the index                                                                                3m20s
+  ▾ #1 9g5f18 · 5 tasks · 2 running · 1 blocked · 1 queued · 1 done                                                   3m20s  ↓ 437k   ~$0.34
+    ⠋ 9g5f01   [mid ] add pagination to /users                                                 main       sonnet-4-5  3m10s  ↓ 118k   ~$0.08
+▌   ⠙ 9g5f09·2 [high] backfill the users index                                                 alt        opus-4-1    2m48s  ↓ 223k   ~$0.22
+    ⏸ 9g5f04   [mid ] rebuild the index                                                                               3m20s
       until 22:54 (in 38m) · main at capacity (2/2) · alt quota stop (93%)
-    · 9g5f0a   [low ] write the changelog                                                                              3m20s
-    ✔ 9g5f05   [low ] add the /users route                                                      main       sonnet-4-5  2m10s   ↓ 96k  ~$0.04
+    · 9g5f0a   [low ] write the changelog                                                                             3m20s
+    ✔ 9g5f05   [low ] add the /users route                                                     main       sonnet-4-5  2m10s   ↓ 96k   ~$0.04
 
   recent
   ▸ #2 9g5f1c · 1 task · 1 rejected · max_nodes_per_run
@@ -307,18 +310,18 @@ A nested dispatch, under the task that issued it (60 columns, the dispatch selec
 ```
 swamp board   2 running · 1 stuck · ~$0.43 · observed 4s ago
 ────────────────────────────────────────────────────────────
-  ◆ brain      orchestrating         main      4m12s  ~$0.09
+  ◆ brain      orchestrating        main      4m12s   ~$0.09
 
-  ▾ #1 9g5f18 · 2 running · 1 blocked          3m20s  ~$0.34
-    ⠋ 9g5f01   add pagination to /u… main      3m10s  ~$0.08
-▌     ▾ #3 9g5f1k · by 9g5f01 · 2 queued       1m02s
-        · 9g5f1m   split the handler           1m02s
-        · 9g5f1n   write the tests             1m02s
-    ⠙ 9g5f09·2 backfill the users i… alt       2m48s  ~$0.22
-    ⏸ 9g5f04   rebuild the index               3m20s
+  ▾ #1 9g5f18 · 2 running · 1 blocked         3m20s   ~$0.34
+    ⠋ 9g5f01   add pagination to /… main      3m10s   ~$0.08
+▌     ▾ #3 9g5f1k · by 9g5f01 · 2 queued      1m02s
+        · 9g5f1m   split the handl…           1m02s
+        · 9g5f1n   write the tests            1m02s
+    ⠙ 9g5f09·2 backfill the users … alt       2m48s   ~$0.22
+    ⏸ 9g5f04   rebuild the index              3m20s
       until 22:54 · main at capacity · alt quota stop
-    · 9g5f0a   write the changelog             3m20s
-    ✔ 9g5f05   add the /users route  main      2m10s  ~$0.04
+    · 9g5f0a   write the changelog            3m20s
+    ✔ 9g5f05   add the /users route main      2m10s   ~$0.04
 
   recent
   ▸ #2 9g5f1c · 1 task · 1 rejected · max_nodes_per_run

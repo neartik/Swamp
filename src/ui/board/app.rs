@@ -178,13 +178,10 @@ impl App {
             let shown = self.visible(rows);
             for run in &shown.runs {
                 if let Some(b) = &run.brain {
-                    out.push(Selection::Node {
-                        run: b.run,
-                        logical: b.logical,
-                    });
+                    out.push(b.selection());
                 }
                 for g in run.active.iter().chain(&run.recent) {
-                    g.walk(false, &mut |i| out.push(selection(i)));
+                    g.walk(false, &mut |i| out.push(i.selection()));
                 }
             }
         }
@@ -374,7 +371,7 @@ impl App {
                 Item::Group(g) => !g.expanded && g.tally.failed + g.tally.rejected > 0,
             };
             if hit {
-                stuck.push(selection(i));
+                stuck.push(i.selection());
             }
         });
         let here = all.iter().position(|t| *t == board.selected);
@@ -689,19 +686,6 @@ pub fn hidden_keys(actions: bool) -> Vec<KeyAction> {
     }
 }
 
-fn selection(i: Item) -> Selection {
-    match i {
-        Item::Group(g) => Selection::Dispatch {
-            run: g.run,
-            id: g.id,
-        },
-        Item::Task(t) => Selection::Node {
-            run: t.row.run,
-            logical: t.row.logical,
-        },
-    }
-}
-
 /// The dispatch header a task sits under, or the task a nested dispatch hangs from.
 fn parent(board: &Board, sel: &Selection) -> Selection {
     let found = match *sel {
@@ -837,21 +821,36 @@ pub fn json(b: &Board) -> Value {
     let mut in_flight: Vec<Value> = Vec::new();
     let mut waiting: Vec<Value> = Vec::new();
     let mut recent: Vec<Value> = Vec::new();
+    // Uncapped: every task of every drawn dispatch, not only the rows a dispatch draws.
+    let drawn: Vec<(RunId, DispatchId)> = rows.groups().iter().map(|g| (g.run, g.id)).collect();
     for run in &rows.runs {
         if let Some(brain) = run.brain.as_ref().filter(|n| !n.state.is_terminal()) {
             in_flight.push(node_json(b, brain));
         }
-    }
-    for t in rows.tasks() {
-        let n = &t.row;
-        let list = match n.state {
-            NodeState::Running { .. } | NodeState::Leased { .. } | NodeState::Orphaned { .. } => {
-                &mut in_flight
-            }
-            NodeState::Queued | NodeState::Blocked { .. } => &mut waiting,
-            _ => &mut recent,
+        let Some(pane) = b.pane(run.run) else {
+            continue;
         };
-        list.push(node_json(b, n));
+        let mut all: Vec<_> = pane.view.dispatches.values().collect();
+        all.sort_by_key(|d| inspect::dispatch_key(d));
+        for d in all {
+            let shown = drawn.contains(&(run.run, d.id));
+            for n in d
+                .tasks
+                .iter()
+                .filter(|t| **t != pane.brain)
+                .filter_map(|t| pane.node_row(*t))
+            {
+                let list = match n.state {
+                    NodeState::Running { .. }
+                    | NodeState::Leased { .. }
+                    | NodeState::Orphaned { .. } => &mut in_flight,
+                    NodeState::Queued | NodeState::Blocked { .. } => &mut waiting,
+                    _ if shown => &mut recent,
+                    _ => continue,
+                };
+                list.push(node_json(b, &n));
+            }
+        }
     }
     let accounts = usage::json(&b.accounts);
     json!({

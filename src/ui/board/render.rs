@@ -390,11 +390,7 @@ pub fn body(shown: &Rows, sel: &Selection, all: &Rows, c: &Ctx) -> Body {
         }
         let mut started = false;
         if let Some(brain) = &run.brain {
-            let on = *sel
-                == Selection::Node {
-                    run: brain.run,
-                    logical: brain.logical,
-                };
+            let on = *sel == brain.selection();
             out.push(brain_line(brain, on, c), on);
             started = true;
         }
@@ -430,21 +426,13 @@ fn group_lines(
     c: &Ctx,
     out: &mut Body,
 ) {
-    let on = *sel
-        == Selection::Dispatch {
-            run: g.run,
-            id: g.id,
-        };
+    let on = *sel == g.selection();
     out.push(dispatch_line(g, recent, on, c), on);
     if !g.expanded {
         return;
     }
     for t in &g.tasks {
-        let on = *sel
-            == Selection::Node {
-                run: t.row.run,
-                logical: t.row.logical,
-            };
+        let on = *sel == t.row.selection();
         out.push(task_line(t, recent, on, spin, c), on);
         if let Some(line) = stuck_line(t, all, c) {
             out.push(line, false);

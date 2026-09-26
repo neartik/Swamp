@@ -7,7 +7,7 @@ use crate::journal::inspect::{self, AttemptDetail, Rollup};
 use crate::journal::paths::RunPaths;
 use crate::journal::record::{JournalEvent, JournalLine};
 use crate::model::core::{AccountId, Cost, NodeState, Provider, Tier, Usage};
-use crate::model::dispatch::DispatchState;
+use crate::model::dispatch::{DispatchRecord, DispatchState};
 use crate::model::node::NodeRecord;
 use crate::ui::board::sources::Tail;
 use crate::ui::chat::theme::Role;
@@ -207,10 +207,31 @@ impl RunPane {
     pub fn node_row(&self, logical: NodeId) -> Option<NodeRow> {
         let state = self.view.state_of(logical)?;
         let dispatch = self.view.tasks.get(&logical).map(|t| t.dispatch);
-        match self.latest(logical) {
+        match self.live(logical) {
             Some(n) => Some(self.row(n, logical, state, dispatch)),
-            None => self.unstarted(logical, state),
+            None => {
+                let since = self.latest(logical).and_then(|n| n.ended_at);
+                self.unstarted(logical, state, since)
+            }
         }
+    }
+
+    /// The latest attempt, unless it ended while its task still waits for another.
+    fn live(&self, logical: NodeId) -> Option<&NodeRecord> {
+        let n = self.latest(logical)?;
+        let waiting = n.state.is_terminal()
+            && self
+                .view
+                .state_of(logical)
+                .is_some_and(|s| !s.is_terminal());
+        (!waiting).then_some(n)
+    }
+
+    /// When a dispatch was issued, else when the run started.
+    fn issued_at(&self, d: Option<&DispatchRecord>) -> OffsetDateTime {
+        d.map(|d| d.at)
+            .or(self.view.header.as_ref().map(|h| h.started_at))
+            .unwrap_or(OffsetDateTime::UNIX_EPOCH)
     }
 
     fn latest(&self, logical: NodeId) -> Option<&NodeRecord> {
@@ -252,8 +273,13 @@ impl RunPane {
         }
     }
 
-    /// A task with no attempt yet; it waits from when its dispatch was issued.
-    fn unstarted(&self, logical: NodeId, state: NodeState) -> Option<NodeRow> {
+    /// A task with no live attempt; it waits from `since`, else from when its dispatch was issued.
+    fn unstarted(
+        &self,
+        logical: NodeId,
+        state: NodeState,
+        since: Option<OffsetDateTime>,
+    ) -> Option<NodeRow> {
         let t = self.view.tasks.get(&logical)?;
         let record = self
             .view
@@ -263,10 +289,7 @@ impl RunPane {
         let provider = record
             .and_then(|d| d.tasks.iter().find(|x| x.logical == logical))
             .map_or(Provider::Anthropic, |x| x.provider);
-        let created_at = record
-            .map(|d| d.at)
-            .or(self.view.header.as_ref().map(|h| h.started_at))
-            .unwrap_or(OffsetDateTime::UNIX_EPOCH);
+        let created_at = since.unwrap_or_else(|| self.issued_at(record));
         let account = match &state {
             NodeState::Leased { account } => Some(account.clone()),
             _ => None,
@@ -298,9 +321,10 @@ impl RunPane {
     pub fn task_row(&self, logical: NodeId, level: usize, now: OffsetDateTime) -> Option<TaskRow> {
         let row = self.node_row(logical)?;
         let attempts = self.view.attempts(logical);
+        let live = usize::from(self.live(logical).is_some());
         let prior = attempts
             .iter()
-            .take(attempts.len().saturating_sub(1))
+            .take(attempts.len().saturating_sub(live))
             .map(|a| inspect::attempt(a, now))
             .collect();
         let ineligible = self
@@ -390,14 +414,16 @@ impl RunPane {
     ) -> DispatchGroup {
         let mut tasks: Vec<TaskRow> = if d.id == DispatchId::LEGACY {
             // Schema 1 has no dispatch order to rank within: the tree is the order.
-            self.view
+            let tree: Vec<TaskRow> = self
+                .view
                 .tree()
                 .into_iter()
                 .filter(|r| r.logical != self.brain && d.tasks.contains(&r.logical))
                 .filter_map(|r| {
                     self.task_row(r.logical, level + (r.depth as usize).saturating_sub(1), now)
                 })
-                .collect()
+                .collect();
+            keep_ranked(tree)
         } else {
             let rows = d
                 .tasks
@@ -423,12 +449,7 @@ impl RunPane {
                 }
             }
         }
-        let at = d
-            .record
-            .as_ref()
-            .map(|r| r.at)
-            .or(self.view.header.as_ref().map(|h| h.started_at))
-            .unwrap_or(OffsetDateTime::UNIX_EPOCH);
+        let at = self.issued_at(d.record.as_ref());
         DispatchGroup {
             run: self.run,
             id: d.id,
@@ -445,6 +466,19 @@ impl RunPane {
             expanded: d.state == DispatchState::Open,
         }
     }
+}
+
+/// The `DISPATCH_ROWS` best-ranked rows, still in the order given, ahead of the rest.
+fn keep_ranked(rows: Vec<TaskRow>) -> Vec<TaskRow> {
+    let mut by_rank: Vec<usize> = (0..rows.len()).collect();
+    by_rank.sort_by_key(|&i| order::rank(&rows[i].row.state));
+    by_rank.truncate(DISPATCH_ROWS);
+    let (mut kept, rest): (Vec<_>, Vec<_>) = rows
+        .into_iter()
+        .enumerate()
+        .partition(|(i, _)| by_rank.contains(i));
+    kept.extend(rest);
+    kept.into_iter().map(|(_, t)| t).collect()
 }
 
 /// A run is live while it has not written `RunFinished` and either a non-terminal node's
@@ -506,6 +540,13 @@ impl NodeRow {
     pub fn short(&self) -> String {
         fmt::attempt_id(self.id, self.attempt)
     }
+
+    pub fn selection(&self) -> Selection {
+        Selection::Node {
+            run: self.run,
+            logical: self.logical,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -536,7 +577,7 @@ pub struct DispatchGroup {
     /// Every task, including the ones past `DISPATCH_ROWS`.
     pub tally: Tally,
     pub cost: Rollup,
-    /// In rank order, capped at `DISPATCH_ROWS`.
+    /// In rank order, capped at `DISPATCH_ROWS`; the legacy bucket keeps its best-ranked in tree order.
     pub tasks: Vec<TaskRow>,
     /// How many tasks the cap left out.
     pub hidden: usize,
@@ -550,7 +591,23 @@ pub enum Item<'a> {
     Task(&'a TaskRow),
 }
 
+impl Item<'_> {
+    pub fn selection(&self) -> Selection {
+        match self {
+            Item::Group(g) => g.selection(),
+            Item::Task(t) => t.row.selection(),
+        }
+    }
+}
+
 impl DispatchGroup {
+    pub fn selection(&self) -> Selection {
+        Selection::Dispatch {
+            run: self.run,
+            id: self.id,
+        }
+    }
+
     /// `#3`, the short id when there is no call behind it, or `legacy`.
     pub fn label(&self) -> String {
         order::label_cells(self.seq, self.id, Role::Meta)
@@ -718,21 +775,12 @@ pub fn attention(rows: &Rows) -> Option<Selection> {
         shown
             .iter()
             .find(|t| want(&t.row.state))
-            .map(|t| Selection::Node {
-                run: t.row.run,
-                logical: t.row.logical,
-            })
+            .map(|t| t.row.selection())
     };
     pick(&|s| order::rank(s) == 0)
         .or_else(|| pick(&|s| matches!(s, NodeState::Blocked { .. })))
         .or_else(|| pick(&|s| order::rank(s) == 1))
-        .or_else(|| {
-            let b = rows.runs.iter().find_map(|r| r.brain.as_ref())?;
-            Some(Selection::Node {
-                run: b.run,
-                logical: b.logical,
-            })
-        })
+        .or_else(|| Some(rows.runs.iter().find_map(|r| r.brain.as_ref())?.selection()))
 }
 
 /// What `follow` pins to: the drawn running task that started last.
@@ -746,10 +794,7 @@ pub fn newest_running(rows: &Rows) -> Option<Selection> {
             best = Some(t);
         }
     });
-    best.map(|t| Selection::Node {
-        run: t.row.run,
-        logical: t.row.logical,
-    })
+    best.map(|t| t.row.selection())
 }
 
 pub struct Board {
@@ -927,7 +972,7 @@ impl Board {
 mod tests {
     use super::*;
     use crate::ids::CallSeq;
-    use crate::model::dispatch::{DispatchRecord, Phase, TaskRef};
+    use crate::model::dispatch::{Phase, TaskRef};
     use crate::model::failure::Failure;
     use crate::ui::board::sources::Tail;
     use crate::ui::chat::tests_support as fx;
@@ -1156,6 +1201,73 @@ mod tests {
         );
         assert!(run.brain.is_some());
         assert_eq!(rows.tally.failed, 1);
+    }
+
+    /// Past the cap, a legacy bucket keeps what ranks first, still drawn in tree order.
+    #[test]
+    fn a_long_legacy_bucket_keeps_its_running_task() {
+        let mut lines = fx::fixture();
+        for n in 3..=11u8 {
+            let state = if n == 11 {
+                NodeState::Running {
+                    pid: 11,
+                    pgid: 11,
+                    since: fx::at(150),
+                }
+            } else {
+                NodeState::Succeeded
+            };
+            let node = fx::record(fx::id(n), "more work", state);
+            lines.push(line(
+                n as u64 + 10,
+                fx::id(n),
+                JournalEvent::NodeSpawned {
+                    node: Box::new(node),
+                },
+            ));
+        }
+        let b = board(vec![pane(&lines)], Vec::new());
+        let rows = b.rows();
+        let legacy = &rows.runs[0].active[0];
+        let kept: Vec<NodeId> = legacy.tasks.iter().map(|t| t.row.logical).collect();
+        let want: Vec<NodeId> = [1, 2, 3, 4, 5, 6, 7, 11].map(fx::id).to_vec();
+        assert_eq!(kept, want, "the failure and the running task, tree order");
+        assert_eq!(legacy.hidden, 3);
+        assert_eq!(legacy.tally.running, 1);
+        assert_eq!(newest_running(&rows), Some(legacy.tasks[7].row.selection()));
+    }
+
+    /// A rotated retry waiting on every account shows the wait, not the attempt that ended.
+    #[test]
+    fn a_blocked_retry_waits_from_its_last_attempt() {
+        let mut lines: Vec<JournalLine> = fx::p4_journal()
+            .into_iter()
+            .filter(|l| l.node != Some(fx::nid("09")))
+            .collect();
+        let seq = lines.len() as u64 + 10;
+        lines.push(changed(seq, fx::p4_task(2), NodeState::Queued));
+        lines.push(line(
+            seq + 1,
+            fx::p4_task(2),
+            JournalEvent::NodeBlocked {
+                until: fx::at(2_480),
+                why: "main at capacity".into(),
+                ineligible: Vec::new(),
+            },
+        ));
+        let pane = pane(&lines);
+        let t = pane
+            .task_row(fx::p4_task(2), 0, fx::now())
+            .expect("the task row");
+        assert!(matches!(t.row.state, NodeState::Blocked { .. }));
+        assert_eq!(t.row.account, None);
+        assert_eq!(t.row.model, None);
+        assert_eq!(t.row.cost, None);
+        assert_eq!(t.row.elapsed(fx::now()), Some(StdDuration::from_secs(168)));
+        assert_eq!(
+            order::attempt_lines(&t.prior),
+            vec!["attempt 1 9g5f08 on main: rate_limited (five_hour) after 41s"]
+        );
     }
 
     #[test]
