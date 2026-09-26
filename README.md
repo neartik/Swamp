@@ -166,20 +166,7 @@ its spinner, tier, account, model, elapsed time and cost, and, when it lands, it
 `+N -M`. When stdout is not a terminal the whole thing falls back to the plain transcript, so
 pipes, CI and `swamp run` are unaffected.
 
-| Key | What it does |
-|---|---|
-| `enter` | Send. With the popup open, complete the selected command instead. |
-| `alt+enter`, `shift+enter`, trailing `\` | Newline. `shift+enter` needs the kitty keyboard protocol. |
-| `esc` | Close the popup, else interrupt the turn. |
-| `esc esc` | Cancel every running worker, within two seconds of the first `esc`. |
-| `ctrl+c` | Clear the input; again on an empty input to leave. |
-| `ctrl+d` | Leave. |
-| `ctrl+l` | Clear the screen; the scrollback above is untouched. |
-| `ctrl+o` | Expand the last collapsed tool result or worker board. |
-| `up` / `down` | History on an empty input, otherwise move between the input's lines. |
-| `/` | Open the command popup; `tab` completes, `↑↓` chooses. |
-| `?` | Shortcut overlay, on an empty input. |
-| `ctrl+a`, `ctrl+e`, `ctrl+k`, `ctrl+u`, `ctrl+w`, `alt+←/→` | Readline editing. |
+The keys are in [Keys](#keys), with every other surface's.
 
 Commands: `/help`, `/status`, `/accounts`, `/usage [--json]`, `/trace [node]`, `/cost`,
 `/tier [low|mid|high]`, `/cancel <node|all>`, `/diff <node>`, `/thinking [on|off]`, `/clear`,
@@ -191,6 +178,48 @@ Commands: `/help`, `/status`, `/accounts`, `/usage [--json]`, `/trace [node]`, `
 
 Inside tmux with no `swamp board` attached, chat prints a one-line hint pointing at it.
 `swamp chat --board` splits a pane running `swamp board` for you and carries on into chat.
+
+## Keys
+
+One table drives every surface's hints and key overlays, so an action is the same key wherever it
+exists: `k` cancels on the board and in `swamp watch`, `r` is the raw view, `?` lists the keys.
+`swamp board` cancels only after a `y` / `n` confirm, and only while `ui.board_actions` is true
+(the default).
+
+<!-- keys:begin -->
+| Key | What it does | Board | Pager | Watch | Chat |
+|---|---|---|---|---|---|
+| `↑` `↓` | select a row | ✓ |  | ✓ |  |
+| `k` | cancel the selected task or dispatch (asks y / n) | ✓ |  | ✓ |  |
+| `enter` | open the selected row: trace, dispatch or accounts | ✓ |  |  |  |
+| `r` | raw view: the run journal (board), the node stream (watch) | ✓ | ✓ | ✓ |  |
+| `←` `→` | fold / unfold the selected dispatch | ✓ |  |  |  |
+| `!` | jump to the next stuck row | ✓ |  |  |  |
+| `a` | accounts view | ✓ |  | ✓ |  |
+| `d` | the selected node's patch in $PAGER |  |  | ✓ |  |
+| `tab` `shift+tab` | next / previous run | ✓ |  |  |  |
+| `f` | follow the newest running task | ✓ |  |  |  |
+| `0` | all runs merged | ✓ |  |  |  |
+| `g` `G` | top / bottom | ✓ | ✓ |  |  |
+| `↑` `↓` | scroll |  | ✓ |  |  |
+| `pgup` `pgdn` | scroll a page |  | ✓ |  |  |
+| `y` | confirm the prompt | ✓ |  | ✓ |  |
+| `n` | dismiss the prompt | ✓ |  | ✓ |  |
+| `esc` | close the pager, overlay or prompt | ✓ | ✓ | ✓ |  |
+| `?` | key list (chat: on an empty input) | ✓ |  | ✓ | ✓ |
+| `q` | quit | ✓ | ✓ | ✓ |  |
+| `ctrl+c` | quit (chat: clear the input, again to leave) | ✓ | ✓ | ✓ | ✓ |
+| `ctrl+d` | quit | ✓ | ✓ | ✓ | ✓ |
+| `enter` | send; with the popup open, complete the command |  |  |  | ✓ |
+| `alt+enter` `shift+enter` `\ enter` | newline (shift+enter needs the kitty keyboard protocol) |  |  |  | ✓ |
+| `esc` | close the popup, else interrupt the turn |  |  |  | ✓ |
+| `esc esc` | cancel every running worker, within 2 s of the first esc |  |  |  | ✓ |
+| `ctrl+l` | clear the screen; the scrollback above is untouched |  |  |  | ✓ |
+| `ctrl+o` | expand the last collapsed result or dispatch block |  |  |  | ✓ |
+| `↑` `↓` | history on an empty input, else move between lines |  |  |  | ✓ |
+| `/` | command popup; tab completes, ↑↓ chooses |  |  |  | ✓ |
+| `ctrl+a` `ctrl+e` `ctrl+k` `ctrl+u` `ctrl+w` `alt+←` `alt+→` | readline editing |  |  |  | ✓ |
+<!-- keys:end -->
 
 ## Commands
 

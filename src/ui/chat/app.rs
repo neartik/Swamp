@@ -911,7 +911,7 @@ impl App {
         let name = parts.next().unwrap_or_default().to_ascii_lowercase();
         let arg = parts.next().map(str::to_owned);
         match name.as_str() {
-            "help" | "?" => vec![self.output("commands", slash::help_body())],
+            "help" | "?" => vec![self.output("commands", slash::help_body(self.width))],
             "status" => {
                 let body = trace::render(&self.view, &trace::TraceOpts::default());
                 vec![self.output("", lines_of(&body))]

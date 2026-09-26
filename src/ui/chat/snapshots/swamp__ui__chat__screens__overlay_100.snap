@@ -2,11 +2,18 @@
 source: src/ui/chat/screens.rs
 expression: "live(&mut app, 100)"
 ---
-  enter         send                           ctrl+o    expand the last result
-  alt+enter     newline (also shift+enter)     ctrl+l    clear the screen
-  esc           interrupt the turn             ctrl+c    clear input, twice to quit
-  esc esc       cancel running workers         ctrl+d    quit
-  ↑ ↓           history (empty input)          /         commands
+  ?                 key list (chat: on an empty input)
+  ctrl+c            quit (chat: clear the input, again to leave)
+  ctrl+d            quit
+  enter             send; with the popup open, complete the command
+  alt+enter shift+enter \ enter  newline (shift+enter needs the kitty keyboard protocol)
+  esc               close the popup, else interrupt the turn
+  esc esc           cancel every running worker, within 2 s of the first esc
+  ctrl+l            clear the screen; the scrollback above is untouched
+  ctrl+o            expand the last collapsed result or dispatch block
+  ↑ ↓               history on an empty input, else move between lines
+  /                 command popup; tab completes, ↑↓ chooses
+  ctrl+a ctrl+e ctrl+k ctrl+u ctrl+w alt+← alt+→  readline editing
 ────────────────────────────────────────────────────────────────────────────────────────────────────
 >  Try "dispatch two workers to split the pagination work"
 ────────────────────────────────────────────────────────────────────────────────────────────────────

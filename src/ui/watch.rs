@@ -7,10 +7,12 @@ use crate::journal::reader::Tailer;
 use crate::journal::record::JournalLine;
 use crate::model::core::{AccountId, NodeState};
 use crate::model::node::NodeRecord;
+use crate::ui::actions::{CancelDone, CancelTarget, spawn_cancel};
 use crate::ui::fmt;
+use crate::ui::keys::{self, KeyAction, Surface};
 use crate::ui::trace;
 use camino::Utf8PathBuf;
-use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{Event, KeyCode, KeyEvent};
 use futures::StreamExt;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
@@ -18,12 +20,13 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use time::OffsetDateTime;
 
 const TAIL_LINES: usize = 200;
 const TREE_WIDTH: u16 = 46;
 const REFRESH_HZ: u16 = 20;
+const NOTICE_TTL: Duration = Duration::from_secs(5);
 
 /// What a keypress asks the outer loop to do. The pane state itself stays pure.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -48,6 +51,11 @@ pub struct App {
     pub raw_lines: Vec<String>,
     pub tail_lines: usize,
     pub tree_width: u16,
+    /// `k` asked about this task; the next key answers.
+    pub confirm: Option<NodeId>,
+    /// `?`: the key list in the node pane until `esc`.
+    pub keys: bool,
+    pub notice: Option<(String, Instant)>,
     /// Set by the TUI; without it a dead node would render as running forever.
     paths: Option<RunPaths>,
 }
@@ -67,6 +75,9 @@ impl App {
             raw_lines: Vec::new(),
             tail_lines: TAIL_LINES,
             tree_width: TREE_WIDTH,
+            confirm: None,
+            keys: false,
+            notice: None,
             paths: None,
         }
     }
@@ -129,45 +140,143 @@ impl App {
     }
 
     pub fn on_key(&mut self, key: KeyEvent) -> Action {
-        match key.code {
-            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.quit = true;
-                Action::Quit
+        let action = keys::action(Surface::Watch, &key);
+        if let Some(node) = self.confirm.take() {
+            return match action {
+                Some(KeyAction::ClearOrQuit | KeyAction::Leave) => self.stop(),
+                Some(KeyAction::Confirm) => Action::Cancel(node),
+                _ => Action::None,
+            };
+        }
+        match action {
+            Some(KeyAction::ClearOrQuit | KeyAction::Leave | KeyAction::Quit) => self.stop(),
+            Some(KeyAction::Back) => {
+                self.back();
+                Action::None
             }
-            KeyCode::Char('q') | KeyCode::Esc => {
-                self.quit = true;
-                Action::Quit
+            Some(KeyAction::Keys) => {
+                self.keys = true;
+                Action::None
             }
-            KeyCode::Up => {
+            Some(KeyAction::Move) if key.code == KeyCode::Up => {
                 self.selected = self.selected.saturating_sub(1);
                 self.reload_raw()
             }
-            KeyCode::Down => {
+            Some(KeyAction::Move) => {
                 let last = self.rows.len().saturating_sub(1);
                 self.selected = (self.selected + 1).min(last);
                 self.reload_raw()
             }
-            KeyCode::Char('r') => {
+            Some(KeyAction::Raw) => {
                 self.raw = !self.raw;
                 match (self.raw, self.selected_node()) {
                     (true, Some(n)) => Action::LoadRaw(n.id),
                     _ => Action::None,
                 }
             }
-            KeyCode::Char('a') => {
+            Some(KeyAction::Accounts) => {
                 self.accounts_pane = !self.accounts_pane;
                 Action::None
             }
-            KeyCode::Char('d') => match self.selected_node().and_then(|n| n.work.clone()) {
+            Some(KeyAction::Diff) => match self.selected_node().and_then(|n| n.work.clone()) {
                 Some(w) => Action::Pager(w.patch),
                 None => Action::None,
             },
-            KeyCode::Char('k') => match self.selected_node() {
-                Some(n) => Action::Cancel(n.id),
-                None => Action::None,
-            },
+            Some(KeyAction::Cancel) => {
+                self.ask_cancel();
+                Action::None
+            }
             _ => Action::None,
         }
+    }
+
+    fn stop(&mut self) -> Action {
+        self.quit = true;
+        Action::Quit
+    }
+
+    /// `esc` closes the innermost thing open and never quits.
+    fn back(&mut self) {
+        if self.keys {
+            self.keys = false;
+        } else if self.raw {
+            self.raw = false;
+            self.raw_lines.clear();
+        } else if self.accounts_pane {
+            self.accounts_pane = false;
+        }
+    }
+
+    fn ask_cancel(&mut self) {
+        let Some(row) = self.selected_row() else {
+            return;
+        };
+        let (logical, state) = (row.logical, row.state.clone());
+        if crate::dispatch::cancel::is_brain(&self.view, logical) {
+            self.note(format!(
+                "the brain stops with swamp cancel {}",
+                self.run.short()
+            ));
+        } else if state.is_terminal() {
+            self.note(format!(
+                "{} is already {}",
+                logical.short(),
+                fmt::state_word(&state)
+            ));
+        } else {
+            self.confirm = Some(logical);
+        }
+    }
+
+    pub fn note(&mut self, text: String) {
+        self.notice = Some((text, Instant::now()));
+    }
+
+    pub fn cancel_done(&mut self, done: CancelDone) {
+        let CancelTarget::Task { logical, .. } = done.target else {
+            return;
+        };
+        self.note(match done.result {
+            Ok(_) => format!("cancelled {}", logical.short()),
+            Err(e) => format!("cancel {} failed: {e}", logical.short()),
+        });
+    }
+
+    /// The footer's first line: the prompt, a fresh notice, or the totals and key hints.
+    pub fn status_text(&self, width: usize) -> String {
+        if let Some(node) = self.confirm {
+            let title = self
+                .view
+                .tasks
+                .get(&node)
+                .map(|t| t.title.clone())
+                .or_else(|| self.selected_node().map(|n| n.title.clone()))
+                .unwrap_or_default();
+            return format!(
+                "cancel {} \"{}\"? y / n",
+                node.short(),
+                fmt::truncate(&title, width.saturating_sub(24).max(8))
+            );
+        }
+        if let Some((text, at)) = &self.notice
+            && at.elapsed() < NOTICE_TTL
+        {
+            return text.clone();
+        }
+        let totals = self.view.totals();
+        let head = format!(
+            "nodes {}  failed {}  tok {}  cost {}  ",
+            totals.nodes,
+            totals.failed,
+            fmt::tokens(totals.usage.billable()),
+            if totals.cost_complete {
+                format!("~${:.2}", totals.cost_usd)
+            } else {
+                format!("~${:.2}+", totals.cost_usd)
+            },
+        );
+        let room = width.saturating_sub(unicode_width::UnicodeWidthStr::width(head.as_str()));
+        head + &keys::hints(Surface::Watch, room, &[])
     }
 
     pub fn draw(&self, f: &mut Frame) {
@@ -235,21 +344,36 @@ impl App {
             ),
             None => " node ".to_owned(),
         };
-        let body = if self.raw {
-            self.raw_lines
-                .iter()
-                .rev()
-                .take(self.tail_lines)
-                .rev()
-                .map(|l| Line::from(fmt::truncate(l, area.width.saturating_sub(2) as usize)))
-                .collect::<Vec<_>>()
+        let (title, body) = if self.keys {
+            (
+                " keys ".to_owned(),
+                keys::overlay_text(Surface::Watch, area.width.saturating_sub(2) as usize, &[])
+                    .into_iter()
+                    .map(Line::from)
+                    .collect(),
+            )
+        } else if self.raw {
+            (title, self.raw_body(area))
         } else {
-            self.event_lines(area.width.saturating_sub(2) as usize)
+            (
+                title,
+                self.event_lines(area.width.saturating_sub(2) as usize),
+            )
         };
         f.render_widget(
             Paragraph::new(body).block(Block::default().borders(Borders::ALL).title(title)),
             area,
         );
+    }
+
+    fn raw_body(&self, area: Rect) -> Vec<Line<'static>> {
+        self.raw_lines
+            .iter()
+            .rev()
+            .take(self.tail_lines)
+            .rev()
+            .map(|l| Line::from(fmt::truncate(l, area.width.saturating_sub(2) as usize)))
+            .collect()
     }
 
     fn event_lines(&self, width: usize) -> Vec<Line<'static>> {
@@ -279,18 +403,15 @@ impl App {
     fn draw_footer(&self, f: &mut Frame, area: Rect) {
         let now = OffsetDateTime::now_utc();
         let mut lines: Vec<Line> = Vec::new();
-        let totals = self.view.totals();
-        lines.push(Line::from(format!(
-            "nodes {}  failed {}  tok {}  cost {}  [up/down] select  r raw  d diff  k cancel  a accounts  q quit",
-            totals.nodes,
-            totals.failed,
-            fmt::tokens(totals.usage.billable()),
-            if totals.cost_complete {
-                format!("~${:.2}", totals.cost_usd)
-            } else {
-                format!("~${:.2}+", totals.cost_usd)
-            },
-        )));
+        let status = self.status_text(area.width as usize);
+        lines.push(if self.confirm.is_some() {
+            Line::from(Span::styled(
+                status,
+                Style::default().add_modifier(Modifier::BOLD),
+            ))
+        } else {
+            Line::from(status)
+        });
         for (id, util, health, cooldown) in self.gauges() {
             let bar = gauge_bar(util);
             let cd = cooldown
@@ -446,6 +567,8 @@ pub async fn run_tui(paths: RunPaths, cfg: Arc<Config>) -> anyhow::Result<()> {
     let backend = ratatui::backend::CrosstermBackend::new(std::io::stdout());
     let mut terminal = ratatui::Terminal::new(backend)?;
     let mut keys = crossterm::event::EventStream::new();
+    let grace = cfg.limits.grace_period.unwrap_or(Duration::from_secs(5));
+    let (tx, mut done) = tokio::sync::mpsc::unbounded_channel::<CancelDone>();
 
     loop {
         terminal.draw(|f| app.draw(f))?;
@@ -462,6 +585,10 @@ pub async fn run_tui(paths: RunPaths, cfg: Arc<Config>) -> anyhow::Result<()> {
                 app.apply(&lines?);
                 Action::None
             }
+            Some(d) = done.recv() => {
+                app.cancel_done(d);
+                Action::None
+            }
         };
         match action {
             Action::Quit => break,
@@ -475,7 +602,14 @@ pub async fn run_tui(paths: RunPaths, cfg: Arc<Config>) -> anyhow::Result<()> {
                 execute!(std::io::stdout(), EnterAlternateScreen)?;
                 terminal.clear()?;
             }
-            Action::Cancel(node) => cancel_node(&app, node).await,
+            Action::Cancel(logical) => {
+                app.note(format!("cancelling {}\u{2026}", logical.short()));
+                let target = CancelTarget::Task {
+                    run: paths.run,
+                    logical,
+                };
+                spawn_cancel(paths.clone(), target, vec![logical], grace, tx.clone());
+            }
             Action::None => {}
         }
     }
@@ -511,34 +645,6 @@ async fn pager(patch: &camino::Utf8Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// `k` cancels one node, never the run, the way `swamp cancel` does from outside.
-async fn cancel_node(app: &App, node: NodeId) {
-    let Some(paths) = app.paths.as_ref() else {
-        return;
-    };
-    let Some(logical) = app.view.nodes.get(&node).map(|n| n.logical) else {
-        return;
-    };
-    if crate::dispatch::cancel::is_brain(&app.view, logical) {
-        return;
-    }
-    let stop = crate::dispatch::cancel::Stop::Kill {
-        grace: std::time::Duration::from_secs(5),
-    };
-    if let Err(e) = crate::dispatch::cancel::cancel_node(
-        paths,
-        &app.view,
-        crate::dispatch::cancel::Sink::Shared,
-        logical,
-        crate::model::core::CancelSource::User,
-        stop,
-    )
-    .await
-    {
-        tracing::warn!("cancelling {}: {e:#}", node.short());
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -548,6 +654,7 @@ mod tests {
         WorkspaceRef,
     };
     use crate::model::node::NodeRecord;
+    use crossterm::event::KeyModifiers;
     use ratatui::backend::TestBackend;
     use std::str::FromStr;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -779,6 +886,86 @@ mod tests {
         assert!(text.contains("main"), "{text}");
         assert!(text.contains("64%"), "{text}");
         assert!(text.contains(&run_id().short()), "{text}");
+    }
+
+    fn ch(c: char) -> KeyEvent {
+        key(KeyCode::Char(c))
+    }
+
+    /// `k` asks first; only `y` cancels, and anything else leaves the task alone.
+    #[test]
+    fn k_asks_before_it_cancels() {
+        let mut app = App::from_lines(run_id(), &journal());
+        app.selected = 1;
+        assert_eq!(app.on_key(ch('k')), Action::None);
+        assert_eq!(app.confirm, Some(id(2)));
+        assert!(
+            app.status_text(100).starts_with("cancel 9g5f02"),
+            "{}",
+            app.status_text(100)
+        );
+        assert_eq!(app.on_key(ch('y')), Action::Cancel(id(2)));
+        assert_eq!(app.confirm, None);
+
+        assert_eq!(app.on_key(ch('k')), Action::None);
+        assert_eq!(app.on_key(ch('n')), Action::None);
+        assert_eq!(app.confirm, None, "n dismisses the prompt");
+        assert_eq!(app.on_key(ch('y')), Action::None, "no prompt, no cancel");
+
+        app.selected = 0;
+        assert_eq!(app.on_key(ch('k')), Action::None);
+        assert_eq!(app.confirm, None, "a finished node has nothing to cancel");
+        assert!(app.status_text(100).contains("already ok"));
+    }
+
+    /// `esc` closes what is open, innermost first, and never leaves the program.
+    #[test]
+    fn esc_backs_out_and_never_quits() {
+        let mut app = App::from_lines(run_id(), &journal());
+        app.on_key(ch('a'));
+        app.on_key(ch('r'));
+        app.on_key(ch('?'));
+        assert!(app.keys && app.raw && app.accounts_pane);
+        for _ in 0..5 {
+            assert_eq!(app.on_key(key(KeyCode::Esc)), Action::None);
+        }
+        assert!(!app.keys && !app.raw && !app.accounts_pane);
+        assert!(!app.quit);
+        assert_eq!(
+            app.on_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL)),
+            Action::Quit
+        );
+    }
+
+    /// The footer's hints are the shared table's, and `?` draws its key list.
+    #[test]
+    fn the_footer_carries_the_shared_hints() {
+        let mut app = App::from_lines(run_id(), &journal());
+        let mut terminal = ratatui::Terminal::new(TestBackend::new(200, 14)).expect("terminal");
+        terminal.draw(|f| app.draw(f)).expect("draw");
+        let text: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        let hints = keys::hints(Surface::Watch, 200, &[]);
+        assert!(text.contains(&hints), "{hints} missing");
+
+        app.on_key(ch('?'));
+        terminal.draw(|f| app.draw(f)).expect("draw");
+        let text: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(
+            text.contains("the selected node's patch in $PAGER"),
+            "{text}"
+        );
     }
 
     #[test]

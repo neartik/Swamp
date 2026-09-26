@@ -3,6 +3,7 @@ pub mod board;
 pub mod chat;
 pub mod dispatches;
 pub mod fmt;
+pub mod keys;
 pub mod order;
 pub mod trace;
 pub mod usage;

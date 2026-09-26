@@ -692,17 +692,28 @@ it is open.
 
 ### 3.8 Shortcut overlay
 
-`?` on an empty input replaces the popup area with:
+`?` on an empty input replaces the popup area with chat's rows of the shared key table,
+`ui::keys::overlay(Surface::Chat, ..)`, two pairs per line where they fit the width and one per
+line otherwise:
 
 ```
-  enter          send                           ctrl+o    expand the last result
-  alt+enter      newline (also shift+enter)      ctrl+l    clear the screen
-  esc            interrupt the turn              ctrl+c    clear input, twice to quit
-  esc esc        cancel running workers          ctrl+d    quit
-  ↑ ↓            history (empty input)           /         commands
+  ?                 key list (chat: on an empty input)
+  ctrl+c            quit (chat: clear the input, again to leave)
+  ctrl+d            quit
+  enter             send; with the popup open, complete the command
+  alt+enter shift+enter \ enter  newline (shift+enter needs the kitty keyboard protocol)
+  esc               close the popup, else interrupt the turn
+  esc esc           cancel every running worker, within 2 s of the first esc
+  ctrl+l            clear the screen; the scrollback above is untouched
+  ctrl+o            expand the last collapsed result or dispatch block
+  ↑ ↓               history on an empty input, else move between lines
+  /                 command popup; tab completes, ↑↓ chooses
+  ctrl+a ctrl+e ctrl+k ctrl+u ctrl+w alt+← alt+→  readline editing
 ```
 
-Any other key dismisses it. It is a live overlay, never committed.
+Any other key dismisses it. It is a live overlay, never committed. `/help` prints the same rows
+under the command table. The table itself is `ui::keys::BINDINGS`, which also drives the board,
+pager and watch hints and the README `## Keys` table; a test fails when any of them drifts.
 
 ---
 

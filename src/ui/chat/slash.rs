@@ -1,5 +1,6 @@
 use crate::ui::chat::theme::{Glyph, Role, Theme};
 use crate::ui::fmt;
+use crate::ui::keys::{self, Surface};
 use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
@@ -86,25 +87,6 @@ pub const COMMANDS: &[Cmd] = &[
 
 pub const MAX_ROWS: usize = 8;
 const NAME_WIDTH: usize = 12;
-
-/// The shortcut overlay, and the tail of `/help`.
-pub const SHORTCUTS: [[&str; 4]; 5] = [
-    ["enter", "send", "ctrl+o", "expand the last result"],
-    [
-        "alt+enter",
-        "newline (also shift+enter)",
-        "ctrl+l",
-        "clear the screen",
-    ],
-    [
-        "esc",
-        "interrupt the turn",
-        "ctrl+c",
-        "clear input, twice to quit",
-    ],
-    ["esc esc", "cancel running workers", "ctrl+d", "quit"],
-    ["↑ ↓", "history (empty input)", "/", "commands"],
-];
 
 /// Prefix matches first, then substring matches on name and description, stably.
 pub fn filter(input: &str) -> Vec<&'static Cmd> {
@@ -246,23 +228,13 @@ pub fn popup(input: &str, selected: usize, width: u16, t: &Theme) -> Vec<Line<'s
     out
 }
 
-pub fn overlay(t: &Theme) -> Vec<Line<'static>> {
-    SHORTCUTS
-        .iter()
-        .map(|[key, what, key2, what2]| {
-            Line::from(vec![
-                Span::raw("  "),
-                t.span(format!("{key:<14}"), Role::Name),
-                t.span(format!("{what:<31}"), Role::Meta),
-                t.span(format!("{key2:<10}"), Role::Name),
-                t.span((*what2).to_owned(), Role::Meta),
-            ])
-        })
-        .collect()
+/// The `?` overlay: chat's rows of the shared key table.
+pub fn overlay(t: &Theme, width: u16) -> Vec<Line<'static>> {
+    keys::overlay(Surface::Chat, t, width as usize, &[])
 }
 
-/// `/help`: the command table plus the shortcut block, as one committed block body.
-pub fn help_body() -> Vec<String> {
+/// `/help`: the command table plus the chat keys, as one committed block body.
+pub fn help_body(width: u16) -> Vec<String> {
     let mut out: Vec<String> = COMMANDS
         .iter()
         .map(|c| {
@@ -275,12 +247,7 @@ pub fn help_body() -> Vec<String> {
         })
         .collect();
     out.push(String::new());
-    for [key, what, key2, what2] in SHORTCUTS {
-        out.push(format!("{key:<14}{what:<31}{key2:<10}{what2}"));
-    }
-    out.push(String::new());
-    out.push("shift+enter needs a terminal that speaks the kitty keyboard protocol;".to_owned());
-    out.push("alt+enter and a trailing backslash always work.".to_owned());
+    out.extend(keys::overlay_text(Surface::Chat, width as usize, &[]));
     out
 }
 
