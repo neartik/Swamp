@@ -23,6 +23,40 @@ and dispatches together; `nd_` and `dsp_` prefixes pick one kind.
 A schema-1 run has no dispatch events. Its nodes are listed in one bucket named `legacy`, with no
 call seq and no caller; the bucket settles when the run finishes.
 
+## Delegation
+
+A brain that reads the repo itself instead of dispatching spends the most expensive context in
+the run. `RunView::brain_self_work` measures it from the journal: the tool calls the brain made
+itself before its first `swamp_dispatch`, and the brain's share of the run's cost. swamp's own
+MCP tools are never counted. The cut is the brain's `swamp_dispatch` call in its own stream
+order, because the brain's stdout is read while the MCP call is served and a read it made first
+can reach the journal after the `dispatch_issued` line; a stream that never names the call
+(schema 1, or a CLI that hides MCP calls) falls back to the journal's first dispatch. Until then
+every call counts, and the line says `no dispatch yet`.
+
+The budget is `limits.brain_read_budget` (default 8), the same number the system prompt gives
+the brain. Every surface prints it:
+
+- `swamp trace` and `swamp dispatches`, under the rows, and `/status` and `/dispatches` in chat:
+  `brain  3/8 calls before the first dispatch, 12% of the cost`. Past the budget the line ends
+  `: over limits.brain_read_budget, delegate earlier`. The share is left out until the brain has
+  reported a cost.
+- `swamp board`, in the header: `brain 3/8 (12%)`, the share dropped at the narrow tier. Within
+  budget it is the first header cell to give way; past it the cell turns red, reads
+  `brain 11/8 over`, and outlasts the queued count and the cost. The header shows the tailed run
+  whose brain made the most calls.
+- `--json`: `swamp dispatches --json` and `swamp trace --json` carry a top-level `brain`, and each
+  run of `swamp board --json` carries one, `null` for a run without a brain:
+
+```json
+"brain": {
+  "calls": 3, "budget": 8, "over_budget": false, "dispatched": true,
+  "brain_usd": 0.42, "total_usd": 3.5, "cost_share": 0.12
+}
+```
+
+`brain_usd` and `cost_share` are null until the brain has reported a cost.
+
 ## Cancelling
 
 Every surface cancels through one helper (`dispatch::cancel::cancel_node`), so the journal looks
@@ -43,6 +77,47 @@ retried and its dispatch settles with the task counted as cancelled. `swamp_canc
 tasks of dispatches the brain itself issued in the current run. `swamp cancel` exits 0 when it
 cancelled at least one node, 1 when there was nothing left to cancel.
 
+## Journal events
+
+Every surface above is a fold over `journal.jsonl`, one JSON object per line: `seq`, `at`, `run`,
+an optional `node` (the line node), and the event, tagged by `ev`. These are every `ev` a schema-2
+journal can hold; `tests/docs_drift.rs` fails when this list and `JournalEvent` disagree.
+
+| `ev` | line node | what it records |
+|---|---|---|
+| `run_started` | none | the run header: swamp version, `schema`, argv, cwd, repo, base, config hash, task. A resume appends a second one; the first is the run's origin |
+| `node_spawned` | the node | a full `NodeRecord` snapshot under `record`, before the process starts; everything after is a delta |
+| `account_selected` | the task | the account a lease went to, its exec, the policy and why, and the accounts excluded |
+| `model_resolved` | the task | the tier's model for that account, with its extra flags |
+| `process_started` | the attempt | pid, process group, argv, env overrides, cwd |
+| `session_bound` | the node | the CLI session handle, for `--resume` |
+| `node_event` | the node | one normalized `WorkerEvent` and the byte offset in `stream.jsonl` it came from |
+| `node_usage` | the node | tokens and cost so far |
+| `node_files` | the attempt | the files git says the attempt changed |
+| `node_blocked` | the task | no account can take the task until `until`: `why`, and each account's refusal |
+| `node_retry` | the attempt | the attempt failed with `reason` and the task retries, rotating account or not |
+| `provider_switch` | the task | cross-provider failover moved the task to another provider |
+| `worktree_created` | the task | the attempt's worktree, branch and base |
+| `diff_captured` | the attempt | the attempt's patch and its size |
+| `node_finished` | the node | terminal state, exit, usage, cost, work, summary, files, unparsed lines |
+| `account_health` | none | an account's health, cooldown and quota snapshot changed |
+| `account_usage` | the node | an account's window and lifetime token counters, on every commit and window roll |
+| `brain_turn` | the brain | a user or assistant turn of the brain conversation |
+| `brain_tool_call` | the caller | one swamp MCP tool call: tool, argument hash and file, `call_seq`, and the dispatch a `swamp_dispatch` issued |
+| `dispatch_issued` | the caller | the `DispatchRecord`: id, caller, call seq, wait, and every task's logical id, before any task starts |
+| `task_queued` | the task | the task waits for a lease: title, tier, depth, dispatch |
+| `dispatch_rejected` | the task | a hard limit refused the task; it is never queued |
+| `node_state_changed` | the task or attempt | a phase transition, `from` a payload-free phase `to` a full state, with why |
+| `process_exited` | the attempt | the process is gone, with its exit code or signal |
+| `dispatch_settled` | the caller | every task of the dispatch has ended: counts and cost |
+| `adopted` | the node | the node's work landed: branch, commit, conflicts |
+| `note` | any | free text from the user, the brain (`swamp_note`) or swamp |
+| `run_finished` | none | graceful shutdown; its absence marks a run interrupted |
+
+A schema-1 journal has none of `dispatch_issued`, `task_queued`, `dispatch_rejected`,
+`node_state_changed`, `process_exited` or `dispatch_settled`, and still folds: its workers land in
+the `legacy` bucket.
+
 ## JSON
 
 The `swamp dispatches`, `swamp dispatch` and `swamp_inspect` documents carry `"schema": 2`, the
@@ -56,9 +131,12 @@ durations are `_s` (seconds) or `_ms` (milliseconds). Fields are only ever added
 {
   "schema": 2,
   "run": "run_01ARZ3NDEKTSV4RRFFQ69G5F00",
-  "dispatches": [ <summary>, ... ]
+  "dispatches": [ <summary>, ... ],
+  "brain": <self work> | null
 }
 ```
+
+`brain` is the delegation metric of [Delegation](#delegation), null for a run without a brain.
 
 With `--follow --json`, one `<summary>` per line, printed whenever a dispatch's state, counts or
 cost change.
@@ -160,7 +238,8 @@ retrying), `state` and `ok` follow the task, and so does `failure` once the task
 
 ### `swamp trace --json`
 
-With `--dispatch <ID>`, `tree`, `nodes` and `events` hold only that dispatch's tasks and what they
+The document carries a top-level `brain` (see [Delegation](#delegation)) unless `--dispatch`
+narrows it. With `--dispatch <ID>`, `tree`, `nodes` and `events` hold only that dispatch's tasks and what they
 dispatched in turn, `totals` is the dispatch's rollup, and a `dispatch` field names it.
 `--group-by dispatch` has no JSON form (use `swamp dispatches --json`) and does not combine with
 `--follow`; `--dispatch` does not combine with `--node`.
