@@ -5,6 +5,7 @@ pub mod cancel;
 pub mod chat;
 pub mod config;
 pub mod diff;
+pub mod dispatches;
 pub mod doctor;
 pub mod gc;
 pub mod mcp_bridge;
@@ -19,7 +20,7 @@ pub mod worktrees;
 
 use crate::config::Config;
 use crate::dispatch::{AccountPool, Dispatcher};
-use crate::ids::{NodeId, RunId};
+use crate::ids::{DispatchId, NodeId, RunId};
 use crate::journal::fold::RunView;
 use crate::journal::paths::{Paths, RunPaths};
 use crate::journal::record::{JournalEvent, SCHEMA_VERSION};
@@ -74,24 +75,31 @@ impl Ctx {
             let node = run_node(&view, &rp)?;
             return Ok((rp, node));
         }
+        let mut hits = self.node_hits(spec)?;
+        match hits.len() {
+            1 => Ok(hits.remove(0)),
+            0 => anyhow::bail!("no node matches `{spec}`"),
+            _ => anyhow::bail!("node `{spec}` is ambiguous: {}", node_candidates(&hits)),
+        }
+    }
+
+    /// Every node `spec` names across every run; a full id stops at its one hit.
+    pub fn node_hits(&self, spec: &str) -> anyhow::Result<Vec<(RunPaths, NodeRecord)>> {
+        let spec = spec.trim();
         let exact = NodeId::from_str(spec).is_ok();
         let mut hits: Vec<(RunPaths, NodeRecord)> = Vec::new();
-        for run in self.paths.list_runs()? {
-            let rp = self.paths.run_paths(run);
-            let Ok(view) = RunView::load(&rp.dir, false) else {
-                continue;
-            };
+        for (rp, view) in self.views()? {
             // The worktree branch carries the LOGICAL short id and the node directory the
             // attempt's, so both spellings are on screen and both have to resolve.
             let mut logical: Vec<NodeId> = Vec::new();
             for n in view.nodes.values() {
-                if node_matches(n.id, spec) {
+                if n.id.matches(spec) {
                     // A full id is unique by construction; only a prefix can collide.
                     if exact {
-                        return Ok((rp, n.clone()));
+                        return Ok(vec![(rp, n.clone())]);
                     }
                     hits.push((rp.clone(), n.clone()));
-                } else if node_matches(n.logical, spec) && !logical.contains(&n.logical) {
+                } else if n.logical.matches(spec) && !logical.contains(&n.logical) {
                     logical.push(n.logical);
                 }
             }
@@ -103,16 +111,113 @@ impl Ctx {
                     continue;
                 };
                 if exact {
-                    return Ok((rp, node));
+                    return Ok(vec![(rp, node)]);
                 }
                 hits.push((rp.clone(), node));
             }
         }
+        Ok(hits)
+    }
+
+    /// A full dispatch id, a unique prefix or its short id, searched across every run.
+    pub fn find_dispatch(&self, spec: &str) -> anyhow::Result<(RunPaths, DispatchId)> {
+        let mut hits = self.dispatch_hits(spec)?;
         match hits.len() {
             1 => Ok(hits.remove(0)),
-            0 => anyhow::bail!("no node matches `{spec}`"),
-            _ => anyhow::bail!("node `{spec}` is ambiguous: {}", candidates(&hits)),
+            0 => anyhow::bail!("no dispatch matches `{spec}`"),
+            _ => anyhow::bail!(
+                "dispatch `{spec}` is ambiguous: {}",
+                self.dispatch_candidates(&hits)
+            ),
         }
+    }
+
+    /// Within the named run, or across every run when none is named.
+    pub fn dispatch_in(
+        &self,
+        run: Option<&str>,
+        spec: &str,
+    ) -> anyhow::Result<(RunPaths, DispatchId)> {
+        let Some(run) = run else {
+            return self.find_dispatch(spec);
+        };
+        let paths = self.run_paths(Some(run))?;
+        let view = self.view(&paths, false)?;
+        let mut hits: Vec<(RunPaths, DispatchId)> =
+            crate::journal::inspect::match_dispatches(&view, spec.trim())
+                .into_iter()
+                .map(|id| (paths.clone(), id))
+                .collect();
+        match hits.len() {
+            1 => Ok(hits.remove(0)),
+            0 => anyhow::bail!("no dispatch matches `{spec}` in run {}", paths.run.short()),
+            _ => anyhow::bail!(
+                "dispatch `{spec}` is ambiguous in run {}: {}",
+                paths.run.short(),
+                self.dispatch_candidates(&hits)
+            ),
+        }
+    }
+
+    /// Every dispatch `spec` names across every run; a full id stops at its one hit.
+    pub fn dispatch_hits(&self, spec: &str) -> anyhow::Result<Vec<(RunPaths, DispatchId)>> {
+        let spec = spec.trim();
+        anyhow::ensure!(!spec.is_empty(), "empty dispatch specifier");
+        let exact = DispatchId::from_str(spec).is_ok();
+        let mut hits = Vec::new();
+        for (rp, view) in self.views()? {
+            for id in crate::journal::inspect::match_dispatches(&view, spec) {
+                if exact {
+                    return Ok(vec![(rp, id)]);
+                }
+                hits.push((rp.clone(), id));
+            }
+        }
+        Ok(hits)
+    }
+
+    /// Every task `spec` names across every run, with its title, started or not.
+    pub fn task_hits(&self, spec: &str) -> anyhow::Result<Vec<(RunPaths, NodeId, String)>> {
+        let mut hits = Vec::new();
+        for (rp, view) in self.views()? {
+            for id in crate::journal::inspect::match_tasks(&view, spec) {
+                let title = view
+                    .tasks
+                    .get(&id)
+                    .map(|t| t.title.clone())
+                    .unwrap_or_default();
+                hits.push((rp.clone(), id, title));
+            }
+        }
+        Ok(hits)
+    }
+
+    /// Every run that folds, newest first; one that does not is skipped.
+    fn views(&self) -> anyhow::Result<impl Iterator<Item = (RunPaths, RunView)> + '_> {
+        Ok(self.paths.list_runs()?.into_iter().filter_map(|run| {
+            let rp = self.paths.run_paths(run);
+            let view = RunView::load(&rp.dir, false).ok()?;
+            Some((rp, view))
+        }))
+    }
+
+    /// `short (run, N tasks)` per hit, for an error the user can act on.
+    pub fn dispatch_candidates(&self, hits: &[(RunPaths, DispatchId)]) -> String {
+        hits.iter()
+            .take(8)
+            .map(|(rp, id)| {
+                let tasks = RunView::load(&rp.dir, false)
+                    .ok()
+                    .and_then(|v| v.dispatches.get(id).map(|d| d.tasks.len()))
+                    .unwrap_or(0);
+                format!(
+                    "{} (run {}, {tasks} tasks)",
+                    crate::journal::inspect::short(*id),
+                    rp.run.short()
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
     }
 
     pub fn out(&self, text: &str) {
@@ -155,7 +260,7 @@ fn run_node(view: &RunView, rp: &RunPaths) -> anyhow::Result<NodeRecord> {
         anyhow::anyhow!(
             "run {} has no finished node; name one: {}",
             rp.run,
-            candidates(&listed)
+            node_candidates(&listed)
         )
     })
 }
@@ -176,29 +281,24 @@ fn attempt_of(view: &RunView, logical: NodeId) -> Option<NodeRecord> {
         .map(|n| (*n).clone())
 }
 
+fn node_candidates(hits: &[(RunPaths, NodeRecord)]) -> String {
+    candidates(hits.iter().map(|(rp, n)| (rp.run, n.id, n.title.as_str())))
+}
+
 /// `short (run, title)` per hit, for an error the user can act on.
-fn candidates(hits: &[(RunPaths, NodeRecord)]) -> String {
-    hits.iter()
+fn candidates<'a>(hits: impl IntoIterator<Item = (RunId, NodeId, &'a str)>) -> String {
+    hits.into_iter()
         .take(8)
-        .map(|(rp, n)| {
+        .map(|(run, id, title)| {
             format!(
                 "{} (run {}, {})",
-                n.id.short(),
-                rp.run.short(),
-                crate::ui::fmt::truncate(&n.title, 40)
+                id.short(),
+                run.short(),
+                crate::ui::fmt::truncate(title, 40)
             )
         })
         .collect::<Vec<_>>()
         .join(", ")
-}
-
-fn node_matches(id: NodeId, spec: &str) -> bool {
-    if let Ok(exact) = NodeId::from_str(spec) {
-        return exact == id;
-    }
-    let needle = spec.trim_start_matches("nd_").to_ascii_lowercase();
-    let full = id.0.to_string().to_ascii_lowercase();
-    !needle.is_empty() && (full.starts_with(&needle) || id.short() == needle)
 }
 
 /// "25m" on the command line; config uses the same spelling through humantime.
@@ -243,6 +343,14 @@ pub fn guard_depth(cfg: &Config) -> anyhow::Result<u32> {
         "refusing to nest: SWAMP_DEPTH={depth} is already at limits.max_depth = {max}"
     );
     Ok(depth)
+}
+
+/// A permission mode that denies Bash is a warning, never a refusal: the run still starts.
+pub fn warn_permissions(cfg: &Config) {
+    for check in crate::doctor::permission_checks(cfg) {
+        tracing::warn!("{}: {}", check.name, check.detail);
+        eprintln!("warning: {}", check.detail);
+    }
 }
 
 /// Resolves on SIGINT or SIGTERM. Workers run in their own process groups, so a terminal
@@ -335,14 +443,23 @@ impl RunSession {
         })
     }
 
+    /// Seeded from the run's journal, so a resumed run continues its depths and counters.
     pub fn dispatcher(&self) -> Arc<Dispatcher> {
-        Dispatcher::new(
+        let d = Dispatcher::new(
             self.cfg.clone(),
             self.pool.clone(),
             self.exec.clone(),
             self.workspace.clone(),
             self.journal.clone(),
-        )
+        );
+        match RunView::load(&self.paths.dir, false) {
+            Ok(view) => d.seed(&view),
+            Err(e) => tracing::warn!(
+                "cannot seed the dispatcher from run {}: {e}",
+                self.paths.run
+            ),
+        }
+        d
     }
 
     /// The absence of `RunFinished` is what marks a run interrupted, so this is durable and
@@ -401,27 +518,6 @@ fn write_header(
         serde_json::to_vec_pretty(&header)?,
     )?;
     Ok(())
-}
-
-/// Mirrors the workspace manager's layout: `<workspace.root>/<repo-name>-<hash8>`.
-pub fn worktree_root(ctx: &Ctx) -> Utf8PathBuf {
-    match &ctx.cfg.workspace.root {
-        Some(root) => {
-            let base = Utf8PathBuf::from(shellexpand::tilde(root.as_str()).into_owned());
-            let name = ctx.paths.repo.file_name().unwrap_or("repo");
-            base.join(format!("{name}-{}", hash8(ctx.paths.repo.as_str())))
-        }
-        None => ctx.paths.worktree_root(),
-    }
-}
-
-fn hash8(s: &str) -> String {
-    use sha2::{Digest, Sha256};
-    Sha256::digest(s.as_bytes())
-        .iter()
-        .take(4)
-        .map(|b| format!("{b:02x}"))
-        .collect()
 }
 
 /// Where a node's `NodeResult` is kept, so a lost journal can still be rebuilt.

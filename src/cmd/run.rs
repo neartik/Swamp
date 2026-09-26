@@ -1,25 +1,22 @@
 use crate::cli::RunArgs;
 use crate::cmd::{Ctx, RunSession, parse_duration, task_text, title_of, write_result};
 use crate::config::Config;
-use crate::dispatch::{NodeCtx, NodeOutcome, NodeRunner, run_node};
-use crate::ids::{NodeId, NodeIds, RunId};
+use crate::dispatch::{DirectRunner, NodeCtx, NodeOutcome, run_node};
+use crate::ids::{DispatchId, NodeId, RunId};
 use crate::journal::paths::RunPaths;
-use crate::model::core::{AccountId, NodeKind, NodeState, Provider, Tier};
+use crate::model::core::{AccountId, NodeState, Provider, Tier};
+use crate::model::dispatch::{DispatchCounts, DispatchRecord, TaskRef, settled_state};
 use crate::model::failure::Failure;
 use crate::model::node::{NodeRecord, WorkResultRef};
-use crate::model::result::{IsolationMode, NodeResult, TaskRequest};
+use crate::model::result::{NodeResult, TaskRequest};
 use crate::ui::trace::{TraceOpts, render};
-use crate::worker::Executor;
-use crate::worker::adapter::{LaunchSpec, SessionPlan};
-use crate::workspace::{NodeWorktree, WorkspaceManager};
-use async_trait::async_trait;
+use crate::worker::adapter::LaunchSpec;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 const DETACH_WAIT: Duration = Duration::from_secs(60);
-const GRACE: Duration = Duration::from_secs(5);
 
 /// One-shot dispatch. The v1 smoke path when --no-brain is set.
 pub async fn run(ctx: &Ctx, args: &RunArgs) -> anyhow::Result<i32> {
@@ -29,6 +26,7 @@ pub async fn run(ctx: &Ctx, args: &RunArgs) -> anyhow::Result<i32> {
     for w in &cfg.warnings {
         tracing::warn!("{w}");
     }
+    crate::cmd::warn_permissions(&cfg);
     preflight(ctx, &cfg).await?;
     let session = RunSession::start(ctx, cfg, RunId::new(), Some(&task)).await?;
     ctx.paths
@@ -39,7 +37,7 @@ pub async fn run(ctx: &Ctx, args: &RunArgs) -> anyhow::Result<i32> {
         println!("run {}", session.paths.run);
     }
     if args.no_brain {
-        single_node(ctx, session, args, task).await
+        single_node(ctx, session, args, task, depth).await
     } else {
         with_brain(ctx, session, args, task, depth).await
     }
@@ -67,6 +65,7 @@ async fn single_node(
     session: RunSession,
     args: &RunArgs,
     task: String,
+    depth: u32,
 ) -> anyhow::Result<i32> {
     let tier = args
         .tier
@@ -81,18 +80,43 @@ async fn single_node(
         account: args.account.clone().map(AccountId),
         deps: Vec::new(),
     };
-    let order = provider_order(&session.cfg, &request, tier);
-    let provider = order.first().copied().unwrap_or(Provider::Anthropic);
-    let spec = launch_spec(&session.cfg, &request, tier, provider, &session.paths);
+    let order = crate::dispatch::provider_order(&session.cfg, &request, tier);
+    let provider = crate::dispatch::primary_provider(&order);
+    let spec =
+        crate::dispatch::launch_spec(&session.cfg, &request, tier, provider, &session.paths.dir);
+
+    // The run root is the caller of its one-task dispatch.
+    let logical = NodeId::new();
+    let root = NodeId(session.paths.run.0);
+    let dispatch = DispatchId::new();
+    crate::dispatch::journal_issued(
+        &session.journal,
+        DispatchRecord {
+            id: dispatch,
+            run: session.paths.run,
+            caller: root,
+            call_seq: None,
+            wait: !args.detach,
+            max_wait_s: None,
+            tasks: vec![TaskRef {
+                logical,
+                title: request.title.clone(),
+                tier,
+                provider,
+            }],
+            at: time::OffsetDateTime::now_utc(),
+        },
+    )
+    .await;
 
     let cancel = CancellationToken::new();
     let cx = NodeCtx {
         cfg: session.cfg.clone(),
         pool: session.pool.clone(),
-        runner: Arc::new(DirectRunner {
-            exec: session.exec.clone(),
-            workspace: session.workspace.clone(),
-        }),
+        runner: Arc::new(DirectRunner::new(
+            session.exec.clone(),
+            session.workspace.clone(),
+        )),
         journal: session.journal.clone(),
         provider_order: order,
         cross_provider: session
@@ -104,19 +128,25 @@ async fn single_node(
         deadline: Instant::now() + session.cfg.node_timeout(tier),
         // No brain, no parent: this node is the run.
         parent: None,
-        logical: NodeId::new(),
+        logical,
+        dispatch,
+        depth: depth + 1,
         cancel: cancel.clone(),
     };
 
     if args.detach {
         let paths = session.paths.clone();
-        tokio::spawn(async move { run_node(&cx, spec, &request).await });
+        tokio::spawn(async move {
+            let outcome = run_node(&cx, spec, &request).await;
+            settle(&cx, dispatch, root, &outcome).await;
+        });
         wait_for_spawn(&paths).await;
         println!("detached; follow with `swamp trace {} --follow`", paths.run);
         return Ok(0);
     }
 
     let (outcome, interrupted) = supervise(&cx, spec, &request, &cancel).await;
+    settle(&cx, dispatch, root, &outcome).await;
     // The context holds journal and pool handles; the writer task cannot drain until it goes.
     drop(cx);
     let result = node_result(&request, tier, provider, &outcome);
@@ -142,6 +172,13 @@ async fn single_node(
     ctx.paths.deregister_run(paths.run).ok();
     report(ctx, &paths, &result)?;
     Ok(exit_code(outcome.failure.as_ref(), interrupted))
+}
+
+async fn settle(cx: &NodeCtx, dispatch: DispatchId, caller: NodeId, outcome: &NodeOutcome) {
+    let mut counts = DispatchCounts::default();
+    counts.count(&settled_state(outcome.failure.as_ref()));
+    let cost = crate::dispatch::total_cost(outcome.attempts.iter().map(|a| a.cost));
+    crate::dispatch::journal_settled(&cx.journal, dispatch, caller, counts, cost).await;
 }
 
 /// Ctrl-C cancels the node, which kills its process group, and the loop still returns so the
@@ -219,7 +256,7 @@ async fn with_brain(
             code = &mut turn => code,
             () = crate::cmd::shutdown_signal() => {
                 eprintln!("interrupted: cancelling {} nodes", dispatcher.cancel_all());
-                tokio::time::sleep(cfg.limits.grace_period.unwrap_or(GRACE)).await;
+                tokio::time::sleep(cfg.grace_period()).await;
                 6
             }
         }
@@ -255,6 +292,7 @@ async fn with_brain(
         &view,
         &TraceOpts {
             json: ctx.json,
+            read_budget: Some(cfg.brain_read_budget()),
             ..TraceOpts::default()
         },
     ));
@@ -335,68 +373,6 @@ fn overrides(ctx: &Ctx, args: &RunArgs) -> anyhow::Result<Config> {
     Ok(cfg)
 }
 
-fn provider_order(cfg: &Config, task: &TaskRequest, tier: Tier) -> Vec<Provider> {
-    match task.provider {
-        Some(p) => {
-            let mut order = vec![p];
-            order.extend(cfg.provider_order(tier).into_iter().filter(|q| *q != p));
-            order
-        }
-        None => {
-            let order = cfg.provider_order(tier);
-            if order.is_empty() {
-                vec![Provider::Anthropic]
-            } else {
-                order
-            }
-        }
-    }
-}
-
-fn launch_spec(
-    cfg: &Config,
-    task: &TaskRequest,
-    tier: Tier,
-    provider: Provider,
-    paths: &RunPaths,
-) -> LaunchSpec {
-    let worker = cfg
-        .providers
-        .get(&provider)
-        .map(|p| p.worker.clone())
-        .unwrap_or_default();
-    let isolation = task
-        .isolation
-        .or(cfg.workspace.isolation)
-        .unwrap_or(IsolationMode::Worktree);
-    LaunchSpec {
-        node: NodeIds {
-            id: NodeId::new(),
-            session_uuid: uuid::Uuid::new_v4(),
-        },
-        provider,
-        exec: String::new(),
-        env: Default::default(),
-        model: String::new(),
-        tier,
-        cwd: paths.dir.clone(),
-        isolation,
-        session: SessionPlan::New { preassigned: None },
-        kind: NodeKind::Worker,
-        permission_mode: worker.permission_mode.clone().unwrap_or_default(),
-        sandbox: worker.sandbox.clone().unwrap_or_default(),
-        append_system_prompt: None,
-        allow_tools: worker.allow_tools.clone(),
-        deny_tools: worker.deny_tools.clone(),
-        mcp: None,
-        last_message_path: paths.dir.join("last-message.txt"),
-        extra_args: worker.args_for(isolation),
-        extra: cfg.tier_extra(provider, tier),
-        partial_messages: false,
-        attempt: 1,
-    }
-}
-
 fn node_result(
     task: &TaskRequest,
     tier: Tier,
@@ -455,35 +431,6 @@ async fn wait_for_spawn(paths: &RunPaths) {
             return;
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-}
-
-/// The production runner, wired here so `--no-brain` needs no dispatcher and no brain.
-struct DirectRunner {
-    exec: Arc<Executor>,
-    workspace: Arc<WorkspaceManager>,
-}
-
-#[async_trait]
-impl NodeRunner for DirectRunner {
-    async fn workspace(&self, logical: NodeId, attempt: u32) -> anyhow::Result<NodeWorktree> {
-        self.workspace.create(logical, attempt).await
-    }
-    async fn run(
-        &self,
-        spec: &LaunchSpec,
-        timeout: Duration,
-        cancel: CancellationToken,
-    ) -> anyhow::Result<crate::worker::RunOutcome> {
-        self.exec.run(spec, timeout, cancel).await
-    }
-    async fn finalize(
-        &self,
-        wt: &NodeWorktree,
-        title: &str,
-        tier: Tier,
-    ) -> anyhow::Result<Option<WorkResultRef>> {
-        self.workspace.finalize(wt, title, tier).await
     }
 }
 

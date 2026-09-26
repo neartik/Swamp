@@ -29,7 +29,7 @@ pub fn compose(app: &App) -> Live {
         lines.push(working);
     }
     if app.overlay {
-        lines.extend(slash::overlay(t));
+        lines.extend(slash::overlay(t, width));
     } else if let Some(sel) = app.popup {
         lines.extend(slash::popup(app.editor.text(), sel, width, t));
     }

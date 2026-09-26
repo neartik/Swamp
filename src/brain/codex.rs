@@ -1,4 +1,4 @@
-use crate::brain::{Brain, BrainEvent, EVENT_QUEUE, Launch, drain_stderr, drive, finish};
+use crate::brain::{Brain, BrainEvent, EVENT_QUEUE, Launch, drain_stderr, drive, finish, settle};
 use crate::journal::JournalEvent;
 use crate::journal::record::TurnRole;
 use crate::model::core::{NodeState, SessionHandle};
@@ -119,13 +119,11 @@ impl Brain for CodexBrain {
     }
 
     async fn shutdown(mut self: Box<Self>) -> anyhow::Result<()> {
-        if let Some(mut turn) = self.turn.take()
-            && tokio::time::timeout(self.launch.turn_timeout, &mut turn)
-                .await
-                .is_err()
+        let grace = self.launch.grace;
+        if let Some(turn) = self.turn.take()
+            && !settle(turn, grace).await
         {
-            tracing::warn!("the brain's last turn outlived its timeout");
-            turn.abort();
+            tracing::warn!("the brain's last turn outlived the {grace:?} grace period");
         }
         self.refresh();
         finish(&self.launch, NodeState::Succeeded).await;

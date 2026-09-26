@@ -57,37 +57,67 @@ fn brain_turn(dir: &std::path::Path, name: &str, argv: &[String], s: &Scenario) 
     scenario::say(&scenario::recorded_rate_limit_line());
 
     let turn = read_turn(dir, name);
+    for (i, file) in s.brain_reads.iter().enumerate() {
+        let id = format!("toolu_read_{i}");
+        scenario::say(
+            &serde_json::json!({
+                "type": "assistant",
+                "message": { "role": "assistant", "type": "message", "model": model,
+                             "content": [{ "type": "tool_use", "id": id, "name": "Read",
+                                           "input": { "file_path": file } }],
+                             "usage": { "input_tokens": 12, "output_tokens": 3 } },
+                "session_id": session
+            })
+            .to_string(),
+        );
+        scenario::say(
+            &serde_json::json!({
+                "type": "user",
+                "message": { "role": "user",
+                             "content": [{ "type": "tool_result", "tool_use_id": id,
+                                           "is_error": false, "content": "fn main() {}" }] },
+                "session_id": session
+            })
+            .to_string(),
+        );
+    }
     let tasks: Vec<serde_json::Value> = s
         .dispatch
         .iter()
         .map(|t| serde_json::json!({ "title": t.title, "prompt": t.prompt }))
         .collect();
     let args = serde_json::json!({ "tasks": tasks, "wait": true });
-    scenario::say(
-        &serde_json::json!({
-            "type": "assistant",
-            "message": { "role": "assistant", "type": "message", "model": model,
-                         "content": [{ "type": "tool_use", "id": "toolu_dispatch",
-                                       "name": "mcp__swamp__swamp_dispatch", "input": args }],
-                         "usage": { "input_tokens": 30, "output_tokens": 9 } },
-            "session_id": session
-        })
-        .to_string(),
-    );
+    for call in 0..s.dispatch_calls.max(1) {
+        let id = match call {
+            0 => "toolu_dispatch".to_owned(),
+            n => format!("toolu_dispatch_{n}"),
+        };
+        scenario::say(
+            &serde_json::json!({
+                "type": "assistant",
+                "message": { "role": "assistant", "type": "message", "model": model,
+                             "content": [{ "type": "tool_use", "id": id,
+                                           "name": "mcp__swamp__swamp_dispatch", "input": args }],
+                             "usage": { "input_tokens": 30, "output_tokens": 9 } },
+                "session_id": session
+            })
+            .to_string(),
+        );
 
-    let reply = call_bridge(argv, &args);
-    let ok = reply.is_ok();
-    let body = reply.unwrap_or_else(|e| e);
-    scenario::say(
-        &serde_json::json!({
-            "type": "user",
-            "message": { "role": "user",
-                         "content": [{ "type": "tool_result", "tool_use_id": "toolu_dispatch",
-                                       "is_error": !ok, "content": body }] },
-            "session_id": session
-        })
-        .to_string(),
-    );
+        let reply = call_bridge(argv, &args);
+        let ok = reply.is_ok();
+        let body = reply.unwrap_or_else(|e| e);
+        scenario::say(
+            &serde_json::json!({
+                "type": "user",
+                "message": { "role": "user",
+                             "content": [{ "type": "tool_result", "tool_use_id": id,
+                                           "is_error": !ok, "content": body }] },
+                "session_id": session
+            })
+            .to_string(),
+        );
+    }
     scenario::say(&scenario::assistant_text_line(&format!(
         "dispatched {} tasks for: {}",
         s.dispatch.len(),

@@ -1,7 +1,4 @@
-//! `swamp board`: the read-only dispatch board, `docs/BOARD.md`.
-//!
-//! `model` is pure and holds everything a frame draws; `sources` is the only half that
-//! touches the filesystem. Nothing here talks to a supervisor.
+//! `swamp board` (`docs/BOARD.md`): read-only except a confirmed cancel; only `sources` does IO.
 
 pub mod app;
 pub mod model;

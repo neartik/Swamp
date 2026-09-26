@@ -3,11 +3,13 @@ use crate::config::{Config, MAX_COOLDOWN};
 use crate::dispatch::account::{Account, AccountState, Health, QuotaSource, UsageLedger};
 use crate::dispatch::cooldown::cooldown_for;
 use crate::dispatch::persist::{self, StateMap};
-use crate::dispatch::policy::{Rank, Scoring, SelectionPolicy, explain, rank, score};
+use crate::dispatch::policy::{
+    Ineligible, Rank, Scoring, SelectionPolicy, explain, gate, rank, score,
+};
 use crate::ids::NodeId;
 use crate::journal::{JournalEvent, JournalHandle};
 use crate::model::core::{
-    AccountId, Cost, LimitReached, LimitScope, Provider, RateLimitSnapshot, Usage,
+    AccountId, Cost, LimitReached, LimitScope, NodeState, Provider, RateLimitSnapshot, Usage,
 };
 use crate::model::failure::Failure;
 use camino::Utf8PathBuf;
@@ -114,6 +116,7 @@ enum Capacity {
     AllExhausted {
         retry_at: OffsetDateTime,
         why: String,
+        ineligible: Vec<(AccountId, Ineligible)>,
     },
     Exhausted {
         reason: String,
@@ -212,13 +215,14 @@ impl AccountPool {
         exclude: &HashSet<AccountId>,
         deadline: Instant,
     ) -> Result<Lease, NoCapacity> {
-        self.acquire_node(provider, exclude, deadline, None, None)
+        self.acquire_node(provider, exclude, deadline, None, None, &mut |_| {})
             .await
     }
 
     /// A blocked node waits for a window to roll instead of failing: an overnight run wants
     /// the lease it will get in 40 minutes, not an error now. `node` is what the one
-    /// `NodeBlocked` line is attributed to, `cancel` is what makes `esc esc` prompt.
+    /// `NodeBlocked` line is attributed to, `cancel` is what makes `esc esc` prompt, and
+    /// `on_blocked` hears the Blocked state once, when the wait starts.
     pub async fn acquire_node(
         self: &Arc<Self>,
         provider: Provider,
@@ -226,6 +230,7 @@ impl AccountPool {
         deadline: Instant,
         node: Option<NodeId>,
         cancel: Option<&CancellationToken>,
+        on_blocked: &mut (dyn FnMut(NodeState) + Send),
     ) -> Result<Lease, NoCapacity> {
         let mut announced = false;
         loop {
@@ -248,7 +253,11 @@ impl AccountPool {
                     }
                 },
                 Capacity::Busy { next_reset } => next_reset,
-                Capacity::AllExhausted { retry_at, why } => {
+                Capacity::AllExhausted {
+                    retry_at,
+                    why,
+                    ineligible,
+                } => {
                     // Once per blocked node, never once per loop iteration.
                     if !announced {
                         announced = true;
@@ -272,9 +281,14 @@ impl AccountPool {
                             node,
                             JournalEvent::NodeBlocked {
                                 until: retry_at,
-                                why,
+                                why: why.clone(),
+                                ineligible,
                             },
                         );
+                        on_blocked(NodeState::Blocked {
+                            until: retry_at,
+                            why,
+                        });
                     }
                     Some(retry_at)
                 }
@@ -308,7 +322,7 @@ impl AccountPool {
         exclude: &HashSet<AccountId>,
     ) -> Option<NoCapacity> {
         match self.capacity(provider, exclude) {
-            Capacity::AllExhausted { retry_at, why } => {
+            Capacity::AllExhausted { retry_at, why, .. } => {
                 Some(NoCapacity::AllExhausted { retry_at, why })
             }
             // No timer will rescue this provider, so failover is the only thing that can.
@@ -387,7 +401,7 @@ impl AccountPool {
                     }
                 }
                 Capacity::Busy { next_reset } => next_reset,
-                Capacity::AllExhausted { retry_at, why } => {
+                Capacity::AllExhausted { retry_at, why, .. } => {
                     if !announced {
                         announced = true;
                         tracing::warn!(
@@ -784,13 +798,22 @@ impl AccountPool {
             let ledger = self.ledger.lock();
             live_states(&state, &ledger, &candidates)
         };
-        let pool_window = pool_window(&live);
         let (mut busy, mut retry_at) = (false, None::<OffsetDateTime>);
         let mut why: Vec<String> = Vec::new();
+        let mut ineligible = Vec::new();
         let brain_held = self.brain_held.lock().clone();
         for (a, s) in &live {
-            if score(self.policy, a, s, pool_window, &self.scoring, now).is_some() {
-                return Capacity::Ready;
+            match gate(
+                s.health,
+                s.cooldown_until,
+                s.quota.as_ref(),
+                s.inflight,
+                a.max_concurrency,
+                &self.scoring,
+                now,
+            ) {
+                None => return Capacity::Ready,
+                Some(g) => ineligible.push((a.id.clone(), g)),
             }
             match self.block_reason(a, s, now) {
                 // A slot the brain holds for the whole run comes back to nobody, so it must
@@ -812,6 +835,7 @@ impl AccountPool {
             (false, Some(retry_at)) => Capacity::AllExhausted {
                 retry_at,
                 why: why.join("; "),
+                ineligible,
             },
             (false, None) if why.is_empty() => Capacity::Exhausted {
                 reason: self.no_account_error(provider, exclude).to_string(),

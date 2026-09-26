@@ -1,4 +1,4 @@
-use crate::ids::NodeId;
+use crate::ids::{DispatchId, NodeId};
 use crate::journal::fold::{RunView, TreeRow};
 use crate::journal::paths::RunPaths;
 use crate::journal::reader::Tailer;
@@ -7,7 +7,7 @@ use crate::model::core::{NodeKind, NodeState};
 use crate::model::event::WorkerEvent;
 use crate::model::failure::{Detector, Failure};
 use crate::model::node::NodeRecord;
-use crate::ui::fmt;
+use crate::ui::{delegation, dispatches, fmt};
 use serde_json::{Map, Value, json};
 use std::collections::BTreeMap;
 use std::io::Write;
@@ -26,6 +26,19 @@ pub struct TraceOpts {
     pub depth: Option<u32>,
     pub failed: bool,
     pub json: bool,
+    /// Only this dispatch's tasks and what hangs below them.
+    pub dispatch: Option<DispatchId>,
+    /// One section per dispatch instead of one tree.
+    pub by_dispatch: bool,
+    /// `limits.brain_read_budget`; the built-in default when unset.
+    pub read_budget: Option<u32>,
+}
+
+impl TraceOpts {
+    fn budget(&self) -> u32 {
+        self.read_budget
+            .unwrap_or(crate::brain::prompt::DEFAULT_READ_BUDGET)
+    }
 }
 
 pub fn render(view: &RunView, o: &TraceOpts) -> String {
@@ -35,29 +48,113 @@ pub fn render(view: &RunView, o: &TraceOpts) -> String {
     let mut out = String::new();
     out.push_str(&header(view));
     let rows = visible(view, o);
-    for (i, row) in rows.iter().enumerate() {
-        if row.depth > 0 {
-            out.push_str(&format!("{}|\n", "  ".repeat(row.depth as usize)));
-        }
-        out.push_str(&block(view, row, more_siblings(&rows, i), o));
+    if o.by_dispatch {
+        out.push_str(&grouped(view, rows, o));
+    } else {
+        out.push_str(&blocks(view, &rows, o));
     }
     if o.node.is_none() {
-        out.push_str(&footer(view));
+        out.push_str(&footer(view, o.budget()));
     }
     out
 }
 
-/// Rows the flags leave standing, already filtered by depth, node and failure.
+fn blocks(view: &RunView, rows: &[TreeRow], o: &TraceOpts) -> String {
+    let mut out = String::new();
+    for (i, row) in rows.iter().enumerate() {
+        if row.depth > 0 {
+            out.push_str(&format!("{}|\n", "  ".repeat(row.depth as usize)));
+        }
+        out.push_str(&block(view, row, more_siblings(rows, i), o));
+    }
+    out
+}
+
+/// Rows outside any dispatch first, then one section per dispatch with its tasks one level down.
+fn grouped(view: &RunView, rows: Vec<TreeRow>, o: &TraceOpts) -> String {
+    let of = |logical: NodeId| view.tasks.get(&logical).map(|t| t.dispatch);
+    let loose: Vec<TreeRow> = rows
+        .iter()
+        .filter(|r| of(r.logical).is_none())
+        .cloned()
+        .collect();
+    let mut out = blocks(view, &loose, o);
+    for d in view.dispatches.values() {
+        let members: Vec<TreeRow> = rows
+            .iter()
+            .filter(|r| of(r.logical) == Some(d.id))
+            .map(|r| TreeRow {
+                depth: 1,
+                ..r.clone()
+            })
+            .collect();
+        if members.is_empty() {
+            continue;
+        }
+        // Age is not shown here, so the clock does not make the render unstable.
+        let s = crate::journal::inspect::summary(view, d, OffsetDateTime::UNIX_EPOCH);
+        let seq = s.call_seq.map(|c| format!("  seq {c}")).unwrap_or_default();
+        out.push_str(&format!(
+            "\ndispatch {}{seq}  {}  caller {}  {}  {}\n",
+            s.short,
+            dispatches::state_word(s.state),
+            dispatches::caller_word(&s),
+            dispatches::tasks_word(s.tasks),
+            dispatches::cost(&s.cost),
+        ));
+        out.push_str(&blocks(view, &members, o));
+    }
+    out
+}
+
+/// Rows the flags leave standing, already filtered by depth, node, failure and dispatch.
 fn visible(view: &RunView, o: &TraceOpts) -> Vec<TreeRow> {
-    view.tree()
-        .into_iter()
+    let rows = view.tree();
+    let rows = match o.dispatch {
+        Some(d) => under_dispatch(view, rows, d),
+        None => rows,
+    };
+    rows.into_iter()
         .filter(|r| o.depth.is_none_or(|d| r.depth <= d))
-        .filter(|r| !o.failed || matches!(r.state, NodeState::Failed { .. }))
+        .filter(|r| {
+            !o.failed
+                || matches!(
+                    r.state,
+                    NodeState::Failed { .. } | NodeState::Rejected { .. }
+                )
+        })
         .filter(|r| match o.node {
             None => true,
             Some(id) => r.logical == id || r.attempts.contains(&id),
         })
         .collect()
+}
+
+/// The dispatch's tasks and every row below them, in tree order.
+fn under_dispatch(view: &RunView, rows: Vec<TreeRow>, d: DispatchId) -> Vec<TreeRow> {
+    let tasks = view
+        .dispatches
+        .get(&d)
+        .map(|v| v.tasks.clone())
+        .unwrap_or_default();
+    let mut out = Vec::new();
+    let mut inside: Option<u32> = None;
+    for r in rows {
+        if inside.is_some_and(|depth| r.depth <= depth) {
+            inside = None;
+        }
+        if inside.is_none() && tasks.contains(&r.logical) {
+            inside = Some(r.depth);
+        }
+        // The dispatch's own tasks become the roots of what is rendered.
+        if let Some(base) = inside {
+            out.push(TreeRow {
+                depth: r.depth - base,
+                ..r
+            });
+        }
+    }
+    out
 }
 
 fn more_siblings(rows: &[TreeRow], i: usize) -> bool {
@@ -86,7 +183,7 @@ fn header(view: &RunView) -> String {
     )
 }
 
-fn footer(view: &RunView) -> String {
+fn footer(view: &RunView, budget: u32) -> String {
     let u = view.totals;
     let mut out = format!(
         "\nusage  in {}  out {}  cache-read {}  cache-write {}\n",
@@ -102,6 +199,9 @@ fn footer(view: &RunView) -> String {
         out.push_str(&format!("   ({unknown} {plural} reported no cost data)"));
     }
     out.push('\n');
+    if let Some(w) = view.brain_self_work() {
+        out.push_str(&delegation::line(&w, budget));
+    }
     out
 }
 
@@ -114,9 +214,6 @@ fn total_cost(view: &RunView) -> String {
 
 /// One collapsed row: the headline, its attempt chain, its failure and its branch.
 fn block(view: &RunView, row: &TreeRow, siblings: bool, o: &TraceOpts) -> String {
-    let Some(rec) = latest(view, row) else {
-        return String::new();
-    };
     let indent = "  ".repeat(row.depth as usize);
     let stem = if row.depth == 0 {
         "* ".to_owned()
@@ -129,6 +226,9 @@ fn block(view: &RunView, row: &TreeRow, siblings: bool, o: &TraceOpts) -> String
         format!("{indent}|    ")
     } else {
         format!("{indent}     ")
+    };
+    let Some(rec) = latest(view, row) else {
+        return unstarted(view, row, &stem, &detail);
     };
 
     let tier = if rec.kind == NodeKind::Worker {
@@ -153,11 +253,10 @@ fn block(view: &RunView, row: &TreeRow, siblings: bool, o: &TraceOpts) -> String
         for id in &row.attempts {
             if let Some(a) = view.nodes.get(id) {
                 out.push_str(&format!(
-                    "{detail}attempt {}  {}  {}  {}\n",
+                    "{detail}attempt {}  {}  {}\n",
                     a.attempt,
                     a.id.short(),
-                    fmt::pad(&account_cell(a), ACCOUNT_WIDTH),
-                    attempt_outcome(a),
+                    attempt_cells(a, a.duration()),
                 ));
             }
         }
@@ -192,6 +291,37 @@ fn block(view: &RunView, row: &TreeRow, siblings: bool, o: &TraceOpts) -> String
     out
 }
 
+/// A task with no attempt yet has no node id, so its row leads with the logical one.
+fn unstarted(view: &RunView, row: &TreeRow, stem: &str, detail: &str) -> String {
+    let tier = view
+        .tasks
+        .get(&row.logical)
+        .map(|t| format!("[{}] ", fmt::pad(&t.tier.to_string(), 4)))
+        .unwrap_or_default();
+    let mut out = format!(
+        "{stem}{}  {tier}{}  {}  {}  {:>7}  {:>7}  {:>7}  {}\n",
+        row.logical.short(),
+        fmt::pad(&row.title, TITLE_WIDTH),
+        fmt::pad("-", ACCOUNT_WIDTH),
+        fmt::pad("-", MODEL_WIDTH),
+        "-",
+        "-",
+        "-",
+        fmt::state_word(&row.state),
+    );
+    match &row.state {
+        NodeState::Rejected { reason } => {
+            out.push_str(&format!("{detail}{}\n", failure_detail(reason)));
+        }
+        NodeState::Failed { failure } => {
+            out.push_str(&format!("{detail}{}\n", failure_detail(failure)));
+        }
+        NodeState::Blocked { why, .. } => out.push_str(&format!("{detail}blocked: {why}\n")),
+        _ => {}
+    }
+    out
+}
+
 fn latest<'a>(view: &'a RunView, row: &TreeRow) -> Option<&'a NodeRecord> {
     row.attempts.iter().rev().find_map(|a| view.nodes.get(a))
 }
@@ -219,18 +349,18 @@ fn numbers(rec: &NodeRecord) -> String {
     )
 }
 
-fn attempt_outcome(rec: &NodeRecord) -> String {
+/// An attempt line's account, model, outcome and elapsed, shared with `swamp dispatch`.
+pub(crate) fn attempt_cells(rec: &NodeRecord, elapsed: Option<std::time::Duration>) -> String {
     let tail = match &rec.state {
         NodeState::Failed { failure } => failure_summary(failure),
         s => fmt::state_word(s).to_owned(),
     };
     let model = rec.model.as_deref().unwrap_or("-");
     format!(
-        "{}  {tail}  {}",
+        "{}  {}  {tail}  {}",
+        fmt::pad(&account_cell(rec), ACCOUNT_WIDTH),
         fmt::pad(model, MODEL_WIDTH),
-        rec.duration()
-            .map(fmt::duration)
-            .unwrap_or_else(|| "-".to_owned())
+        elapsed.map(fmt::duration).unwrap_or_else(|| "-".to_owned())
     )
 }
 
@@ -263,6 +393,15 @@ pub(crate) fn failure_summary(f: &Failure) -> String {
         Failure::Truncated { .. } => "truncated".to_owned(),
         Failure::NoCapacity { .. } => "no_capacity".to_owned(),
         Failure::Cancelled { .. } => "cancelled".to_owned(),
+    }
+}
+
+/// The few words a row has room for: `rate_limited (five_hour)`, a worker error's subtype.
+pub(crate) fn failure_short(f: &Failure) -> String {
+    match f {
+        Failure::RateLimited { scope, .. } => format!("rate_limited ({})", scope_word(scope)),
+        Failure::WorkerError { subtype, .. } => fmt::sanitize(subtype),
+        f => failure_summary(f),
     }
 }
 
@@ -391,7 +530,11 @@ fn render_json(view: &RunView, o: &TraceOpts) -> String {
             .unwrap_or(Value::Null);
         return format!("{}\n", pretty(&value));
     }
-    format!("{}\n", pretty(&full_json(view)))
+    let mut out = full_json(view, o.dispatch);
+    if o.dispatch.is_none() {
+        out["brain"] = json!(delegation::json(view, o.budget()));
+    }
+    format!("{}\n", pretty(&out))
 }
 
 fn pretty(v: &Value) -> String {
@@ -399,16 +542,20 @@ fn pretty(v: &Value) -> String {
 }
 
 /// One source of truth: the text tree and `--json` are the same fold.
-fn full_json(view: &RunView) -> Value {
+fn full_json(view: &RunView, dispatch: Option<DispatchId>) -> Value {
+    let rows = match dispatch {
+        Some(d) => under_dispatch(view, view.tree(), d),
+        None => view.tree(),
+    };
+    let shown = |id: &NodeId| dispatch.is_none() || rows.iter().any(|r| r.attempts.contains(id));
     let mut nodes = Map::new();
-    for (id, rec) in &view.nodes {
+    for (id, rec) in view.nodes.iter().filter(|(id, _)| shown(id)) {
         nodes.insert(
             id.to_string(),
             serde_json::to_value(rec).unwrap_or(Value::Null),
         );
     }
-    let tree: Vec<Value> = view
-        .tree()
+    let tree: Vec<Value> = rows
         .iter()
         .map(|r| {
             json!({
@@ -421,7 +568,7 @@ fn full_json(view: &RunView) -> Value {
         })
         .collect();
     let mut events = Map::new();
-    for (id, evs) in &view.events {
+    for (id, evs) in view.events.iter().filter(|(id, _)| shown(id)) {
         events.insert(
             id.to_string(),
             serde_json::to_value(evs).unwrap_or(Value::Null),
@@ -442,19 +589,30 @@ fn full_json(view: &RunView) -> Value {
                 .format(&time::format_description::well_known::Rfc3339).unwrap_or_default(),
         })
     });
-    json!({
-        "run": header,
-        "finished": view.finished,
-        "last_seq": view.last_seq,
-        "totals": {
+    let totals = match dispatch {
+        Some(d) => {
+            let t = view.rollup(crate::journal::fold::Scope::Dispatch(d));
+            json!({ "usage": t.usage, "cost_usd": t.cost_usd, "cost_complete": t.cost_complete })
+        }
+        None => json!({
             "usage": view.totals,
             "cost_usd": view.cost_usd,
             "cost_complete": view.cost_complete,
-        },
+        }),
+    };
+    let mut out = json!({
+        "run": header,
+        "finished": view.finished,
+        "last_seq": view.last_seq,
+        "totals": totals,
         "tree": tree,
         "nodes": Value::Object(nodes),
         "events": Value::Object(events),
-    })
+    });
+    if let Some(d) = dispatch {
+        out["dispatch"] = json!(crate::journal::inspect::label(d));
+    }
+    out
 }
 
 // ---------------------------------------------------------------- follow
@@ -518,7 +676,7 @@ pub async fn follow(paths: &RunPaths, o: &TraceOpts) -> anyhow::Result<()> {
         }
         if follower.finished() {
             let mut out = std::io::stdout().lock();
-            out.write_all(footer(&follower.view).as_bytes())?;
+            out.write_all(footer(&follower.view, o.budget()).as_bytes())?;
             out.flush()?;
             return Ok(());
         }

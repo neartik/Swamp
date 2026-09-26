@@ -3,6 +3,7 @@
 
 mod support;
 
+use predicates::prelude::*;
 use support::{Harness, Scenario, epoch_in};
 use swamp::model::core::NodeState;
 
@@ -133,4 +134,149 @@ fn diff_stat_renders_the_patch_git_style() {
         .success()
         .stdout(predicates::str::contains("fixed.txt"))
         .stdout(predicates::str::contains("1 file changed"));
+}
+
+/// The one dispatch a `--no-brain` run issues.
+fn only_dispatch(h: &Harness, run: swamp::ids::RunId) -> swamp::ids::DispatchId {
+    let view = h.view(run);
+    let ids: Vec<_> = view
+        .dispatches
+        .keys()
+        .copied()
+        .filter(|d| *d != swamp::ids::DispatchId::LEGACY)
+        .collect();
+    assert_eq!(ids.len(), 1, "one dispatch per --no-brain run: {ids:?}");
+    ids[0]
+}
+
+#[test]
+fn a_dispatch_resolves_by_short_id_or_prefix_and_a_shared_prefix_is_ambiguous() {
+    let h = Harness::new().scenario("main", Scenario::claude().edits("fixed.txt", "patched\n"));
+    h.swamp(&["run", "--no-brain", TASK]).assert().success();
+    let first_run = h.last_run().run;
+    h.swamp(&["run", "--no-brain", TASK]).assert().success();
+    let second_run = h.last_run().run;
+    assert_ne!(first_run, second_run);
+    let first = only_dispatch(&h, first_run);
+    let second = only_dispatch(&h, second_run);
+
+    let full = first.to_string();
+    for spec in [
+        first.short(),
+        first.short().to_ascii_uppercase(),
+        full.clone(),
+        full[..24].to_owned(),
+        full.trim_start_matches("dsp_").to_owned(),
+    ] {
+        h.swamp(&["dispatch", &spec])
+            .assert()
+            .success()
+            .stdout(predicates::str::contains(format!(
+                "dispatch {}  run {}",
+                first.short(),
+                first_run.short()
+            )));
+    }
+
+    let json = h
+        .swamp(&["dispatch", &first.short(), "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let value: serde_json::Value = serde_json::from_slice(&json).expect("valid json");
+    assert_eq!(value["schema"], 2);
+    assert_eq!(value["dispatch"]["id"], full);
+    assert_eq!(value["tasks"][0]["state"], "succeeded");
+
+    // Both ids start with the same timestamp digits.
+    for args in [
+        vec!["dispatch", "dsp_0"],
+        vec!["trace", "--dispatch", "dsp_0"],
+        vec!["cancel", "dsp_0"],
+    ] {
+        h.swamp(&args)
+            .assert()
+            .failure()
+            .stderr(predicates::str::contains("ambiguous"))
+            .stderr(predicates::str::contains(first.short()))
+            .stderr(predicates::str::contains(second.short()));
+    }
+    h.swamp(&["dispatch", "nosuch"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("no dispatch matches"));
+
+    h.swamp(&["trace", "--dispatch", &first.short()])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(format!(
+            "run {}",
+            first_run.short()
+        )));
+    h.swamp(&["dispatches", "last"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(second.short()))
+        .stdout(predicates::str::contains(first.short()).not());
+
+    // Nothing left to stop: the dispatch settled, so cancel names it and exits 1.
+    h.swamp(&["cancel", &first.short()])
+        .assert()
+        .code(1)
+        .stdout(predicates::str::contains("already ok"));
+}
+
+/// Every schema-1 run has a `legacy` bucket, so naming the run is what makes it resolvable.
+#[test]
+fn legacy_resolves_within_the_named_run_once_two_schema_1_runs_exist() {
+    let h = Harness::new();
+    let fixture = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/journal-schema1.jsonl"),
+    )
+    .expect("the schema-1 fixture");
+    let runs = [swamp::ids::RunId::new(), swamp::ids::RunId::new()];
+    for run in runs {
+        let paths = h.paths().run_paths(run);
+        std::fs::create_dir_all(&paths.dir).expect("run dir");
+        let text = fixture.replace("01HZZZZZZZZZZZZZZZZZZZZRRR", &run.0.to_string());
+        std::fs::write(paths.journal(), text).expect("journal");
+    }
+
+    h.swamp(&["dispatch", "legacy"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("ambiguous"));
+    for run in runs {
+        h.swamp(&["dispatch", "legacy", "--run", &run.short()])
+            .assert()
+            .success()
+            .stdout(predicates::str::contains(format!(
+                "dispatch legacy  run {}",
+                run.short()
+            )));
+    }
+    h.swamp(&[
+        "trace",
+        &runs[0].short(),
+        "--dispatch",
+        "legacy",
+        "--node",
+        "x",
+    ])
+    .assert()
+    .failure()
+    .stderr(predicates::str::contains("cannot be used with"));
+    h.swamp(&[
+        "trace",
+        &runs[0].short(),
+        "--group-by",
+        "dispatch",
+        "--follow",
+    ])
+    .assert()
+    .failure()
+    .stderr(predicates::str::contains("cannot be used with"));
 }

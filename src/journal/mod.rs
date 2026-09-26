@@ -1,11 +1,12 @@
 pub mod fold;
+pub mod inspect;
 pub mod paths;
 pub mod raw;
 pub mod reader;
 pub mod record;
 pub mod writer;
 
-pub use fold::{LlmDigest, Projection, RunView, TreeRow};
+pub use fold::{BrainSelfWork, LlmDigest, Projection, RunView, TreeRow};
 pub use paths::{Paths, RunPaths};
 pub use raw::{RawSink, Redactor};
 pub use reader::{Tailer, replay};
@@ -16,7 +17,7 @@ use crate::ids::{NodeId, RunId};
 use crate::journal::writer::Writer;
 use std::sync::Arc;
 use time::OffsetDateTime;
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::{Mutex, mpsc, oneshot};
 
 /// Cheap to clone: every producer holds one, the writer task owns the fd.
 #[derive(Clone)]
@@ -24,7 +25,7 @@ pub struct JournalHandle {
     pub run: RunId,
     pub tx: tokio::sync::mpsc::UnboundedSender<(Option<NodeId>, JournalEvent)>,
     pub paths: std::sync::Arc<RunPaths>,
-    /// Shared with the writer task so a durable emit can bypass the queue.
+    /// Shared with the writer task; without one, a durable emit appends directly.
     pub writer: Arc<Mutex<Writer>>,
 }
 
@@ -36,12 +37,24 @@ impl JournalHandle {
         }
     }
 
-    /// Returns only after the line is on disk.
+    /// Returns only after the line is on disk, behind every line emitted before it.
     pub async fn emit_durable(
         &self,
-        node: Option<NodeId>,
-        event: JournalEvent,
+        mut node: Option<NodeId>,
+        mut event: JournalEvent,
     ) -> anyhow::Result<u64> {
+        let queue = self.writer.lock().await.durable.clone();
+        if let Some(queue) = queue {
+            let (ack, done) = oneshot::channel();
+            match queue.send((node, event, ack)) {
+                Ok(()) => {
+                    return done
+                        .await
+                        .map_err(|_| anyhow::anyhow!("the journal writer is gone"))?;
+                }
+                Err(mpsc::error::SendError((n, e, _))) => (node, event) = (n, e),
+            }
+        }
         let mut w = self.writer.lock().await;
         let line = line(w.seq, self.run, node, event);
         let seq = w.append(&line).await?;
@@ -82,6 +95,8 @@ impl Journal {
         let redactor = Arc::new(Redactor::new(redact)?);
         let mut w = Writer::open(&paths.journal(), policy).await?;
         w.set_redactor(redactor);
+        let (durable_tx, mut durable_rx) = mpsc::unbounded_channel();
+        w.durable = Some(durable_tx);
         let writer = Arc::new(Mutex::new(w));
 
         let (tx, mut rx) = mpsc::unbounded_channel::<(Option<NodeId>, JournalEvent)>();
@@ -103,6 +118,22 @@ impl Journal {
                             }
                             None => break,
                         },
+                        Some((node, event, ack)) = durable_rx.recv() => {
+                            let mut w = writer.lock().await;
+                            // Whatever was emitted before the durable call lands first.
+                            while let Ok((node, event)) = rx.try_recv() {
+                                let l = line(w.seq, run, node, event);
+                                if let Err(e) = w.append(&l).await {
+                                    tracing::error!(run = %run, "journal append failed: {e}");
+                                }
+                            }
+                            let l = line(w.seq, run, node, event);
+                            let done = match w.append(&l).await {
+                                Ok(seq) => w.sync().await.map(|()| seq),
+                                Err(e) => Err(e),
+                            };
+                            let _ = ack.send(done);
+                        }
                         _ = ticker.tick() => {
                             let mut w = writer.lock().await;
                             if let Err(e) = w.tick().await {

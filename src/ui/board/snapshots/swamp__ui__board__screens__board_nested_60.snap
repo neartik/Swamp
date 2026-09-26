@@ -1,0 +1,33 @@
+---
+source: src/ui/board/screens.rs
+expression: text
+---
+swamp board   2 running · 1 stuck · ~$0.43 · observed 4s ago
+────────────────────────────────────────────────────────────
+  ◆ brain      orchestrating        main      4m12s   ~$0.09
+
+  ▾ #1 9g5f18 · 2 running · 1 blocked         3m20s   ~$0.34
+    ⠋ 9g5f01   add pagination to /… main      3m10s   ~$0.08
+▌     ▾ #3 9g5f1k · by 9g5f01 · 2 queued      1m02s
+        · 9g5f1m   split the handl…           1m02s
+        · 9g5f1n   write the tests            1m02s
+    ⠙ 9g5f09·2 backfill the users … alt       2m48s   ~$0.22
+    ⏸ 9g5f04   rebuild the index              3m20s
+      until 22:54 · main at capacity · alt quota stop
+    · 9g5f0a   write the changelog            3m20s
+    ✔ 9g5f05   add the /users route main      2m10s   ~$0.04
+
+  recent
+  ▸ #2 9g5f1c · 1 task · 1 rejected · max_nodes_per_run
+────────────────────────────────────────────────────────────
+  ● main        2/2   5h ▇▇▇▇▇▇▇░░░  71% ↻ 38m     7d  32%
+  ◐ alt         1/-   5h ▇▇▇▇▇▇▇▇▇░  93% ↻ 12m     7d  54%
+  ✘ codex-main  0/2   cooling until 23:20
+────────────────────────────────────────────────────────────
+  #3 9g5f1k · by 9g5f01 · open · 1m02s ago
+  2 tasks · 2 queued
+  swamp dispatch 9g5f1k
+
+
+
+↑↓ select · k cancel · enter open · r raw · ? keys · q quit

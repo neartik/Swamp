@@ -8,6 +8,12 @@ use std::sync::Arc;
 pub const PROTOCOL_VERSION: &str = "2025-06-18";
 pub const SERVER_NAME: &str = "swamp";
 
+/// A swamp tool's bare name from its CLI-prefixed form.
+pub fn swamp_tool(name: &str) -> Option<&str> {
+    let rest = name.strip_prefix("mcp__").unwrap_or(name);
+    rest.strip_prefix(SERVER_NAME)?.strip_prefix("__")
+}
+
 /// initialize / notifications/initialized / tools/list / tools/call.
 pub async fn handle(disp: &Arc<Dispatcher>, req: Request) -> Option<Response> {
     let result = route(disp, &req).await;
@@ -64,4 +70,21 @@ async fn call(disp: &Arc<Dispatcher>, params: &Value) -> Result<Value, RpcError>
         "structuredContent": value,
         "isError": false,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::swamp_tool;
+
+    #[test]
+    fn swamp_tools_are_recognised_as_either_cli_names_them() {
+        assert_eq!(
+            swamp_tool("mcp__swamp__swamp_dispatch"),
+            Some("swamp_dispatch")
+        );
+        assert_eq!(swamp_tool("swamp__swamp_status"), Some("swamp_status"));
+        assert_eq!(swamp_tool("Read"), None);
+        assert_eq!(swamp_tool("mcp__swampy__search"), None);
+        assert_eq!(swamp_tool("mcp__github__swamp_dispatch"), None);
+    }
 }

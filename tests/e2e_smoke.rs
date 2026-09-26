@@ -623,3 +623,215 @@ fn config_validate_counts_the_layer_the_invocation_added() {
     .expect("utf8");
     assert!(with_extra.contains("ok: 3 layers"), "{with_extra}");
 }
+
+#[test]
+fn cancel_a_dispatch_from_a_second_process() {
+    use std::time::Duration;
+    use swamp::ids::DispatchId;
+    use swamp::model::core::{CancelSource, NodeKind};
+
+    let h = Harness::new().max_concurrency(3).scenario(
+        "main",
+        Scenario::claude()
+            .slow(30_000)
+            .dispatches("lex", "write the lexer")
+            .dispatches("parse", "write the parser"),
+    );
+    let mut run = h.spawn(&["run", "split the parser work in two"]);
+
+    let live = |view: &swamp::RunView| -> Option<(DispatchId, Vec<i32>)> {
+        let (id, d) = view
+            .dispatches
+            .iter()
+            .find(|(id, d)| **id != DispatchId::LEGACY && d.tasks.len() == 2)?;
+        let rp = h.last_run();
+        let pgids: Vec<i32> = d
+            .tasks
+            .iter()
+            .filter_map(|t| {
+                let a = view.attempts(*t).into_iter().last()?;
+                match a.state {
+                    NodeState::Running { pgid, .. }
+                        if swamp::worker::liveness::is_ours(&rp.pidfile(a.id)) =>
+                    {
+                        Some(pgid)
+                    }
+                    _ => None,
+                }
+            })
+            .collect();
+        (pgids.len() == 2).then_some((*id, pgids))
+    };
+    support::wait_for("both workers to run", Duration::from_secs(60), || {
+        let Some(run) = h.runs().first().copied() else {
+            return false;
+        };
+        let dir = h.paths().run_paths(run).dir;
+        swamp::RunView::load(&dir, false).is_ok_and(|v| live(&v).is_some())
+    });
+    let (dispatch, pgids) = live(&h.last_view()).expect("two live workers");
+
+    h.swamp(&["cancel", &dispatch.short()])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("cancelled 2 nodes"));
+    // Gone once the supervising run, whose children they are, reaps them.
+    for pgid in &pgids {
+        support::wait_for(
+            &format!("process group {pgid} to go"),
+            Duration::from_secs(10),
+            || !swamp::worker::liveness::running(*pgid),
+        );
+    }
+
+    let settled = || {
+        h.last_view()
+            .dispatches
+            .get(&dispatch)
+            .is_some_and(|d| d.state == swamp::model::dispatch::DispatchState::Settled)
+    };
+    support::wait_for("the dispatch to settle", Duration::from_secs(30), settled);
+    let view = h.last_view();
+    for t in &view.dispatches[&dispatch].tasks {
+        assert_eq!(
+            view.state_of(*t),
+            Some(NodeState::Cancelled {
+                by: CancelSource::User
+            }),
+            "{t}"
+        );
+        assert_eq!(view.attempts(*t).len(), 1, "a cancelled task was retried");
+        let last = view.transitions[t].last().expect("a transition");
+        assert!(matches!(last.to, NodeState::Cancelled { .. }), "{last:?}");
+    }
+    assert_eq!(
+        view.dispatches[&dispatch].counts.map(|c| c.cancelled),
+        Some(2)
+    );
+
+    // The brain gets its cancelled results back and the run ends on its own.
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    while run.try_wait().expect("polling the run").is_none() {
+        if std::time::Instant::now() > deadline {
+            let _ = run.kill();
+            panic!("the run did not finish after its dispatch was cancelled");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let view = h.last_view();
+    assert!(view.finished, "RunFinished is journaled");
+    let workers = view
+        .nodes
+        .values()
+        .filter(|n| n.kind == NodeKind::Worker)
+        .count();
+    assert_eq!(workers, 2, "no retry attempt was spawned");
+
+    // Two processes wrote one journal; the sequence still never repeats or goes back.
+    let seqs: Vec<u64> = h
+        .journal_text(h.last_run().run)
+        .lines()
+        .map(|l| {
+            serde_json::from_str::<serde_json::Value>(l).expect("a journal line")["seq"]
+                .as_u64()
+                .expect("seq")
+        })
+        .collect();
+    assert!(seqs.windows(2).all(|w| w[0] < w[1]), "{seqs:?}");
+}
+
+#[test]
+fn cancel_a_task_by_its_logical_id_and_refuse_the_brain() {
+    use std::time::Duration;
+    use swamp::model::core::{CancelSource, NodeKind};
+
+    // The brain reserves one slot, so one task runs and the other waits without an attempt.
+    let h = Harness::new().max_concurrency(2).scenario(
+        "main",
+        Scenario::claude()
+            .slow(30_000)
+            .dispatches("lex", "write the lexer")
+            .dispatches("parse", "write the parser"),
+    );
+    let mut run = h.spawn(&["run", "split the parser work in two"]);
+
+    let split = |view: &swamp::RunView| -> Option<(swamp::ids::NodeId, swamp::ids::NodeId)> {
+        if view.tasks.len() != 2 {
+            return None;
+        }
+        let rp = h.last_run();
+        let mut running = None;
+        let mut waiting = None;
+        for t in view.tasks.keys() {
+            match view.attempts(*t).last() {
+                Some(a)
+                    if matches!(a.state, NodeState::Running { .. })
+                        && swamp::worker::liveness::is_ours(&rp.pidfile(a.id)) =>
+                {
+                    running = Some(*t)
+                }
+                None => waiting = Some(*t),
+                _ => {}
+            }
+        }
+        running.zip(waiting)
+    };
+    support::wait_for(
+        "one running and one waiting task",
+        Duration::from_secs(60),
+        || {
+            let Some(run) = h.runs().first().copied() else {
+                return false;
+            };
+            let dir = h.paths().run_paths(run).dir;
+            swamp::RunView::load(&dir, false).is_ok_and(|v| split(&v).is_some())
+        },
+    );
+    let view = h.last_view();
+    let (running, waiting) = split(&view).expect("one running and one waiting task");
+    let brain = view
+        .nodes
+        .values()
+        .find(|n| n.kind == NodeKind::Brain)
+        .expect("a brain node")
+        .id;
+
+    // The brain shares the run's short id, so only the node prefix names it.
+    h.swamp(&["cancel", &format!("nd_{}", brain.short())])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("cancel the run instead"));
+
+    for logical in [waiting, running] {
+        h.swamp(&["cancel", &logical.short()])
+            .assert()
+            .success()
+            .stdout(predicates::str::contains(format!(
+                "cancelled node {}",
+                logical.short()
+            )));
+    }
+    let cancelled = Some(NodeState::Cancelled {
+        by: CancelSource::User,
+    });
+    for logical in [waiting, running] {
+        support::wait_for(
+            &format!("task {logical} to settle cancelled"),
+            Duration::from_secs(30),
+            || h.last_view().state_of(logical) == cancelled,
+        );
+    }
+    assert!(
+        h.last_view().attempts(waiting).is_empty(),
+        "a task cancelled while waiting still launched"
+    );
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    while run.try_wait().expect("polling the run").is_none() {
+        if std::time::Instant::now() > deadline {
+            let _ = run.kill();
+            panic!("the run did not finish after its tasks were cancelled");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}

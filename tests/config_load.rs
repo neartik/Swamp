@@ -250,6 +250,25 @@ fn a_layer_only_contributes_the_keys_it_sets() {
 }
 
 #[test]
+fn the_default_anthropic_worker_may_run_bash_under_accept_edits() {
+    let sb = Sandbox::new();
+    sb.user_config(
+        "[providers.anthropic]\nmodels = { high = \"opus\", mid = \"sonnet\", low = \"haiku\" }\n",
+    );
+    let cfg = sb.load(None, None).expect("defaults load");
+    let worker = &cfg.providers[&Provider::Anthropic].worker;
+    assert_eq!(worker.permission_mode.as_deref(), Some("acceptEdits"));
+    for tool in ["Bash", "Read", "Grep", "Glob", "Edit", "Write", "MultiEdit"] {
+        assert!(
+            worker.allow_tools.iter().any(|t| t == tool),
+            "{tool} is not allowed: {:?}",
+            worker.allow_tools
+        );
+    }
+    assert_eq!(cfg.limits.brain_read_budget, Some(8));
+}
+
+#[test]
 fn unrelated_swamp_env_vars_are_not_config() {
     let sb = Sandbox::new();
     let cfg = sb

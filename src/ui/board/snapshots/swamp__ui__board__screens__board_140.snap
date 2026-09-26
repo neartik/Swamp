@@ -1,0 +1,28 @@
+---
+source: src/ui/board/screens.rs
+expression: "draw(&b, 140)"
+---
+swamp board                                                      2 running · 1 stuck · 1 queued · ~$0.43 · brain 0/8 (21%) · observed 4s ago
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ◆ brain             orchestrating                                                            main       opus-4-1    4m12s  ↓ 214k   ~$0.09
+
+  ▾ #1 9g5f18 · 5 tasks · 2 running · 1 blocked · 1 queued · 1 done                                                   3m20s  ↓ 437k   ~$0.34
+    ⠋ 9g5f01   [mid ] add pagination to /users                                                 main       sonnet-4-5  3m10s  ↓ 118k   ~$0.08
+▌   ⠙ 9g5f09·2 [high] backfill the users index                                                 alt        opus-4-1    2m48s  ↓ 223k   ~$0.22
+    ⏸ 9g5f04   [mid ] rebuild the index                                                                               3m20s
+      until 22:54 (in 38m) · main at capacity (2/2) · alt quota stop (93%)
+    · 9g5f0a   [low ] write the changelog                                                                             3m20s
+    ✔ 9g5f05   [low ] add the /users route                                                     main       sonnet-4-5  2m10s   ↓ 96k   ~$0.04
+
+  recent
+  ▸ #2 9g5f1c · 1 task · 1 rejected · max_nodes_per_run
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ● main         2/2   5h ▇▇▇▇▇▇▇░░░  71% ↻ 38m     7d ▇▇▇░░░░░░░  32% ↻ 4d02h   at capacity (2/2)                                    ↓ 812k
+  ◐ alt          1/-   5h ▇▇▇▇▇▇▇▇▇░  93% ↻ 12m     7d ▇▇▇▇▇░░░░░  54% ↻ 2d07h   quota stop (93%)                                     ↓ 402k
+  ✘ codex-main   0/2   5h ▇▇▇▇▇▇▇▇▇▇  99% ↻ 1h04m   7d ▇▇▇▇▇▇▇▇░░  81% ↻ 3d01h   cooling until 23:20                                     ↓ 0
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  9g5f09·2 → alt   score .41 = util .93×.50 + load .33×.30 + share .12×.15 − weight .00 − idle .02
+                   passed over (now): main at capacity (2/2) · codex-main cooling until 23:20
+                   attempt 1 9g5f08 on main: rate_limited (five_hour) after 41s
+
+↑↓ select · k cancel · enter open · r raw · ←→ fold · ! stuck · a accounts · tab run · f follow · 0 all runs · g G ends · ? keys · q quit

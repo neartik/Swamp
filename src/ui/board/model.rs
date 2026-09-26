@@ -1,15 +1,19 @@
-//! WP2: what a board frame is made of. Pure by construction: every byte arrives through a
-//! loader the caller hands in, so the whole model is testable without a filesystem.
+//! What a board frame is made of, grouped by dispatch; pure, so testable without a filesystem.
 
-use crate::dispatch::policy::{Scoring, SelectionPolicy};
-use crate::ids::{NodeId, RunId};
-use crate::journal::fold::{Projection, RunView, TreeRow};
+use crate::dispatch::policy::{Ineligible, Scoring, SelectionPolicy};
+use crate::ids::{CallSeq, DispatchId, NodeId, RunId};
+use crate::journal::fold::{BrainSelfWork, DispatchView, Projection, RunView, Scope};
+use crate::journal::inspect::{self, AttemptDetail, Rollup};
 use crate::journal::paths::RunPaths;
 use crate::journal::record::{JournalEvent, JournalLine};
 use crate::model::core::{AccountId, Cost, NodeState, Provider, Tier, Usage};
+use crate::model::dispatch::{DispatchRecord, DispatchState};
+use crate::model::node::NodeRecord;
 use crate::ui::board::sources::Tail;
-use crate::ui::fmt;
+use crate::ui::chat::theme::Role;
+use crate::ui::order::{self, Tally};
 use crate::ui::usage::AccountRow;
+use crate::ui::{dispatches, fmt};
 use std::collections::BTreeMap;
 use std::time::Duration as StdDuration;
 use time::OffsetDateTime;
@@ -18,15 +22,14 @@ use time::OffsetDateTime;
 /// this many, newest first, and says in its header how many it dropped.
 pub const MAX_RUNS: usize = 8;
 
-/// How many terminal nodes the `recent` section keeps.
+/// How many settled dispatches a run's `recent` keeps.
 pub const RECENT: usize = 8;
 
-/// How long a terminal node stays in `recent` before it is dropped.
+/// How long a settled dispatch stays in `recent` before it is dropped.
 pub const RECENT_TTL: StdDuration = StdDuration::from_secs(5 * 60);
 
-/// How many rows the sections with no natural bound draw. A fan-out batch queues hundreds of
-/// nodes at once; past this the heading counts them and a frame stays a fixed cost.
-pub const SECTION_MAX: usize = 32;
+/// Task rows an expanded dispatch draws; the rest of the rank order is counted, not drawn.
+pub const DISPATCH_ROWS: usize = 8;
 
 // ---------------------------------------------------------------- selection
 
@@ -189,37 +192,67 @@ impl RunPane {
         }
     }
 
-    /// The note the footer shows for a collapsed row: the newest attempt that recorded one.
-    /// The pool leases before the attempt's id exists, so its line names the logical id; a
-    /// journal that attributed one to an attempt still wins.
+    /// The newest attempt's note, else the logical id's: the pool leases before an attempt exists.
     pub fn note_for(&self, logical: NodeId) -> Option<&SelectionNote> {
-        let attempts = self.view.by_logical.get(&logical)?;
+        let attempts = self.view.by_logical.get(&logical);
         attempts
-            .iter()
+            .into_iter()
+            .flatten()
             .rev()
             .find_map(|a| self.selection.get(a))
             .or_else(|| self.selection.get(&logical))
     }
 
-    /// `view.tree()` collapsed by logical id, taking the last attempt as the live record:
-    /// the same `latest()` rule `trace.rs` uses, so a retry changes the id in place.
-    pub fn rows(&self) -> Vec<NodeRow> {
-        self.view
-            .tree()
-            .iter()
-            .filter_map(|r| self.row(r))
-            .collect()
+    /// A task by its logical id, its last attempt the live record, as `trace.rs` reads it.
+    pub fn node_row(&self, logical: NodeId) -> Option<NodeRow> {
+        let state = self.view.state_of(logical)?;
+        let dispatch = self.view.tasks.get(&logical).map(|t| t.dispatch);
+        match self.live(logical) {
+            Some(n) => Some(self.row(n, logical, state, dispatch)),
+            None => {
+                let since = self.latest(logical).and_then(|n| n.ended_at);
+                self.unstarted(logical, state, since)
+            }
+        }
     }
 
-    fn row(&self, r: &TreeRow) -> Option<NodeRow> {
-        let n = r
-            .attempts
+    /// The latest attempt, unless it ended while its task still waits for another.
+    fn live(&self, logical: NodeId) -> Option<&NodeRecord> {
+        let n = self.latest(logical)?;
+        let waiting = n.state.is_terminal()
+            && self
+                .view
+                .state_of(logical)
+                .is_some_and(|s| !s.is_terminal());
+        (!waiting).then_some(n)
+    }
+
+    /// When a dispatch was issued, else when the run started.
+    fn issued_at(&self, d: Option<&DispatchRecord>) -> OffsetDateTime {
+        d.map(|d| d.at)
+            .or(self.view.header.as_ref().map(|h| h.started_at))
+            .unwrap_or(OffsetDateTime::UNIX_EPOCH)
+    }
+
+    fn latest(&self, logical: NodeId) -> Option<&NodeRecord> {
+        self.view
+            .by_logical
+            .get(&logical)?
             .iter()
             .rev()
-            .find_map(|a| self.view.nodes.get(a))?;
-        Some(NodeRow {
+            .find_map(|a| self.view.nodes.get(a))
+    }
+
+    fn row(
+        &self,
+        n: &NodeRecord,
+        logical: NodeId,
+        state: NodeState,
+        dispatch: Option<DispatchId>,
+    ) -> NodeRow {
+        NodeRow {
             run: self.run,
-            logical: r.logical,
+            logical,
             id: n.id,
             attempt: n.attempt,
             brain: n.logical == self.brain,
@@ -228,15 +261,224 @@ impl RunPane {
             tier: n.tier,
             model: n.model.clone(),
             title: fmt::sanitize(&n.title),
-            state: n.state.clone(),
+            state,
             created_at: n.created_at,
             started_at: n.started_at,
             ended_at: n.ended_at,
             usage: n.usage,
             cost: n.cost,
+            spend: self.view.rollup(Scope::Task(logical)).into(),
             stale: self.stale.is_some(),
+            dispatch,
+        }
+    }
+
+    /// A task with no live attempt; it waits from `since`, else from when its dispatch was issued.
+    fn unstarted(
+        &self,
+        logical: NodeId,
+        state: NodeState,
+        since: Option<OffsetDateTime>,
+    ) -> Option<NodeRow> {
+        let t = self.view.tasks.get(&logical)?;
+        let record = self
+            .view
+            .dispatches
+            .get(&t.dispatch)
+            .and_then(|d| d.record.as_ref());
+        let provider = record
+            .and_then(|d| d.tasks.iter().find(|x| x.logical == logical))
+            .map_or(Provider::Anthropic, |x| x.provider);
+        let created_at = since.unwrap_or_else(|| self.issued_at(record));
+        let account = match &state {
+            NodeState::Leased { account } => Some(account.clone()),
+            _ => None,
+        };
+        Some(NodeRow {
+            run: self.run,
+            logical,
+            id: logical,
+            attempt: 0,
+            brain: false,
+            provider,
+            account,
+            tier: t.tier,
+            model: None,
+            title: fmt::sanitize(&t.title),
+            state,
+            created_at,
+            started_at: None,
+            ended_at: None,
+            usage: Usage::default(),
+            cost: None,
+            spend: self.view.rollup(Scope::Task(logical)).into(),
+            stale: self.stale.is_some(),
+            dispatch: Some(t.dispatch),
         })
     }
+
+    /// One task row: the live attempt, the attempts before it, and why it is stuck if it is.
+    pub fn task_row(&self, logical: NodeId, level: usize, now: OffsetDateTime) -> Option<TaskRow> {
+        let row = self.node_row(logical)?;
+        let attempts = self.view.attempts(logical);
+        let live = usize::from(self.live(logical).is_some());
+        let prior = attempts
+            .iter()
+            .take(attempts.len().saturating_sub(live))
+            .map(|a| inspect::attempt(a, now))
+            .collect();
+        let ineligible = self
+            .view
+            .tasks
+            .get(&logical)
+            .map(|t| t.ineligible.clone())
+            .unwrap_or_default();
+        Some(TaskRow {
+            row,
+            level,
+            prior,
+            ineligible,
+            nested: Vec::new(),
+        })
+    }
+
+    /// The brain's row, or `None` for a run that never spawned one.
+    pub fn brain_row(&self) -> Option<NodeRow> {
+        let n = self.latest(self.brain)?;
+        let state = self.view.state_of(self.brain)?;
+        Some(self.row(n, self.brain, state, None))
+    }
+
+    fn is_root(&self, d: &DispatchView) -> bool {
+        d.record
+            .as_ref()
+            .is_none_or(|r| inspect::is_brain_caller(&self.view, r.caller))
+    }
+
+    /// Dispatches a task issued, by the task's logical id.
+    fn issued(&self) -> BTreeMap<NodeId, Vec<&DispatchView>> {
+        let mut out: BTreeMap<NodeId, Vec<&DispatchView>> = BTreeMap::new();
+        for d in self.view.dispatches.values() {
+            if d.id == DispatchId::LEGACY || self.is_root(d) {
+                continue;
+            }
+            let Some(r) = &d.record else { continue };
+            out.entry(inspect::caller_task(&self.view, r.caller))
+                .or_default()
+                .push(d);
+        }
+        for list in out.values_mut() {
+            list.sort_by_key(|d| inspect::dispatch_key(d));
+        }
+        out
+    }
+
+    /// The brain row, the open root dispatches, then the ones that settled recently.
+    pub fn run_rows(&self, now: OffsetDateTime) -> RunRows {
+        let issued = self.issued();
+        let mut roots: Vec<&DispatchView> = self
+            .view
+            .dispatches
+            .values()
+            .filter(|d| d.id == DispatchId::LEGACY || self.is_root(d))
+            .collect();
+        roots.sort_by_key(|d| inspect::dispatch_key(d));
+        let mut active = Vec::new();
+        let mut recent = Vec::new();
+        for d in roots {
+            let g = self.group(d, 0, None, &issued, now);
+            match d.state {
+                DispatchState::Open => active.push(g),
+                DispatchState::Settled => recent.push(g),
+            }
+        }
+        recent.sort_by_key(|g| std::cmp::Reverse((g.settled_at, g.id)));
+        let ttl = time::Duration::seconds(RECENT_TTL.as_secs() as i64);
+        recent.retain(|g| now - g.settled_at <= ttl);
+        recent.truncate(RECENT);
+        RunRows {
+            run: self.run,
+            brain: self.brain_row(),
+            active,
+            recent,
+        }
+    }
+
+    fn group(
+        &self,
+        d: &DispatchView,
+        level: usize,
+        caller: Option<NodeId>,
+        issued: &BTreeMap<NodeId, Vec<&DispatchView>>,
+        now: OffsetDateTime,
+    ) -> DispatchGroup {
+        let mut tasks: Vec<TaskRow> = if d.id == DispatchId::LEGACY {
+            // Schema 1 has no dispatch order to rank within: the tree is the order.
+            let tree: Vec<TaskRow> = self
+                .view
+                .tree()
+                .into_iter()
+                .filter(|r| r.logical != self.brain && d.tasks.contains(&r.logical))
+                .filter_map(|r| {
+                    self.task_row(r.logical, level + (r.depth as usize).saturating_sub(1), now)
+                })
+                .collect();
+            keep_ranked(tree)
+        } else {
+            let rows = d
+                .tasks
+                .iter()
+                .filter_map(|t| self.task_row(*t, level, now))
+                .collect();
+            order::ranked(rows, |t: &TaskRow| &t.row.state)
+        };
+        let tally = Tally::of(tasks.iter().map(|t| &t.row.state));
+        let settled_at = tasks
+            .iter()
+            .filter_map(|t| t.row.ended_at)
+            .max()
+            .or(d.record.as_ref().map(|r| r.at))
+            .unwrap_or(OffsetDateTime::UNIX_EPOCH);
+        let hidden = tasks.len().saturating_sub(DISPATCH_ROWS);
+        tasks.truncate(DISPATCH_ROWS);
+        if level < dispatches::MAX_NESTING {
+            for t in &mut tasks {
+                for sub in issued.get(&t.row.logical).into_iter().flatten() {
+                    let by = sub.record.as_ref().map(|r| r.caller);
+                    t.nested.push(self.group(sub, t.level + 1, by, issued, now));
+                }
+            }
+        }
+        let at = self.issued_at(d.record.as_ref());
+        DispatchGroup {
+            run: self.run,
+            id: d.id,
+            seq: d.call_seq(),
+            caller,
+            level,
+            state: d.state,
+            at,
+            settled_at,
+            tally,
+            cost: self.view.rollup(Scope::Dispatch(d.id)).into(),
+            tasks,
+            hidden,
+            expanded: d.state == DispatchState::Open,
+        }
+    }
+}
+
+/// The `DISPATCH_ROWS` best-ranked rows, still in the order given, ahead of the rest.
+fn keep_ranked(rows: Vec<TaskRow>) -> Vec<TaskRow> {
+    let mut by_rank: Vec<usize> = (0..rows.len()).collect();
+    by_rank.sort_by_key(|&i| order::rank(&rows[i].row.state));
+    by_rank.truncate(DISPATCH_ROWS);
+    let (mut kept, rest): (Vec<_>, Vec<_>) = rows
+        .into_iter()
+        .enumerate()
+        .partition(|(i, _)| by_rank.contains(i));
+    kept.extend(rest);
+    kept.into_iter().map(|(_, t)| t).collect()
 }
 
 /// A run is live while it has not written `RunFinished` and either a non-terminal node's
@@ -255,33 +497,14 @@ pub fn is_live(view: &RunView, alive: &dyn Fn(NodeId) -> bool, socket: bool) -> 
 
 // ---------------------------------------------------------------- rows
 
-/// Where a node is drawn. `Orphaned` stays in flight: its spinner freezes, it does not move.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Section {
-    InFlight,
-    Waiting,
-    Recent,
-}
-
-pub fn section_of(state: &NodeState) -> Section {
-    match state {
-        NodeState::Running { .. } | NodeState::Leased { .. } | NodeState::Orphaned { .. } => {
-            Section::InFlight
-        }
-        NodeState::Queued | NodeState::Blocked { .. } => Section::Waiting,
-        NodeState::Succeeded | NodeState::Failed { .. } | NodeState::Cancelled { .. } => {
-            Section::Recent
-        }
-    }
-}
-
-/// One collapsed node row. Every string is already sanitized: a title comes from a model.
+/// One task, or the brain. Every string is already sanitized: a title comes from a model.
 #[derive(Debug, Clone)]
 pub struct NodeRow {
     pub run: RunId,
     pub logical: NodeId,
-    /// The live attempt: the id `swamp diff` and `swamp adopt` take.
+    /// The live attempt `swamp diff` and `swamp adopt` take, else the logical id.
     pub id: NodeId,
+    /// 0 for a task that never started.
     pub attempt: u32,
     pub brain: bool,
     pub provider: Provider,
@@ -290,55 +513,211 @@ pub struct NodeRow {
     pub model: Option<String>,
     pub title: String,
     pub state: NodeState,
-    /// When the node was queued: what a row that has not started yet counts from.
+    /// When the attempt was created, or the dispatch was issued for a task with none.
     pub created_at: OffsetDateTime,
     pub started_at: Option<OffsetDateTime>,
     pub ended_at: Option<OffsetDateTime>,
     pub usage: Usage,
     pub cost: Option<Cost>,
+    /// Every attempt of the task: what its row prints and its dispatch's rollup sums.
+    pub spend: Rollup,
     pub stale: bool,
+    pub dispatch: Option<DispatchId>,
 }
 
 impl NodeRow {
-    /// Recomputed every frame, never accumulated: time on the account once a node started,
-    /// and time spent waiting before that, which is the number a queued row is judged on.
     pub fn elapsed(&self, now: OffsetDateTime) -> Option<StdDuration> {
-        let from = self.started_at.unwrap_or(self.created_at);
-        (self.ended_at.unwrap_or(now) - from).try_into().ok()
+        order::elapsed(
+            self.started_at,
+            self.ended_at,
+            self.state.is_terminal(),
+            Some(self.created_at),
+            now,
+        )
     }
 
-    pub fn section(&self) -> Section {
-        section_of(&self.state)
+    pub fn short(&self) -> String {
+        fmt::attempt_id(self.id, self.attempt)
+    }
+
+    pub fn selection(&self) -> Selection {
+        Selection::Node {
+            run: self.run,
+            logical: self.logical,
+        }
     }
 }
 
-/// One account and the nodes it is running right now.
 #[derive(Debug, Clone)]
-pub struct AccountGroup {
-    pub row: AccountRow,
-    pub nodes: Vec<NodeRow>,
+pub struct TaskRow {
+    pub row: NodeRow,
+    /// 0 for a root dispatch's tasks, one more per dispatch nested under a task.
+    pub level: usize,
+    /// Every attempt before the live one, oldest first.
+    pub prior: Vec<AttemptDetail>,
+    /// Why each account refused it, as the pool recorded.
+    pub ineligible: Vec<(AccountId, Ineligible)>,
+    /// What this task dispatched in turn.
+    pub nested: Vec<DispatchGroup>,
 }
 
 #[derive(Debug, Clone)]
-pub struct ProviderGroup {
-    pub provider: Option<Provider>,
-    pub accounts: Vec<AccountGroup>,
+pub struct DispatchGroup {
+    pub run: RunId,
+    pub id: DispatchId,
+    pub seq: Option<CallSeq>,
+    /// The attempt that issued a nested dispatch; `None` for the brain's own.
+    pub caller: Option<NodeId>,
+    pub level: usize,
+    pub state: DispatchState,
+    pub at: OffsetDateTime,
+    /// The last task's end, or when it was issued: what `recent` sorts and ages by.
+    pub settled_at: OffsetDateTime,
+    /// Every task, including the ones past `DISPATCH_ROWS`.
+    pub tally: Tally,
+    pub cost: Rollup,
+    /// In rank order, capped at `DISPATCH_ROWS`; the legacy bucket keeps its best-ranked in tree order.
+    pub tasks: Vec<TaskRow>,
+    /// How many tasks the cap left out.
+    pub hidden: usize,
+    pub expanded: bool,
+}
+
+/// A row `DispatchGroup::walk` visits.
+#[derive(Clone, Copy)]
+pub enum Item<'a> {
+    Group(&'a DispatchGroup),
+    Task(&'a TaskRow),
+}
+
+impl Item<'_> {
+    pub fn selection(&self) -> Selection {
+        match self {
+            Item::Group(g) => g.selection(),
+            Item::Task(t) => t.row.selection(),
+        }
+    }
+}
+
+impl DispatchGroup {
+    pub fn selection(&self) -> Selection {
+        Selection::Dispatch {
+            run: self.run,
+            id: self.id,
+        }
+    }
+
+    /// `#3`, the short id when there is no call behind it, or `legacy`.
+    pub fn label(&self) -> String {
+        order::label_cells(self.seq, self.id, Role::Meta)
+            .swap_remove(0)
+            .text
+    }
+
+    /// This group, its tasks and their nested groups in draw order; folded ones only if `folded`.
+    pub fn walk<'a>(&'a self, folded: bool, f: &mut impl FnMut(Item<'a>)) {
+        f(Item::Group(self));
+        if !folded && !self.expanded {
+            return;
+        }
+        for t in &self.tasks {
+            f(Item::Task(t));
+            for sub in &t.nested {
+                sub.walk(folded, f);
+            }
+        }
+    }
+
+    pub fn walk_mut(&mut self, f: &mut impl FnMut(&mut DispatchGroup)) {
+        f(self);
+        for t in &mut self.tasks {
+            for sub in &mut t.nested {
+                sub.walk_mut(f);
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct RunRows {
+    pub run: RunId,
+    pub brain: Option<NodeRow>,
+    pub active: Vec<DispatchGroup>,
+    pub recent: Vec<DispatchGroup>,
 }
 
 /// Everything a frame draws, in draw order.
 #[derive(Debug, Clone, Default)]
 pub struct Rows {
-    pub providers: Vec<ProviderGroup>,
-    /// In flight on an account no `accounts.json` entry names, so it has no group of its own.
-    pub orphan_nodes: Vec<NodeRow>,
-    pub waiting: Vec<NodeRow>,
-    pub recent: Vec<NodeRow>,
-    /// In flight across every tailed run, `focus` included: what is drawn is a view, what an
-    /// account is carrying is a fact.
-    pub in_flight: usize,
-    /// How many rows the two capped sections had before `SECTION_MAX`.
-    pub orphan_total: usize,
-    pub waiting_total: usize,
+    /// The focused run, or every tailed run.
+    pub runs: Vec<RunRows>,
+    /// `in flight` recounted from every tailed run's journal.
+    pub accounts: Vec<AccountRow>,
+    /// Every open dispatch of every tailed run, `focus` or not: what the header counts.
+    pub tally: Tally,
+}
+
+impl Rows {
+    /// Every group and task of every run in draw order, recent included.
+    pub fn walk<'a>(&'a self, folded: bool, f: &mut impl FnMut(Item<'a>)) {
+        for r in &self.runs {
+            for g in r.active.iter().chain(&r.recent) {
+                g.walk(folded, f);
+            }
+        }
+    }
+
+    pub fn walk_mut(&mut self, f: &mut impl FnMut(&mut DispatchGroup)) {
+        for r in &mut self.runs {
+            for g in r.active.iter_mut().chain(r.recent.iter_mut()) {
+                g.walk_mut(f);
+            }
+        }
+    }
+
+    /// Every task row, nested, folded and recent ones included, in draw order.
+    pub fn tasks(&self) -> Vec<&TaskRow> {
+        let mut out = Vec::new();
+        self.walk(true, &mut |i| {
+            if let Item::Task(t) = i {
+                out.push(t);
+            }
+        });
+        out
+    }
+
+    pub fn groups(&self) -> Vec<&DispatchGroup> {
+        let mut out = Vec::new();
+        self.walk(true, &mut |i| {
+            if let Item::Group(g) = i {
+                out.push(g);
+            }
+        });
+        out
+    }
+
+    pub fn task(&self, run: RunId, logical: NodeId) -> Option<&TaskRow> {
+        self.tasks()
+            .into_iter()
+            .find(|t| t.row.run == run && t.row.logical == logical)
+    }
+
+    pub fn group(&self, run: RunId, id: DispatchId) -> Option<&DispatchGroup> {
+        self.groups()
+            .into_iter()
+            .find(|g| g.run == run && g.id == id)
+    }
+
+    pub fn brain(&self, run: RunId, logical: NodeId) -> Option<&NodeRow> {
+        self.runs
+            .iter()
+            .filter_map(|r| r.brain.as_ref())
+            .find(|b| b.run == run && b.logical == logical)
+    }
+
+    pub fn account(&self, id: &AccountId) -> Option<&AccountRow> {
+        self.accounts.iter().find(|r| &r.account == id)
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
@@ -346,17 +725,17 @@ pub struct Summary {
     pub runs: usize,
     pub hidden_runs: usize,
     pub stale_runs: usize,
-    pub in_flight: usize,
-    pub waiting: usize,
+    pub tally: Tally,
     pub accounts: usize,
     pub cost_usd: f64,
     pub cost_complete: bool,
+    /// The tailed run whose brain did the most itself before delegating.
+    pub brain: Option<BrainSelfWork>,
 }
 
 // ---------------------------------------------------------------- board
 
-/// What the cursor is on. Held by identity, not by index, so a rediscovery or a new node
-/// never moves it under the user.
+/// What the cursor is on, held by identity so new rows never move it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum Selection {
     #[default]
@@ -366,15 +745,55 @@ pub enum Selection {
         run: RunId,
         logical: NodeId,
     },
+    Dispatch {
+        run: RunId,
+        id: DispatchId,
+    },
 }
 
 impl Selection {
     pub fn run(&self) -> Option<RunId> {
         match self {
-            Selection::Node { run, .. } => Some(*run),
+            Selection::Node { run, .. } | Selection::Dispatch { run, .. } => Some(*run),
             _ => None,
         }
     }
+}
+
+/// Where the cursor starts: first stuck task, else blocked, else running, else the brain.
+pub fn attention(rows: &Rows) -> Option<Selection> {
+    let mut shown = Vec::new();
+    for g in rows.runs.iter().flat_map(|r| &r.active) {
+        g.walk(false, &mut |i| {
+            if let Item::Task(t) = i {
+                shown.push(t);
+            }
+        });
+    }
+    let pick = |want: &dyn Fn(&NodeState) -> bool| {
+        shown
+            .iter()
+            .find(|t| want(&t.row.state))
+            .map(|t| t.row.selection())
+    };
+    pick(&|s| order::rank(s) == 0)
+        .or_else(|| pick(&|s| matches!(s, NodeState::Blocked { .. })))
+        .or_else(|| pick(&|s| order::rank(s) == 1))
+        .or_else(|| Some(rows.runs.iter().find_map(|r| r.brain.as_ref())?.selection()))
+}
+
+/// What `follow` pins to: the drawn running task that started last.
+pub fn newest_running(rows: &Rows) -> Option<Selection> {
+    let mut best: Option<&TaskRow> = None;
+    rows.walk(false, &mut |i| {
+        if let Item::Task(t) = i
+            && order::rank(&t.row.state) == 1
+            && best.is_none_or(|b| (t.row.started_at, t.row.id) > (b.row.started_at, b.row.id))
+        {
+            best = Some(t);
+        }
+    });
+    best.map(|t| t.row.selection())
 }
 
 pub struct Board {
@@ -390,8 +809,10 @@ pub struct Board {
     pub accounts_at: Option<OffsetDateTime>,
     /// Live runs discovery found beyond `MAX_RUNS`.
     pub hidden_runs: usize,
-    /// `tab`: draw only this run's nodes. `None` merges every tailed run.
+    /// `tab`: draw only this run. `None` merges every tailed run.
     pub focus: Option<RunId>,
+    /// `limits.brain_read_budget`, for the header's delegation cell.
+    pub read_budget: u32,
 }
 
 impl Board {
@@ -406,6 +827,7 @@ impl Board {
             accounts_at: None,
             hidden_runs: 0,
             focus: None,
+            read_budget: crate::brain::prompt::DEFAULT_READ_BUDGET,
         }
     }
 
@@ -445,18 +867,22 @@ impl Board {
         true
     }
 
-    /// Drops a selection or a focus that names a run the board no longer tails.
+    /// Drops a selection or a focus that names something the board no longer tails.
     pub fn clamp(&mut self) {
         if self.focus.is_some_and(|r| self.pane(r).is_none()) {
             self.focus = None;
         }
-        if let Selection::Node { run, logical } = &self.selected {
-            let gone = self
+        let gone = match &self.selected {
+            Selection::Node { run, logical } => self.pane(*run).is_none_or(|p| {
+                !p.view.by_logical.contains_key(logical) && !p.view.tasks.contains_key(logical)
+            }),
+            Selection::Dispatch { run, id } => self
                 .pane(*run)
-                .is_none_or(|p| !p.view.by_logical.contains_key(logical));
-            if gone {
-                self.selected = Selection::None;
-            }
+                .is_none_or(|p| !p.view.dispatches.contains_key(id)),
+            _ => false,
+        };
+        if gone {
+            self.selected = Selection::None;
         }
     }
 
@@ -477,103 +903,50 @@ impl Board {
         }
     }
 
-    /// Provider -> account -> its in-flight nodes, then waiting, then recent.
     pub fn rows(&self) -> Rows {
-        let mut by_account: BTreeMap<AccountId, Vec<NodeRow>> = BTreeMap::new();
-        let mut loose: Vec<NodeRow> = Vec::new();
-        let mut waiting: Vec<NodeRow> = Vec::new();
-        let mut recent: Vec<NodeRow> = Vec::new();
-        for pane in self.panes() {
-            for row in pane.rows() {
-                match row.section() {
-                    Section::InFlight => match &row.account {
-                        Some(id) => by_account.entry(id.clone()).or_default().push(row),
-                        None => loose.push(row),
-                    },
-                    Section::Waiting => waiting.push(row),
-                    Section::Recent => recent.push(row),
-                }
-            }
+        let mut tally = Tally::default();
+        for p in &self.runs {
+            tally.absorb(&order::open_work(&p.view).1);
         }
-
-        let (carried, in_flight) = self.in_flight_counts(&by_account, &loose);
-        let mut groups: Vec<(Option<Provider>, Vec<AccountGroup>)> = Vec::new();
-        for row in &self.accounts {
-            let nodes = by_account.remove(&row.account).unwrap_or_default();
-            let mut row = row.clone();
-            // `persist::merge_state` zeroes `inflight` in the file, because it is one
-            // process's runtime state: the only honest count is the one the journals show.
-            row.inflight = carried.get(&row.account).copied().unwrap_or(0);
-            let slot = match groups.iter_mut().find(|(p, _)| *p == row.provider) {
-                Some(slot) => slot,
-                None => {
-                    groups.push((row.provider, Vec::new()));
-                    groups.last_mut().expect("just pushed")
-                }
-            };
-            slot.1.push(AccountGroup { row, nodes });
-        }
-        // `None` is the `not in config` group and sorts last, the same rule `ui::usage` uses.
-        groups.sort_by_key(|(p, _)| (p.is_none(), *p));
-        loose.extend(by_account.into_values().flatten());
-
-        recent.sort_by_key(|r| std::cmp::Reverse(r.ended_at));
-        recent.retain(|r| {
-            r.ended_at.is_none_or(|e| {
-                (self.now - e)
-                    .try_into()
-                    .is_ok_and(|age: StdDuration| age <= RECENT_TTL)
+        let carried = self.in_flight_counts();
+        let accounts = self
+            .accounts
+            .iter()
+            .map(|r| {
+                let mut r = r.clone();
+                // The state file zeroes `inflight`; the journals hold the real count.
+                r.inflight = carried.get(&r.account).copied().unwrap_or(0);
+                r
             })
-        });
-        recent.truncate(RECENT);
-
-        // Longest wait first, so the rows a cap hides are the ones that just arrived.
-        waiting.sort_by_key(|r| (r.created_at, r.id));
-        let waiting_total = waiting.len();
-        let orphan_total = loose.len();
-        waiting.truncate(SECTION_MAX);
-        loose.truncate(SECTION_MAX);
-
+            .collect();
         Rows {
-            providers: groups
-                .into_iter()
-                .map(|(provider, accounts)| ProviderGroup { provider, accounts })
-                .collect(),
-            orphan_nodes: loose,
-            waiting,
-            recent,
-            in_flight,
-            orphan_total,
-            waiting_total,
+            runs: self.panes().map(|p| p.run_rows(self.now)).collect(),
+            accounts,
+            tally,
         }
     }
 
-    /// In-flight nodes per account, and in total, over every tailed run. `focus` narrows what
-    /// a frame draws; an account running three nodes in the run `tab` hid is still at three.
-    fn in_flight_counts(
-        &self,
-        drawn: &BTreeMap<AccountId, Vec<NodeRow>>,
-        loose: &[NodeRow],
-    ) -> (BTreeMap<AccountId, usize>, usize) {
-        if self.focus.is_none() {
-            let counts = drawn.iter().map(|(id, n)| (id.clone(), n.len())).collect();
-            let total = drawn.values().map(Vec::len).sum::<usize>() + loose.len();
-            return (counts, total);
-        }
+    /// Tasks and brains on each account over every tailed run, whatever the focus.
+    fn in_flight_counts(&self) -> BTreeMap<AccountId, usize> {
         let mut counts: BTreeMap<AccountId, usize> = BTreeMap::new();
-        let mut total = 0usize;
         for pane in &self.runs {
-            for row in pane.rows() {
-                if row.section() != Section::InFlight {
+            for logical in pane.view.by_logical.keys() {
+                let Some(state) = pane.view.state_of(*logical) else {
                     continue;
-                }
-                total += 1;
-                if let Some(id) = &row.account {
-                    *counts.entry(id.clone()).or_default() += 1;
+                };
+                let account = match &state {
+                    NodeState::Leased { account } => Some(account.clone()),
+                    NodeState::Running { .. } | NodeState::Orphaned { .. } => {
+                        pane.latest(*logical).and_then(|n| n.account.clone())
+                    }
+                    _ => None,
+                };
+                if let Some(id) = account {
+                    *counts.entry(id).or_default() += 1;
                 }
             }
         }
-        (counts, total)
+        counts
     }
 
     pub fn summary(&self, rows: &Rows) -> Summary {
@@ -589,11 +962,15 @@ impl Board {
             runs: self.runs.len(),
             hidden_runs: self.hidden_runs,
             stale_runs: self.runs.iter().filter(|p| p.stale.is_some()).count(),
-            in_flight: rows.in_flight,
-            waiting: rows.waiting_total,
+            tally: rows.tally,
             accounts: self.accounts.len(),
             cost_usd,
             cost_complete,
+            brain: self
+                .runs
+                .iter()
+                .filter_map(|p| p.view.brain_self_work())
+                .max_by_key(|w| w.calls),
         }
     }
 }
@@ -601,8 +978,9 @@ impl Board {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::core::{NodeKind, WorkspaceRef};
-    use crate::model::node::NodeRecord;
+    use crate::ids::CallSeq;
+    use crate::model::dispatch::{Phase, TaskRef};
+    use crate::model::failure::Failure;
     use crate::ui::board::sources::Tail;
     use crate::ui::chat::tests_support as fx;
     use camino::Utf8PathBuf;
@@ -652,6 +1030,28 @@ mod tests {
         b
     }
 
+    fn line(seq: u64, node: NodeId, event: JournalEvent) -> JournalLine {
+        JournalLine {
+            seq,
+            at: fx::at(100),
+            run: fx::run_id(),
+            node: Some(node),
+            event,
+        }
+    }
+
+    fn changed(seq: u64, node: NodeId, to: NodeState) -> JournalLine {
+        line(
+            seq,
+            node,
+            JournalEvent::NodeStateChanged {
+                from: Phase::Queued,
+                to,
+                why: String::new(),
+            },
+        )
+    }
+
     fn selected(seq: u64, node: NodeId, reason: &str, excluded: &[&str]) -> JournalLine {
         JournalLine {
             seq,
@@ -668,150 +1068,240 @@ mod tests {
         }
     }
 
-    fn queued(seq: u64, node: NodeId, title: &str) -> JournalLine {
-        JournalLine {
+    fn shorts(g: &DispatchGroup) -> Vec<String> {
+        g.tasks.iter().map(|t| t.row.short()).collect()
+    }
+
+    /// Tasks sit under the dispatch that asked for them, dispatches in call order.
+    #[test]
+    fn tasks_group_under_their_dispatch_in_call_order() {
+        let b = board(vec![pane(&fx::board_journal())], Vec::new());
+        let rows = b.rows();
+        let run = &rows.runs[0];
+        assert_eq!(run.brain.as_ref().map(|r| r.short()), Some("9g5fav".into()));
+        assert_eq!(run.active.len(), 1);
+        assert_eq!(run.active[0].label(), "#1");
+        assert_eq!(
+            order::dispatch_label(run.active[0].seq, run.active[0].id),
+            "#1 9g5f18"
+        );
+        assert_eq!(run.recent.len(), 1, "the rejected dispatch settled");
+        assert_eq!(run.recent[0].seq, Some(CallSeq(2)));
+        assert_eq!(
+            run.active[0].tally.cells().len(),
+            4,
+            "{:?}",
+            run.active[0].tally
+        );
+        assert!((run.active[0].cost.usd - 0.34).abs() < 1e-9);
+    }
+
+    /// Failures first, then running, then blocked, then queued, then done.
+    #[test]
+    fn tasks_are_ranked_inside_a_dispatch() {
+        let mut lines = fx::board_journal();
+        let b = board(vec![pane(&lines)], Vec::new());
+        assert_eq!(
+            shorts(&b.rows().runs[0].active[0]),
+            vec!["9g5f01", "9g5f09·2", "9g5f04", "9g5f0a", "9g5f05"]
+        );
+
+        let seq = lines.len() as u64 + 10;
+        lines.push(changed(
             seq,
-            at: fx::at(seq as i64),
-            run: fx::run_id(),
-            node: Some(node),
-            event: JournalEvent::NodeSpawned {
-                node: Box::new(NodeRecord {
-                    id: node,
-                    run_id: fx::run_id(),
-                    parent: Some(fx::id(0)),
-                    logical: node,
-                    attempt: 1,
-                    retry_of: None,
-                    kind: NodeKind::Worker,
-                    title: title.to_owned(),
-                    prompt_path: Utf8PathBuf::from("prompt.md"),
-                    prompt_sha256: String::new(),
-                    provider: Provider::Anthropic,
-                    account: None,
-                    exec: None,
-                    argv: Vec::new(),
-                    model: None,
-                    tier: Tier::Mid,
-                    workspace: WorkspaceRef::ReadOnly {
-                        path: Utf8PathBuf::from("/repo"),
-                    },
-                    session: None,
-                    state: NodeState::Queued,
-                    created_at: fx::at(seq as i64),
-                    started_at: None,
-                    ended_at: None,
-                    usage: Usage::default(),
-                    cost: None,
-                    exit: None,
-                    files: Vec::new(),
-                    work: None,
-                    summary: None,
-                    stream_offset: 0,
-                    unparsed_lines: 0,
+            fx::board_task(4),
+            NodeState::Failed {
+                failure: Failure::Timeout { after_s: 60 },
+            },
+        ));
+        let b = board(vec![pane(&lines)], Vec::new());
+        let group = b.rows().runs[0].active[0].clone();
+        assert_eq!(
+            shorts(&group),
+            vec!["9g5f0a", "9g5f01", "9g5f09·2", "9g5f04", "9g5f05"]
+        );
+        assert_eq!(
+            order::text(&group.tally.cells()),
+            "1 failed · 2 running · 1 blocked · 1 done"
+        );
+    }
+
+    /// Settled means recent; an open dispatch whose tasks all ended is still open.
+    #[test]
+    fn only_a_settled_dispatch_moves_to_recent() {
+        let mut lines = fx::board_journal();
+        let base = lines.len() as u64 + 10;
+        for n in 1..=4u8 {
+            lines.push(changed(
+                base + n as u64,
+                fx::board_task(n),
+                NodeState::Succeeded,
+            ));
+        }
+        let b = board(vec![pane(&lines)], Vec::new());
+        let rows = b.rows();
+        assert_eq!(rows.runs[0].active.len(), 1, "no DispatchSettled yet");
+        assert_eq!(rows.runs[0].active[0].tally.done, 5);
+        assert!(rows.runs[0].active[0].expanded);
+        assert!(!rows.runs[0].recent[0].expanded, "recent starts folded");
+
+        let mut later = b;
+        later.now = fx::at(159) + time::Duration::seconds(RECENT_TTL.as_secs() as i64 + 1);
+        assert!(later.rows().runs[0].recent.is_empty(), "recent ages out");
+    }
+
+    /// A task that dispatched work of its own carries that dispatch right under it.
+    #[test]
+    fn a_nested_dispatch_hangs_under_its_task() {
+        let mut lines = fx::board_journal();
+        let seq = lines.len() as u64 + 10;
+        lines.push(line(
+            seq,
+            fx::nid("01"),
+            JournalEvent::DispatchIssued {
+                record: Box::new(DispatchRecord {
+                    id: fx::did("1k"),
+                    run: fx::run_id(),
+                    caller: fx::nid("01"),
+                    call_seq: Some(CallSeq(3)),
+                    wait: true,
+                    max_wait_s: None,
+                    tasks: vec![TaskRef {
+                        logical: fx::nid("1m"),
+                        title: "split the handler".into(),
+                        tier: Tier::Low,
+                        provider: Provider::Anthropic,
+                    }],
+                    at: fx::at(100),
                 }),
             },
-        }
+        ));
+        let b = board(vec![pane(&lines)], Vec::new());
+        let rows = b.rows();
+        let run = &rows.runs[0];
+        assert_eq!(run.active.len(), 1, "a nested dispatch is not a root");
+        let task = &run.active[0].tasks[0];
+        assert_eq!(task.row.short(), "9g5f01");
+        assert_eq!(task.nested.len(), 1);
+        let nested = &task.nested[0];
+        assert_eq!(nested.label(), "#3");
+        assert_eq!(nested.caller, Some(fx::nid("01")));
+        assert_eq!(nested.level, 1);
+        assert_eq!(nested.tasks[0].level, 1);
+        assert_eq!(rows.tally.queued, 2, "an open nested dispatch counts");
     }
 
-    /// The whole point of the board: account -> what that account is working on.
+    /// A schema-1 run has no dispatches: one legacy bucket, in tree order, no brain in it.
     #[test]
-    fn in_flight_nodes_group_under_the_account_running_them() {
-        let b = board(
-            vec![pane(&fx::running())],
-            vec![
-                account_row("main", Some(Provider::Anthropic)),
-                account_row("alt", Some(Provider::Anthropic)),
-                account_row("codex-main", Some(Provider::Openai)),
-            ],
-        );
+    fn a_legacy_run_groups_into_one_bucket_in_tree_order() {
+        let b = board(vec![pane(&fx::fixture())], Vec::new());
         let rows = b.rows();
-
-        assert_eq!(rows.providers.len(), 2);
-        assert_eq!(rows.providers[0].provider, Some(Provider::Anthropic));
-        let main = &rows.providers[0].accounts[0];
-        assert_eq!(main.row.account.0, "main");
-        // The brain leases an account like any worker, and it is drawn first.
-        let titles: Vec<&str> = main.nodes.iter().map(|n| n.title.as_str()).collect();
-        assert_eq!(titles, vec!["brain", "add pagination to /users"]);
-        assert!(main.nodes[0].brain);
-        // The file's own `inflight` is always zero; the count comes from the journals.
-        assert_eq!(main.row.inflight, 2);
-        assert_eq!(rows.providers[0].accounts[1].row.inflight, 1);
-        assert_eq!(rows.providers[1].accounts[0].row.inflight, 0);
-        assert!(rows.orphan_nodes.is_empty());
-
-        let s = b.summary(&rows);
-        assert_eq!(s.in_flight, 3);
-        assert_eq!(s.accounts, 3);
-    }
-
-    /// An account `accounts.json` has never heard of still has to show its work.
-    #[test]
-    fn a_node_on_an_unknown_account_is_never_dropped() {
-        let b = board(vec![pane(&fx::running())], Vec::new());
-        let rows = b.rows();
-        assert!(rows.providers.is_empty());
-        assert_eq!(rows.orphan_nodes.len(), 3);
-    }
-
-    #[test]
-    fn terminal_nodes_move_to_recent_and_age_out() {
-        let mut b = board(
-            vec![pane(&fx::fixture())],
-            vec![account_row("main", Some(Provider::Anthropic))],
-        );
-        let rows = b.rows();
-        assert_eq!(rows.recent.len(), 2);
-        // Newest ended first.
-        assert_eq!(rows.recent[0].ended_at, Some(fx::at(140)));
-        assert_eq!(rows.providers[0].accounts[0].nodes.len(), 1, "brain only");
-
-        b.now = fx::at(140) + time::Duration::seconds(RECENT_TTL.as_secs() as i64 + 1);
-        assert!(b.rows().recent.is_empty());
-    }
-
-    #[test]
-    fn a_queued_node_waits() {
-        let mut lines = fx::running();
-        lines.push(queued(9, fx::id(7), "rebuild the index"));
-        let b = board(
-            vec![pane(&lines)],
-            vec![account_row("main", Some(Provider::Anthropic))],
-        );
-        let rows = b.rows();
-        assert_eq!(rows.waiting.len(), 1);
-        assert_eq!(rows.waiting[0].title, "rebuild the index");
-        // A node that has not started yet still has a wait, and it is the number that says
-        // how badly the pool is stuck: §3.1 shows it in the elapsed cell.
+        let run = &rows.runs[0];
+        assert_eq!(run.active.len(), 1);
+        let legacy = &run.active[0];
+        assert_eq!(legacy.id, DispatchId::LEGACY);
+        assert_eq!(legacy.label(), "legacy");
         assert_eq!(
-            rows.waiting[0].elapsed(b.now),
-            Some(StdDuration::from_secs(191))
+            shorts(legacy),
+            vec!["9g5f01", "9g5f02"],
+            "tree order, not rank"
         );
+        assert!(run.brain.is_some());
+        assert_eq!(rows.tally.failed, 1);
     }
 
-    /// A backlog is unbounded; a frame is not. The heading keeps the true total.
+    /// Past the cap, a legacy bucket keeps what ranks first, still drawn in tree order.
     #[test]
-    fn the_waiting_section_is_capped_and_says_so() {
-        let mut lines = fx::running();
-        for n in 0..(SECTION_MAX as u64 + 5) {
-            lines.push(queued(10 + n, fx::id(10 + n as u8), "rebuild the index"));
+    fn a_long_legacy_bucket_keeps_its_running_task() {
+        let mut lines = fx::fixture();
+        for n in 3..=11u8 {
+            let state = if n == 11 {
+                NodeState::Running {
+                    pid: 11,
+                    pgid: 11,
+                    since: fx::at(150),
+                }
+            } else {
+                NodeState::Succeeded
+            };
+            let node = fx::record(fx::id(n), "more work", state);
+            lines.push(line(
+                n as u64 + 10,
+                fx::id(n),
+                JournalEvent::NodeSpawned {
+                    node: Box::new(node),
+                },
+            ));
         }
-        let b = board(
-            vec![pane(&lines)],
-            vec![account_row("main", Some(Provider::Anthropic))],
-        );
+        let b = board(vec![pane(&lines)], Vec::new());
         let rows = b.rows();
-        assert_eq!(rows.waiting.len(), SECTION_MAX);
-        assert_eq!(rows.waiting_total, SECTION_MAX + 5);
-        assert_eq!(b.summary(&rows).waiting, SECTION_MAX + 5);
-        // Oldest wait first, so the rows the cap hides are the ones that just arrived.
-        assert!(rows.waiting[0].created_at <= rows.waiting[1].created_at);
+        let legacy = &rows.runs[0].active[0];
+        let kept: Vec<NodeId> = legacy.tasks.iter().map(|t| t.row.logical).collect();
+        let want: Vec<NodeId> = [1, 2, 3, 4, 5, 6, 7, 11].map(fx::id).to_vec();
+        assert_eq!(kept, want, "the failure and the running task, tree order");
+        assert_eq!(legacy.hidden, 3);
+        assert_eq!(legacy.tally.running, 1);
+        assert_eq!(newest_running(&rows), Some(legacy.tasks[7].row.selection()));
     }
 
-    /// `tab` chooses what is drawn, never what is true: an account at capacity in the run the
-    /// focus hid must not read as having headroom here.
+    /// A rotated retry waiting on every account shows the wait, not the attempt that ended.
     #[test]
-    fn focus_never_shrinks_an_account_count() {
+    fn a_blocked_retry_waits_from_its_last_attempt() {
+        let mut lines: Vec<JournalLine> = fx::board_journal()
+            .into_iter()
+            .filter(|l| l.node != Some(fx::nid("09")))
+            .collect();
+        let seq = lines.len() as u64 + 10;
+        lines.push(changed(seq, fx::board_task(2), NodeState::Queued));
+        lines.push(line(
+            seq + 1,
+            fx::board_task(2),
+            JournalEvent::NodeBlocked {
+                until: fx::at(2_480),
+                why: "main at capacity".into(),
+                ineligible: Vec::new(),
+            },
+        ));
+        let pane = pane(&lines);
+        let t = pane
+            .task_row(fx::board_task(2), 0, fx::now())
+            .expect("the task row");
+        assert!(matches!(t.row.state, NodeState::Blocked { .. }));
+        assert_eq!(t.row.account, None);
+        assert_eq!(t.row.model, None);
+        assert_eq!(t.row.cost, None);
+        assert_eq!(t.row.elapsed(fx::now()), Some(StdDuration::from_secs(168)));
+        assert_eq!(
+            order::attempt_lines(&t.prior),
+            vec!["attempt 1 9g5f08 on main: rate_limited (five_hour) after 41s"]
+        );
+    }
+
+    #[test]
+    fn the_default_selection_is_the_first_stuck_task() {
+        let b = board(vec![pane(&fx::board_journal())], Vec::new());
+        assert_eq!(
+            attention(&b.rows()),
+            Some(Selection::Node {
+                run: fx::run_id(),
+                logical: fx::board_task(3),
+            }),
+            "nothing failed, so the blocked task"
+        );
+        let b = board(vec![pane(&fx::fixture())], Vec::new());
+        assert_eq!(
+            attention(&b.rows()),
+            Some(Selection::Node {
+                run: fx::run_id(),
+                logical: fx::id(2),
+            }),
+            "the failed worker"
+        );
+    }
+
+    /// `tab` chooses what is drawn, never what is counted.
+    #[test]
+    fn header_tallies_sum_every_run_whatever_the_focus() {
         let other = RunId::from_str("01ARZ3NDEKTSV4RRFFQ69G5FBZ").expect("run id");
         let mut second = RunPane::new(
             RunPaths {
@@ -823,36 +1313,64 @@ mod tests {
         );
         second.apply(&fx::running());
         let mut b = board(
-            vec![pane(&fx::running()), second],
-            vec![account_row("main", Some(Provider::Anthropic))],
+            vec![pane(&fx::board_journal()), second],
+            vec![
+                account_row("main", Some(Provider::Anthropic)),
+                account_row("alt", Some(Provider::Anthropic)),
+            ],
         );
-
         let merged = b.rows();
-        assert_eq!(merged.providers[0].accounts[0].row.inflight, 4);
-        assert_eq!(merged.in_flight, 6);
+        assert_eq!(merged.tally.running, 4);
+        assert_eq!(merged.tally.stuck(), 1);
+        // Two brains and a worker of each run on main, a worker of each run on alt.
+        assert_eq!(
+            merged
+                .account(&AccountId("main".into()))
+                .map(|r| r.inflight),
+            Some(4)
+        );
+        assert_eq!(
+            merged.account(&AccountId("alt".into())).map(|r| r.inflight),
+            Some(2)
+        );
 
         b.focus = Some(fx::run_id());
         let rows = b.rows();
-        assert_eq!(
-            rows.providers[0].accounts[0].nodes.len(),
-            2,
-            "one run drawn"
-        );
-        assert_eq!(
-            rows.providers[0].accounts[0].row.inflight, 4,
-            "both runs counted"
-        );
-        assert_eq!(b.summary(&rows).in_flight, 6);
+        assert_eq!(rows.runs.len(), 1, "one run drawn");
+        assert_eq!(rows.tally, merged.tally, "both runs counted");
+        assert_eq!(rows.accounts[0].inflight, 4);
+        assert_eq!(b.summary(&rows).tally.running, 4);
     }
 
     #[test]
-    fn elapsed_is_recomputed_from_started_at() {
-        let b = board(
-            vec![pane(&fx::running())],
-            vec![account_row("main", Some(Provider::Anthropic))],
+    fn an_unstarted_rejected_task_has_no_elapsed() {
+        let b = board(vec![pane(&fx::board_journal())], Vec::new());
+        let rows = b.rows();
+        let rejected = &rows.runs[0].recent[0].tasks[0];
+        assert!(matches!(rejected.row.state, NodeState::Rejected { .. }));
+        assert_eq!(rejected.row.elapsed(b.now), None);
+
+        let blocked = rows
+            .task(fx::run_id(), fx::board_task(3))
+            .expect("blocked task");
+        assert_eq!(
+            blocked.row.elapsed(b.now),
+            Some(StdDuration::from_secs(200))
         );
-        let row = &b.rows().providers[0].accounts[0].nodes[1];
-        assert_eq!(row.elapsed(b.now), Some(StdDuration::from_secs(190)));
+        assert_eq!(blocked.ineligible.len(), 2);
+
+        let retried = rows
+            .task(fx::run_id(), fx::board_task(2))
+            .expect("retried task");
+        assert_eq!(
+            retried.row.elapsed(b.now),
+            Some(StdDuration::from_secs(168))
+        );
+        assert_eq!(retried.prior.len(), 1);
+        assert_eq!(
+            order::attempt_lines(&retried.prior),
+            vec!["attempt 1 9g5f08 on main: rate_limited (five_hour) after 41s"]
+        );
     }
 
     #[test]
@@ -899,72 +1417,45 @@ mod tests {
         assert_eq!(r.score, None);
     }
 
-    /// A real lease is taken before the attempt has an id, so `AccountSelected` names the
-    /// logical id. The footer has to find it there too, or no worker row ever explains itself.
+    /// `AccountSelected` names the logical id, since the lease predates the attempt.
     #[test]
     fn a_note_attributed_to_the_logical_id_still_reaches_the_row() {
-        let mut lines = fx::running();
-        let mut spawn = match &lines[3].event {
-            JournalEvent::NodeSpawned { node } => (**node).clone(),
-            _ => unreachable!("fixture line 3 spawns a node"),
-        };
-        spawn.id = fx::id(8);
-        spawn.logical = fx::id(7);
-        lines.push(JournalLine {
-            seq: 10,
-            at: fx::at(10),
-            run: fx::run_id(),
-            node: Some(fx::id(8)),
-            event: JournalEvent::NodeSpawned {
-                node: Box::new(spawn),
-            },
-        });
-        lines.push(selected(11, fx::id(7), "score .41 = util .93×.50", &[]));
+        let mut lines = fx::board_journal();
+        let seq = lines.len() as u64 + 10;
+        lines.push(selected(
+            seq,
+            fx::board_task(1),
+            "score .41 = util .93×.50",
+            &[],
+        ));
         let pane = pane(&lines);
-
         let note = pane
-            .note_for(fx::id(7))
+            .note_for(fx::board_task(1))
             .expect("a note for the logical row");
         assert_eq!(note.reason.form, ReasonForm::Terms);
-        assert_eq!(note.reason.score, Some(0.41));
     }
 
-    /// Notes are keyed by attempt; a retry's own note is the one the footer shows.
+    /// Notes are keyed by attempt; a retry's own note is the one the detail shows.
     #[test]
     fn the_newest_attempt_owns_the_note() {
-        let mut lines = fx::running();
-        lines.push(selected(9, fx::id(2), "score 0.9000", &[]));
-        let mut pane = pane(&lines);
-        // A retry keeps the logical id and takes a new attempt id.
-        let mut retry = match &lines[3].event {
-            JournalEvent::NodeSpawned { node } => (**node).clone(),
-            _ => unreachable!("fixture line 3 spawns a node"),
-        };
-        retry.id = fx::id(8);
-        retry.attempt = 2;
-        pane.apply(&[
-            JournalLine {
-                seq: 10,
-                at: fx::at(10),
-                run: fx::run_id(),
-                node: Some(fx::id(8)),
-                event: JournalEvent::NodeSpawned {
-                    node: Box::new(retry),
-                },
-            },
-            selected(11, fx::id(8), "score .41 = util .93×.50", &[]),
-        ]);
-
+        let mut lines = fx::board_journal();
+        let seq = lines.len() as u64 + 10;
+        lines.push(selected(seq, fx::nid("08"), "score 0.9000", &[]));
+        let pane = pane(&lines);
         let note = pane
-            .note_for(fx::id(2))
-            .expect("a note for the logical row");
-        assert_eq!(note.reason.form, ReasonForm::Terms);
-        let row = pane
-            .rows()
-            .into_iter()
-            .find(|r| r.logical == fx::id(2))
-            .expect("the collapsed row");
-        assert_eq!(row.id, fx::id(8), "the live attempt is the one diff takes");
+            .note_for(fx::board_task(2))
+            .expect("a note for the task");
+        assert_eq!(
+            note.reason.form,
+            ReasonForm::Terms,
+            "the retry's, not attempt 1's"
+        );
+        let row = pane.node_row(fx::board_task(2)).expect("the task row");
+        assert_eq!(
+            row.id,
+            fx::nid("09"),
+            "the live attempt is the one diff takes"
+        );
         assert_eq!(row.attempt, 2);
     }
 
@@ -980,9 +1471,9 @@ mod tests {
             pane.view.nodes[&pane.brain].state,
             NodeState::Orphaned { .. }
         ));
-        // Orphaned is not terminal: the node stays in flight with a frozen glyph.
-        assert_eq!(pane.rows()[0].section(), Section::InFlight);
-        assert!(pane.rows()[0].stale);
+        let brain = pane.brain_row().expect("the brain row");
+        assert!(brain.stale);
+        assert!(matches!(brain.state, NodeState::Orphaned { .. }));
 
         // The brain came back (a restart adopted it): the header stops saying stale.
         pane.refresh_liveness(&|_| true, fx::now());
@@ -1037,18 +1528,31 @@ mod tests {
         assert_eq!(b.selected, Selection::None);
     }
 
-    /// `tab` narrows every section, not just the tree.
+    #[test]
+    fn a_selected_dispatch_that_disappears_is_dropped() {
+        let mut b = board(vec![pane(&fx::board_journal())], Vec::new());
+        b.selected = Selection::Dispatch {
+            run: fx::run_id(),
+            id: fx::did("18"),
+        };
+        b.clamp();
+        assert!(matches!(b.selected, Selection::Dispatch { .. }));
+        b.selected = Selection::Dispatch {
+            run: fx::run_id(),
+            id: fx::did("99"),
+        };
+        b.clamp();
+        assert_eq!(b.selected, Selection::None);
+    }
+
     #[test]
     fn focus_draws_one_run() {
-        let mut b = board(
-            vec![pane(&fx::running())],
-            vec![account_row("main", Some(Provider::Anthropic))],
-        );
+        let mut b = board(vec![pane(&fx::running())], Vec::new());
         b.focus = Some(fx::run_id());
-        assert_eq!(b.rows().providers[0].accounts[0].nodes.len(), 2);
+        assert_eq!(b.rows().runs.len(), 1);
 
         b.focus = Some(RunId::default());
-        assert_eq!(b.rows().providers[0].accounts[0].nodes.len(), 0);
+        assert!(b.rows().runs.is_empty());
         b.clamp();
         assert_eq!(b.focus, None);
     }

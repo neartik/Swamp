@@ -1,0 +1,19 @@
+---
+source: src/ui/chat/screens.rs
+expression: "live(&mut app, 62)"
+---
+● swamp_dispatch(5 tasks)
+  ⎿  ⠋ #1 9g5f18 · 2 running · 1 blocked · ~$0.34 · 3m20s
+     ⠋ 9g5f01    [mid ]  add paginat…   3m10s   ~$0.08
+     ⠙ 9g5f09·2  [high]  backfill th…   2m48s   ~$0.22
+       └ attempt 1 9g5f08 on main: rate_limited (five_hour) a…
+     ⏸ 9g5f04    [mid ]  rebuild the…   3m20s
+       └ until 22:54 (in 38m) · main at capacity · alt quota …
+     · 9g5f0a    [low ]  write the c…   3m20s
+     ✔ 9g5f05    [low ]  add the /us…   2m10s   ~$0.04
+
+· Orchestrating… (esc to interrupt · 4m12s)
+──────────────────────────────────────────────────────────────
+>
+──────────────────────────────────────────────────────────────
+  ? for shortcuts    2 running · 1 stuck · 1 queued · ~$0.43

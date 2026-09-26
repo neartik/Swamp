@@ -1,9 +1,10 @@
 use crate::dispatch::account::{Health, QuotaSource, WindowKey};
-use crate::dispatch::policy::SelectionPolicy;
-use crate::ids::{NodeId, RunId};
+use crate::dispatch::policy::{Ineligible, SelectionPolicy};
+use crate::ids::{CallSeq, DispatchId, NodeId, RunId};
 use crate::model::core::{
     AccountId, Cost, FileChange, NodeState, Provider, RateLimitSnapshot, SessionHandle, Tier, Usage,
 };
+use crate::model::dispatch::{DispatchCounts, DispatchRecord, Phase};
 use crate::model::event::WorkerEvent;
 use crate::model::failure::Failure;
 use crate::model::node::{ExitInfo, NodeRecord, WorkResultRef};
@@ -82,7 +83,10 @@ pub enum JournalEvent {
     NodeBlocked {
         #[serde(with = "time::serde::rfc3339")]
         until: OffsetDateTime,
+        /// For display; `ineligible` is the same verdict in structured form.
         why: String,
+        #[serde(default)]
+        ineligible: Vec<(AccountId, Ineligible)>,
     },
     NodeRetry {
         attempt: u32,
@@ -146,6 +150,46 @@ pub enum JournalEvent {
         tool: String,
         args_sha256: String,
         args_path: Utf8PathBuf,
+        #[serde(default)]
+        call_seq: Option<CallSeq>,
+        /// The dispatch this call issued, for `swamp_dispatch` only.
+        #[serde(default)]
+        dispatch: Option<DispatchId>,
+    },
+    /// Durable, before any task starts. Line node: the caller.
+    DispatchIssued {
+        record: Box<DispatchRecord>,
+    },
+    /// Before the task waits for a lease. Line node: the logical id.
+    TaskQueued {
+        logical: NodeId,
+        dispatch: DispatchId,
+        title: String,
+        tier: Tier,
+        depth: u32,
+    },
+    /// A hard limit refused the task. Line node: the logical id.
+    DispatchRejected {
+        dispatch: DispatchId,
+        logical: NodeId,
+        reason: Failure,
+    },
+    /// On a task (Queued, Blocked, Leased, terminal) or an attempt (Leased, Running, terminal).
+    NodeStateChanged {
+        from: Phase,
+        to: NodeState,
+        why: String,
+    },
+    /// Its absence after `ProcessStarted`, with a dead pid, is what makes a node orphaned.
+    ProcessExited {
+        code: Option<i32>,
+        signal: Option<i32>,
+    },
+    /// Every task of the dispatch has ended. Line node: the caller.
+    DispatchSettled {
+        dispatch: DispatchId,
+        counts: DispatchCounts,
+        cost: Option<Cost>,
     },
     Adopted {
         into: String,
@@ -180,5 +224,5 @@ pub enum NoteAuthor {
     Swamp,
 }
 
-/// Bumped only for a breaking change; every additive change keeps it.
-pub const SCHEMA_VERSION: u32 = 1;
+/// 2 adds dispatches, tasks, transitions and process exits; a schema-1 journal still folds.
+pub const SCHEMA_VERSION: u32 = 2;

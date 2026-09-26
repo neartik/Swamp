@@ -1,6 +1,6 @@
 //! Journal fixtures the chat tests fold, and the pieces an `App` needs offline.
 
-use crate::ids::{NodeId, RunId};
+use crate::ids::{DispatchId, NodeId, RunId};
 use crate::journal::fold::RunView;
 use crate::journal::record::{JournalEvent, JournalLine, SCHEMA_VERSION};
 use crate::model::core::{
@@ -46,13 +46,7 @@ pub fn view_of(lines: Vec<JournalLine>) -> RunView {
 }
 
 fn line(seq: u64, node: Option<NodeId>, event: JournalEvent) -> JournalLine {
-    JournalLine {
-        seq,
-        at: at(seq as i64),
-        run: run_id(),
-        node,
-        event,
-    }
+    line_at(seq, seq as i64, node, event)
 }
 
 fn header() -> JournalLine {
@@ -91,7 +85,7 @@ fn brain() -> NodeRecord {
     }
 }
 
-fn record(node: NodeId, title: &str, state: NodeState) -> NodeRecord {
+pub fn record(node: NodeId, title: &str, state: NodeState) -> NodeRecord {
     NodeRecord {
         id: node,
         run_id: run_id(),
@@ -131,6 +125,8 @@ fn record(node: NodeId, title: &str, state: NodeState) -> NodeRecord {
         summary: None,
         stream_offset: 0,
         unparsed_lines: 0,
+        depth: 1,
+        dispatch: None,
     }
 }
 
@@ -275,6 +271,7 @@ pub fn blocked() -> Vec<JournalLine> {
         JournalEvent::NodeBlocked {
             until: at(2_660),
             why: "main cooling until 22:57".into(),
+            ineligible: Vec::new(),
         },
     )]
 }
@@ -329,4 +326,337 @@ pub fn welcome() -> WelcomeInfo {
         workers: "4 accounts · 3 ready, 1 cooling · 12% of the tightest window used".to_owned(),
         run: run_id().short(),
     }
+}
+
+/// A node id ending in `tail`: `nid("09").short()` is `9g5f09`.
+pub fn nid(tail: &str) -> NodeId {
+    NodeId::from_str(&format!(
+        "01ARZ3NDEKTSV4RRFFQ69G5F{}",
+        tail.to_ascii_uppercase()
+    ))
+    .expect("node id")
+}
+
+pub fn did(tail: &str) -> DispatchId {
+    DispatchId::from_str(&format!(
+        "01ARZ3NDEKTSV4RRFFQ69G5F{}",
+        tail.to_ascii_uppercase()
+    ))
+    .expect("dispatch id")
+}
+
+pub const TERMS: &str = "score .41 = util .93\u{d7}.50 + load .33\u{d7}.30 + share .12\u{d7}.15 \
+                         \u{2212} weight .00 \u{2212} idle .02";
+
+/// Logical ids of the tasks that ran: the attempts carry the ids the rows show.
+pub fn board_task(n: u8) -> NodeId {
+    match n {
+        1 => nid("11"),
+        2 => nid("12"),
+        3 => nid("04"),
+        4 => nid("0a"),
+        5 => nid("15"),
+        _ => nid("0c"),
+    }
+}
+
+fn line_at(seq: u64, offset: i64, node: Option<NodeId>, event: JournalEvent) -> JournalLine {
+    JournalLine {
+        seq,
+        at: at(offset),
+        run: run_id(),
+        node,
+        event,
+    }
+}
+
+struct Attempt {
+    id: NodeId,
+    logical: NodeId,
+    attempt: u32,
+    account: &'static str,
+    model: &'static str,
+    tier: Tier,
+    title: &'static str,
+    started: i64,
+    tokens: u64,
+    usd: f64,
+}
+
+impl Attempt {
+    fn record(&self) -> NodeRecord {
+        let mut r = record(
+            self.id,
+            self.title,
+            NodeState::Running {
+                pid: 100 + self.started as i32,
+                pgid: 100 + self.started as i32,
+                since: at(self.started),
+            },
+        );
+        r.logical = self.logical;
+        r.attempt = self.attempt;
+        r.retry_of = (self.attempt > 1).then_some(nid("08"));
+        r.account = Some(AccountId(self.account.to_owned()));
+        r.exec = Some(format!("claude-{}", self.account));
+        r.model = Some(self.model.to_owned());
+        r.tier = self.tier;
+        r.created_at = at(0);
+        r.started_at = Some(at(self.started));
+        r.usage = Usage {
+            input_tokens: self.tokens,
+            ..Usage::default()
+        };
+        r.cost = cost(self.usd);
+        r.dispatch = Some(did("18"));
+        r
+    }
+}
+
+const SONNET: &str = "claude-sonnet-4-5-20250929";
+const OPUS: &str = "claude-opus-4-1-20250805";
+
+/// `docs/BOARD.md` §1; now is `at(200)` (22:16:40 UTC), dispatch #1 at `at(0)`.
+pub fn board_journal() -> Vec<JournalLine> {
+    use crate::dispatch::policy::{Ineligible, SelectionPolicy};
+    use crate::ids::CallSeq;
+    use crate::model::core::{LimitScope, Provider};
+    use crate::model::dispatch::{DispatchCounts, DispatchRecord, Phase, TaskRef};
+    use crate::model::failure::Detector;
+
+    let brain = NodeRecord {
+        model: Some(OPUS.into()),
+        started_at: Some(at(-52)),
+        usage: Usage {
+            input_tokens: 214_000,
+            ..Usage::default()
+        },
+        cost: cost(0.09),
+        state: NodeState::Running {
+            pid: 1,
+            pgid: 1,
+            since: at(-52),
+        },
+        ..brain()
+    };
+    let tasks = [
+        (board_task(1), "add pagination to /users", Tier::Mid),
+        (board_task(2), "backfill the users index", Tier::High),
+        (board_task(3), "rebuild the index", Tier::Mid),
+        (board_task(4), "write the changelog", Tier::Low),
+        (board_task(5), "add the /users route", Tier::Low),
+    ];
+    let issued = |dispatch: DispatchId, seq: u64, at_: i64, tasks: &[(NodeId, &str, Tier)]| {
+        JournalEvent::DispatchIssued {
+            record: Box::new(DispatchRecord {
+                id: dispatch,
+                run: run_id(),
+                caller: id(0),
+                call_seq: Some(CallSeq(seq)),
+                wait: true,
+                max_wait_s: None,
+                tasks: tasks
+                    .iter()
+                    .map(|(logical, title, tier)| TaskRef {
+                        logical: *logical,
+                        title: (*title).to_owned(),
+                        tier: *tier,
+                        provider: Provider::Anthropic,
+                    })
+                    .collect(),
+                at: at(at_),
+            }),
+        }
+    };
+    let first = Attempt {
+        id: nid("01"),
+        logical: board_task(1),
+        attempt: 1,
+        account: "main",
+        model: SONNET,
+        tier: Tier::Mid,
+        title: "add pagination to /users",
+        started: 10,
+        tokens: 118_000,
+        usd: 0.08,
+    };
+    let limited = Attempt {
+        id: nid("08"),
+        logical: board_task(2),
+        attempt: 1,
+        account: "main",
+        model: OPUS,
+        tier: Tier::High,
+        title: "backfill the users index",
+        started: -9,
+        tokens: 0,
+        usd: 0.01,
+    };
+    let retry = Attempt {
+        id: nid("09"),
+        attempt: 2,
+        account: "alt",
+        started: 32,
+        tokens: 223_000,
+        usd: 0.21,
+        ..limited
+    };
+    let route = Attempt {
+        id: nid("05"),
+        logical: board_task(5),
+        attempt: 1,
+        account: "main",
+        model: SONNET,
+        tier: Tier::Low,
+        title: "add the /users route",
+        started: 20,
+        tokens: 96_000,
+        usd: 0.04,
+    };
+    let rate_limited = crate::model::failure::Failure::RateLimited {
+        resets_at: None,
+        scope: LimitScope::FiveHour,
+        detected_by: Detector::Telemetry,
+        evidence: "usage limit reached".into(),
+    };
+    let finished = |state: NodeState, a: &Attempt| JournalEvent::NodeFinished {
+        state,
+        exit: None,
+        usage: Usage {
+            input_tokens: a.tokens,
+            ..Usage::default()
+        },
+        cost: cost(a.usd),
+        work: None,
+        summary: None,
+        files: Vec::new(),
+        unparsed_lines: 0,
+    };
+    let spawned = |a: &Attempt| JournalEvent::NodeSpawned {
+        node: Box::new(a.record()),
+    };
+
+    let mut lines = vec![
+        line_at(1, -60, None, header().event),
+        line_at(
+            2,
+            -52,
+            Some(id(0)),
+            JournalEvent::NodeSpawned {
+                node: Box::new(brain),
+            },
+        ),
+        line_at(3, 0, Some(id(0)), issued(did("18"), 1, 0, &tasks)),
+    ];
+    let mut seq = 4;
+    for (logical, title, tier) in &tasks {
+        lines.push(line_at(
+            seq,
+            0,
+            Some(*logical),
+            JournalEvent::TaskQueued {
+                logical: *logical,
+                dispatch: did("18"),
+                title: (*title).to_owned(),
+                tier: *tier,
+                depth: 1,
+            },
+        ));
+        seq += 1;
+    }
+    let mut push = |offset: i64, node: NodeId, event: JournalEvent| {
+        lines.push(line_at(seq, offset, Some(node), event));
+        seq += 1;
+    };
+    push(
+        1,
+        board_task(3),
+        JournalEvent::NodeBlocked {
+            until: at(2_480),
+            why: "main at capacity, alt quota stop".into(),
+            ineligible: vec![
+                (AccountId("main".into()), Ineligible::AtCapacity),
+                (AccountId("alt".into()), Ineligible::QuotaStop),
+            ],
+        },
+    );
+    push(-9, limited.id, spawned(&limited));
+    push(10, first.id, spawned(&first));
+    push(20, route.id, spawned(&route));
+    push(
+        32,
+        limited.id,
+        finished(
+            NodeState::Failed {
+                failure: rate_limited.clone(),
+            },
+            &limited,
+        ),
+    );
+    push(
+        32,
+        limited.id,
+        JournalEvent::NodeRetry {
+            attempt: 2,
+            reason: rate_limited,
+            rotate: true,
+        },
+    );
+    push(32, retry.id, spawned(&retry));
+    push(
+        32,
+        retry.id,
+        JournalEvent::AccountSelected {
+            account: AccountId("alt".into()),
+            exec: "claude-alt".into(),
+            policy: SelectionPolicy::QuotaAware,
+            reason: TERMS.to_owned(),
+            excluded: vec![AccountId("main".into()), AccountId("codex-main".into())],
+        },
+    );
+    push(150, route.id, finished(NodeState::Succeeded, &route));
+    push(
+        150,
+        board_task(5),
+        JournalEvent::NodeStateChanged {
+            from: Phase::Running,
+            to: NodeState::Succeeded,
+            why: "finished".into(),
+        },
+    );
+    push(
+        159,
+        id(0),
+        issued(
+            did("1c"),
+            2,
+            159,
+            &[(board_task(6), "probe the migration", Tier::Low)],
+        ),
+    );
+    push(
+        159,
+        board_task(6),
+        JournalEvent::DispatchRejected {
+            dispatch: did("1c"),
+            logical: board_task(6),
+            reason: crate::model::failure::Failure::WorkerError {
+                subtype: "max_nodes_per_run".into(),
+                detail: "the run already holds 32 nodes".into(),
+            },
+        },
+    );
+    push(
+        159,
+        id(0),
+        JournalEvent::DispatchSettled {
+            dispatch: did("1c"),
+            counts: DispatchCounts {
+                rejected: 1,
+                ..DispatchCounts::default()
+            },
+            cost: None,
+        },
+    );
+    lines
 }

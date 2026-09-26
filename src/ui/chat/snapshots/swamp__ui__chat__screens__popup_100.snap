@@ -9,8 +9,8 @@ expression: "live(&mut app, 100)"
   /status     the run tree, same output as swamp trace
   /accounts   the account pool, health and spend
   /usage      per-account tokens and quota windows
-  /cost       tokens and spend for this run
-  … +5 more
+  /dispatches one row per dispatch: tasks, states, cost
+  … +6 more
 ────────────────────────────────────────────────────────────────────────────────────────────────────
 > /t
 ────────────────────────────────────────────────────────────────────────────────────────────────────

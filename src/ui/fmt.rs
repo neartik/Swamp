@@ -63,6 +63,12 @@ pub fn cost(c: Option<Cost>) -> String {
     }
 }
 
+/// `~$0.43`, with a trailing `+` when some attempt reported no cost.
+pub fn usd(usd: f64, complete: bool) -> String {
+    let plus = if complete { "" } else { "+" };
+    format!("~${usd:.2}{plus}")
+}
+
 pub fn glyph(s: &NodeState) -> &'static str {
     match s {
         NodeState::Queued => "·",
@@ -73,20 +79,30 @@ pub fn glyph(s: &NodeState) -> &'static str {
         NodeState::Succeeded => "✔",
         NodeState::Failed { .. } => "✘",
         NodeState::Cancelled { .. } => "⊘",
+        NodeState::Rejected { .. } => "⊗",
     }
 }
 
 /// The word `swamp trace` prints in the status column.
 pub fn state_word(s: &NodeState) -> &'static str {
     match s {
-        NodeState::Queued => "queued",
-        NodeState::Blocked { .. } => "blocked",
-        NodeState::Leased { .. } => "leased",
-        NodeState::Running { .. } => "running",
         NodeState::Orphaned { .. } => "orphaned",
-        NodeState::Succeeded => "ok",
-        NodeState::Failed { .. } => "failed",
-        NodeState::Cancelled { .. } => "cancelled",
+        s => phase_word(crate::model::dispatch::Phase::from(s)),
+    }
+}
+
+/// `state_word` for a state without its payload.
+pub fn phase_word(p: crate::model::dispatch::Phase) -> &'static str {
+    use crate::model::dispatch::Phase;
+    match p {
+        Phase::Queued => "queued",
+        Phase::Blocked => "blocked",
+        Phase::Leased => "leased",
+        Phase::Running => "running",
+        Phase::Succeeded => "ok",
+        Phase::Failed => "failed",
+        Phase::Cancelled => "cancelled",
+        Phase::Rejected => "rejected",
     }
 }
 
@@ -170,6 +186,30 @@ pub fn clock_day(at: OffsetDateTime, now: OffsetDateTime) -> String {
     format!("{} on {}", clock_hm(at), at.date())
 }
 
+/// `22:54 (in 38m)`.
+fn when(until: OffsetDateTime, now: OffsetDateTime) -> String {
+    let secs = (until - now).whole_seconds().max(0) as u64;
+    format!(
+        "{} (in {})",
+        clock_day(until, now),
+        self::until(Duration::from_secs(secs))
+    )
+}
+
+/// `until 22:54 (in 38m)`.
+pub fn until_at(until: OffsetDateTime, now: OffsetDateTime) -> String {
+    format!("until {}", when(until, now))
+}
+
+/// `9g5f09·2` for a retry, the plain short id otherwise.
+pub fn attempt_id(id: crate::ids::NodeId, attempt: u32) -> String {
+    if attempt > 1 {
+        format!("{}\u{b7}{attempt}", id.short())
+    } else {
+        id.short()
+    }
+}
+
 /// The one line a node blocked on an exhausted pool gets. `cancel` is the only part chat and
 /// `swamp run` disagree on, so the wording cannot drift between them.
 pub fn blocked_notice(
@@ -178,11 +218,9 @@ pub fn blocked_notice(
     now: OffsetDateTime,
     cancel: &str,
 ) -> String {
-    let secs = (until - now).whole_seconds().max(0) as u64;
     format!(
-        "every {provider} account is at its limit \u{b7} earliest reset {} (in {}) \u{b7} {cancel}",
-        clock_day(until, now),
-        self::until(Duration::from_secs(secs))
+        "every {provider} account is at its limit \u{b7} earliest reset {} \u{b7} {cancel}",
+        when(until, now)
     )
 }
 

@@ -26,6 +26,10 @@ pub struct Scenario {
     pub last_message: Option<String>,
     /// Brain mode: dispatched through the MCP bridge before the turn ends.
     pub dispatch: Vec<BrainTask>,
+    /// How many identical `swamp_dispatch` calls the brain makes; 0 means one.
+    pub dispatch_calls: u32,
+    /// Brain mode: files the brain `Read`s itself before it dispatches.
+    pub brain_reads: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -92,6 +96,18 @@ impl Scenario {
 
     pub fn says(mut self, line: &str) -> Scenario {
         self.stderr.push(line.to_owned());
+        self
+    }
+
+    /// Repeats the brain's `swamp_dispatch` call, arguments and all, `n` times.
+    pub fn dispatch_calls(mut self, n: u32) -> Scenario {
+        self.dispatch_calls = n;
+        self
+    }
+
+    /// The brain reads these files itself before it dispatches anything.
+    pub fn reads_first(mut self, files: &[&str]) -> Scenario {
+        self.brain_reads = files.iter().map(|f| (*f).to_owned()).collect();
         self
     }
 

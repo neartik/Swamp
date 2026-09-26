@@ -2,12 +2,14 @@
 
 mod common;
 
+use common::journal::*;
+
 use camino::Utf8PathBuf;
 use proptest::prelude::*;
 use std::str::FromStr;
 use std::sync::Arc;
-use swamp::ids::{NodeId, RunId};
-use swamp::journal::fold::{LlmDigest, Projection, RunView};
+use swamp::ids::{CallSeq, DispatchId, NodeId, RunId};
+use swamp::journal::fold::{LlmDigest, Projection, RunView, Scope};
 use swamp::journal::paths::{Paths, RunPaths};
 use swamp::journal::raw::{RawSink, Redactor};
 use swamp::journal::reader::{Tailer, replay};
@@ -15,116 +17,16 @@ use swamp::journal::record::{JournalEvent, JournalLine, NoteAuthor};
 use swamp::journal::writer::FsyncPolicy;
 use swamp::journal::{Journal, JournalHandle};
 use swamp::model::core::{
-    AccountId, ChangeKind, Cost, CostBasis, EvidenceSource, FileChange, NodeKind, NodeState,
-    Provider, Tier, Usage, WorkspaceRef,
+    AccountId, ChangeKind, Cost, CostBasis, EvidenceSource, FileChange, NodeState, Usage,
 };
+use swamp::model::dispatch::{DispatchCounts, DispatchState, Phase};
+use swamp::model::event::WorkerEvent;
 use swamp::model::failure::{Detector, Failure};
-use swamp::model::node::NodeRecord;
-use time::OffsetDateTime;
-
-const CROCKFORD: &[u8] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
-
-fn ulid_text(i: usize) -> String {
-    let hi = CROCKFORD[(i / 32) % 32] as char;
-    let lo = CROCKFORD[i % 32] as char;
-    format!("01ARZ3NDEKTSV4RRFFQ69G5F{hi}{lo}")
-}
-
-fn nid(i: usize) -> NodeId {
-    NodeId::from_str(&ulid_text(i)).expect("node id")
-}
-
-fn rid(i: usize) -> RunId {
-    RunId::from_str(&ulid_text(i)).expect("run id")
-}
-
-fn at(offset: i64) -> OffsetDateTime {
-    OffsetDateTime::from_unix_timestamp(1_700_000_000 + offset).expect("timestamp")
-}
-
-fn record(id: NodeId, logical: NodeId, parent: Option<NodeId>, attempt: u32) -> NodeRecord {
-    NodeRecord {
-        id,
-        run_id: rid(0),
-        parent,
-        logical,
-        attempt,
-        retry_of: None,
-        kind: if parent.is_none() {
-            NodeKind::Brain
-        } else {
-            NodeKind::Worker
-        },
-        title: format!("task {}", logical.short()),
-        prompt_path: Utf8PathBuf::from("prompt.md"),
-        prompt_sha256: String::new(),
-        provider: Provider::Anthropic,
-        account: None,
-        exec: None,
-        argv: Vec::new(),
-        model: None,
-        tier: Tier::Mid,
-        workspace: WorkspaceRef::ReadOnly {
-            path: Utf8PathBuf::from("/repo"),
-        },
-        session: None,
-        state: NodeState::Queued,
-        created_at: at(0),
-        started_at: None,
-        ended_at: None,
-        usage: Usage::default(),
-        cost: None,
-        exit: None,
-        files: Vec::new(),
-        work: None,
-        summary: None,
-        stream_offset: 0,
-        unparsed_lines: 0,
-    }
-}
-
-fn spawned(id: NodeId, logical: NodeId, parent: Option<NodeId>, attempt: u32) -> JournalEvent {
-    JournalEvent::NodeSpawned {
-        node: Box::new(record(id, logical, parent, attempt)),
-    }
-}
 
 fn note(text: &str) -> JournalEvent {
     JournalEvent::Note {
         author: NoteAuthor::Swamp,
         text: text.to_owned(),
-    }
-}
-
-fn line(seq: u64, node: Option<NodeId>, event: JournalEvent) -> JournalLine {
-    JournalLine {
-        seq,
-        at: at(seq as i64),
-        run: rid(0),
-        node,
-        event,
-    }
-}
-
-fn finished(state: NodeState, cost: Option<f64>) -> JournalEvent {
-    JournalEvent::NodeFinished {
-        state,
-        exit: None,
-        usage: Usage {
-            input_tokens: 100,
-            cached_input_tokens: 0,
-            cache_write_tokens: 0,
-            output_tokens: 10,
-            reasoning_tokens: 0,
-        },
-        cost: cost.map(|usd| Cost {
-            usd,
-            basis: CostBasis::Reported,
-        }),
-        work: None,
-        summary: None,
-        files: Vec::new(),
-        unparsed_lines: 0,
     }
 }
 
@@ -235,6 +137,49 @@ async fn concurrent_emits_round_trip_with_a_dense_sequence() {
     assert_eq!(notes, expected, "every emitted event survives exactly once");
 }
 
+/// Otherwise the fold drops the owner's next line as a replay.
+#[tokio::test]
+async fn a_line_appended_by_another_process_keeps_the_sequence_dense() {
+    let sb = sandbox();
+    let (handle, task) = open(&sb.paths, FsyncPolicy::Barrier).await;
+    handle
+        .emit_durable(None, note("owner 0"))
+        .await
+        .expect("owner line");
+    let theirs = swamp::journal::writer::append_shared(
+        &sb.paths.journal(),
+        sb.paths.run,
+        None,
+        note("from another process"),
+    )
+    .await
+    .expect("shared append");
+    assert_eq!(theirs, 1);
+    handle
+        .emit_durable(None, note("owner 1"))
+        .await
+        .expect("owner line");
+    drop(handle);
+    task.await.expect("writer task");
+
+    let lines = replay(&sb.paths.journal(), Collect::default()).expect("replay");
+    let texts: Vec<(u64, String)> = lines
+        .iter()
+        .filter_map(|l| match &l.event {
+            JournalEvent::Note { text, .. } => Some((l.seq, text.clone())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        texts,
+        vec![
+            (0, "owner 0".to_owned()),
+            (1, "from another process".to_owned()),
+            (2, "owner 1".to_owned()),
+        ]
+    );
+}
+
 #[tokio::test]
 async fn emit_after_the_writer_task_is_gone_only_logs() {
     let sb = sandbox();
@@ -262,6 +207,27 @@ async fn emit_durable_is_on_disk_when_it_returns() {
 
     let text = std::fs::read_to_string(sb.paths.journal()).expect("journal");
     assert!(text.contains("durable"), "line must be on disk already");
+    drop(handle);
+    task.await.expect("writer task");
+}
+
+/// A durable line never overtakes the lines emitted before it.
+#[tokio::test]
+async fn a_durable_line_lands_behind_every_earlier_emit() {
+    let sb = sandbox();
+    let (handle, task) = open(&sb.paths, FsyncPolicy::Never).await;
+    for i in 0..50 {
+        handle.emit(None, note(&format!("queued-{i}")));
+    }
+    let seq = handle
+        .emit_durable(None, note("durable"))
+        .await
+        .expect("durable emit");
+    assert_eq!(seq, 50);
+    let text = std::fs::read_to_string(sb.paths.journal()).expect("journal");
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines.len(), 51, "every earlier emit is on disk too");
+    assert!(lines[49].contains("queued-49") && lines[50].contains("durable"));
     drop(handle);
     task.await.expect("writer task");
 }
@@ -468,11 +434,15 @@ fn fold(lines: &[JournalLine]) -> RunView {
 
 fn digest(v: &RunView) -> String {
     format!(
-        "{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{}|{}|{}|{:?}",
+        "{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{}|{}|{}|{:?}",
         v.nodes,
         v.roots,
         v.children,
         v.by_logical,
+        v.dispatches,
+        v.tasks,
+        v.transitions,
+        v.call_seq,
         v.accounts,
         v.totals,
         v.cost_usd,
@@ -738,6 +708,17 @@ fn the_llm_digest_fits_its_budget_and_still_names_every_failure() {
     assert!(out.contains("FAIL worker_error"));
 }
 
+#[test]
+fn the_llm_digest_names_rejected_and_queued_tasks() {
+    let mut d = LlmDigest::new(4096);
+    for l in &schema_2() {
+        Projection::apply(&mut d, l);
+    }
+    let out = d.finish();
+    assert!(out.contains("docs [REJECTED worker_error]"), "{out}");
+    assert!(out.contains("bench [queued]"), "{out}");
+}
+
 // ---------------------------------------------------------------- paths
 
 fn paths_in(repo: &camino::Utf8Path, home: &camino::Utf8Path) -> Paths {
@@ -757,12 +738,7 @@ fn discover_walks_up_to_the_git_root() {
     assert_eq!(paths.repo, root);
     assert_eq!(paths.dot_swamp, root.join(".swamp"));
     assert!(paths.accounts_state().ends_with("accounts.json"));
-    assert!(
-        paths
-            .worktree_root()
-            .as_str()
-            .contains(root.file_name().unwrap())
-    );
+    assert!(swamp::workspace::repo_slug(&paths.repo).contains(root.file_name().unwrap()));
 }
 
 #[test]
@@ -969,4 +945,661 @@ fn a_second_run_started_never_overwrites_the_run_header() {
     assert_eq!(h.base.as_deref(), Some("aaaa111"));
     assert_eq!(h.argv[1], "run");
     assert_eq!(h.started_at, first, "elapsed would measure from the resume");
+}
+
+// ---------------------------------------------------------------- schema 2: dispatches
+
+fn fixture_path(name: &str) -> Utf8PathBuf {
+    Utf8PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join(name)
+}
+
+/// The tree as text, exactly as it was recorded before schema 2 existed.
+fn tree_text(view: &RunView) -> String {
+    let t = view.totals();
+    let mut s = String::new();
+    for r in view.tree() {
+        s.push_str(&format!(
+            "{}{} {} {} {:?}\n",
+            "  ".repeat(r.depth as usize),
+            r.logical.short(),
+            r.title,
+            swamp::ui::fmt::state_word(&r.state),
+            r.attempts.iter().map(|a| a.short()).collect::<Vec<_>>()
+        ));
+    }
+    s.push_str(&format!(
+        "nodes {} failed {} in {} out {} cost {:.2} complete {}\n",
+        t.nodes, t.failed, t.usage.input_tokens, t.usage.output_tokens, t.cost_usd, t.cost_complete
+    ));
+    s
+}
+
+/// Recorded with the schema-1 fold: the new fold must draw the identical tree from it.
+#[test]
+fn a_schema_1_journal_folds_to_its_golden_tree() {
+    let view = RunView::load(&fixture_path("journal-schema1.jsonl"), false).expect("load");
+    assert_eq!(view.header.as_ref().map(|h| h.schema), Some(1));
+    let golden = std::fs::read_to_string(fixture_path("journal-schema1.tree")).expect("golden");
+    assert_eq!(tree_text(&view), golden);
+
+    // Every worker of a schema-1 run sits in the legacy bucket, which closes with the run.
+    assert_eq!(view.dispatches.len(), 1);
+    let legacy = &view.dispatches[&DispatchId::LEGACY];
+    assert!(legacy.record.is_none());
+    assert_eq!(legacy.state, DispatchState::Settled);
+    assert_eq!(legacy.tasks.len(), 3);
+    for t in view.tasks.values() {
+        assert_eq!(t.dispatch, DispatchId::LEGACY);
+        assert_eq!((t.depth, &t.state), (None, &None), "{t:?}");
+    }
+    let parse = legacy.tasks[1];
+    assert_eq!(view.attempts(parse).len(), 2);
+    let r = view.rollup(Scope::Dispatch(DispatchId::LEGACY));
+    assert_eq!((r.nodes, r.failed, r.rejected), (3, 1, 0));
+    assert!(!r.cost_complete, "the docs task reported no cost");
+    assert!((r.cost_usd - 1.51).abs() < 1e-9, "{}", r.cost_usd);
+}
+
+fn seq_of(lines: &[JournalLine], pred: impl Fn(&JournalEvent) -> bool) -> usize {
+    lines
+        .iter()
+        .position(|l| pred(&l.event))
+        .expect("the fixture has the line")
+}
+
+#[test]
+fn a_schema_2_journal_groups_tasks_by_dispatch() {
+    let view = fold(&schema_2());
+    let (brain, a, b, c, d, e) = (nid(0), nid(1), nid(2), nid(3), nid(4), nid(5));
+    let (d1, d2, d3) = (did(40), did(41), did(42));
+
+    assert!(!view.dispatches.contains_key(&DispatchId::LEGACY));
+    assert_eq!(view.dispatches[&d1].tasks, vec![a, b]);
+    assert_eq!(view.dispatches[&d1].state, DispatchState::Settled);
+    assert_eq!(view.dispatches[&d1].counts.map(|c| c.succeeded), Some(2));
+    assert_eq!(view.dispatches[&d2].tasks, vec![c, d]);
+    assert_eq!(view.dispatches[&d2].state, DispatchState::Open);
+    let record = view.dispatches[&d2].record.as_ref().expect("a record");
+    assert_eq!((record.caller, record.call_seq), (brain, Some(CallSeq(2))));
+    assert_eq!(view.call_seq, Some(CallSeq(2)));
+
+    for t in [a, b, c, d] {
+        assert_eq!(view.tasks[&t].parent, Some(brain));
+    }
+    assert_eq!(view.tasks[&a].dispatch, d1);
+    assert_eq!(view.tasks[&d].dispatch, d2);
+    assert_eq!(view.tasks[&a].depth, Some(1));
+    assert_eq!(view.nodes[&nid(12)].depth, 1);
+    assert_eq!(view.nodes[&nid(12)].dispatch, Some(d1));
+    assert_eq!(view.tasks[&e].parent, Some(a));
+    assert_eq!(view.tasks[&e].dispatch, d3);
+    assert_eq!(view.tasks[&e].depth, Some(2));
+    assert_eq!(view.nodes[&nid(51)].depth, 2);
+    assert_eq!(view.dispatches[&d3].state, DispatchState::Settled);
+
+    assert_eq!(view.state_of(a), Some(NodeState::Succeeded));
+    assert!(matches!(
+        view.state_of(c),
+        Some(NodeState::Rejected {
+            reason: Failure::WorkerError { .. }
+        })
+    ));
+    assert_eq!(view.state_of(d), Some(NodeState::Queued));
+
+    let rows: Vec<(NodeId, u32)> = view.tree().iter().map(|r| (r.logical, r.depth)).collect();
+    assert_eq!(
+        rows,
+        vec![(brain, 0), (a, 1), (e, 2), (b, 1), (c, 1), (d, 1)],
+        "a task with no attempt yet is still a row under its caller"
+    );
+    let t = view.totals();
+    assert_eq!((t.nodes, t.failed, t.rejected), (5, 0, 1));
+}
+
+#[test]
+fn a_schema_2_journal_chains_attempts_and_transitions() {
+    let lines = schema_2();
+    let view = fold(&lines);
+    let (a, b) = (nid(1), nid(2));
+
+    let chain: Vec<NodeId> = view.attempts(a).iter().map(|n| n.id).collect();
+    assert_eq!(chain, vec![nid(11), nid(12)]);
+    assert_eq!(
+        view.attempts(nid(12)).len(),
+        2,
+        "an attempt id resolves to its task"
+    );
+    assert!(view.exited.contains(&nid(11)));
+
+    for (id, chain) in &view.transitions {
+        assert!(well_formed(chain), "{id}: {chain:?}");
+    }
+    let phases: Vec<Phase> = view.transitions[&a]
+        .iter()
+        .map(|t| Phase::from(&t.to))
+        .collect();
+    assert_eq!(
+        phases,
+        vec![
+            Phase::Leased,
+            Phase::Queued,
+            Phase::Leased,
+            Phase::Succeeded
+        ]
+    );
+
+    // Between attempts the task reads as waiting again, not as its failed first attempt.
+    let rotated = seq_of(&lines, |e| {
+        matches!(
+            e,
+            JournalEvent::NodeStateChanged {
+                to: NodeState::Queued,
+                ..
+            }
+        )
+    });
+    let mid = fold(&lines[..rotated]);
+    assert_eq!(mid.state_of(a), Some(leased("main")));
+    let mid = fold(&lines[..=rotated]);
+    assert_eq!(mid.state_of(a), Some(NodeState::Queued));
+    let blocked = seq_of(&lines, |e| matches!(e, JournalEvent::NodeBlocked { .. }));
+    let mid = fold(&lines[..=blocked + 1]);
+    assert!(matches!(mid.state_of(b), Some(NodeState::Blocked { .. })));
+    // While an attempt runs, the row shows the process.
+    let running = seq_of(&lines, |e| matches!(e, JournalEvent::ProcessStarted { .. }));
+    let mid = fold(&lines[..=running]);
+    assert!(matches!(
+        mid.state_of(a),
+        Some(NodeState::Running { pid: 101, .. })
+    ));
+}
+
+#[test]
+fn a_schema_2_journal_rolls_up_cost_and_tokens() {
+    let view = fold(&schema_2());
+    let (brain, a) = (nid(0), nid(1));
+    let (d1, d2) = (did(40), did(41));
+    let close = |x: f64, y: f64| (x - y).abs() < 1e-9;
+
+    let r = view.rollup(Scope::Dispatch(d1));
+    assert_eq!((r.nodes, r.failed, r.rejected), (2, 0, 0));
+    assert!(close(r.cost_usd, 0.85) && r.cost_complete, "{r:?}");
+    assert_eq!(r.usage.input_tokens, 300, "three attempts");
+
+    let r = view.rollup(Scope::Task(a));
+    assert!(close(r.cost_usd, 0.6), "{r:?}");
+    assert_eq!(r.usage.input_tokens, 200);
+    let same = view.rollup(Scope::Task(nid(11)));
+    assert!(close(same.cost_usd, r.cost_usd));
+
+    let r = view.rollup(Scope::Dispatch(d2));
+    assert_eq!((r.nodes, r.rejected), (1, 1));
+    assert!(close(r.cost_usd, 0.0) && r.cost_complete);
+
+    let r = view.rollup(Scope::Subtree(brain));
+    assert_eq!((r.nodes, r.rejected), (5, 1), "brain, A, E, B and D");
+    assert!(close(r.cost_usd, 1.9), "{r:?}");
+    let r = view.rollup(Scope::Subtree(a));
+    assert!(close(r.cost_usd, 0.65), "A and the task it dispatched");
+}
+
+#[test]
+fn folding_a_schema_2_journal_is_idempotent_and_prefix_stable() {
+    let lines = schema_2();
+    let once = digest(&fold(&lines));
+    let mut twice = RunView::default();
+    for l in lines.iter().chain(lines.iter()) {
+        twice.apply(l);
+    }
+    assert_eq!(digest(&twice), once);
+    for split in 0..=lines.len() {
+        let mut v = RunView::default();
+        for l in &lines[..split] {
+            v.apply(l);
+        }
+        for l in &lines[split.saturating_sub(3)..] {
+            v.apply(l);
+        }
+        assert_eq!(digest(&v), once, "split at {split}");
+    }
+}
+
+#[test]
+fn a_node_whose_process_exited_is_never_an_orphan() {
+    let n = nid(1);
+    let lines = vec![
+        line(0, Some(n), spawned(n, n, None, 1)),
+        line(1, Some(n), started(4000)),
+        line(2, Some(n), exited()),
+    ];
+    let mut view = fold(&lines);
+    view.mark_orphans(&|_| false);
+    assert!(
+        matches!(view.nodes[&n].state, NodeState::Running { .. }),
+        "the process is gone by its own account: it is being finalized"
+    );
+    assert_eq!(view.nodes[&n].exit.and_then(|e| e.code), Some(0));
+
+    let mut view = fold(&lines[..2]);
+    view.mark_orphans(&|_| false);
+    assert!(matches!(view.nodes[&n].state, NodeState::Orphaned { .. }));
+}
+
+#[test]
+fn the_board_draws_tasks_that_never_reached_an_attempt() {
+    use swamp::ui::board::model::RunPane;
+    use swamp::ui::board::sources::Tail;
+
+    let (a, c, d) = (nid(1), nid(3), nid(4));
+    let dir = Utf8PathBuf::from("/repo/.swamp/runs/x");
+    let mut pane = RunPane::new(
+        RunPaths {
+            run: rid(0),
+            dir: dir.clone(),
+            sock_dir: dir.clone(),
+        },
+        Tail::detached(dir.join("journal.jsonl").as_str()),
+    );
+    pane.apply(&schema_2());
+    let row = |id: NodeId| {
+        pane.node_row(id)
+            .unwrap_or_else(|| panic!("no row for {id}"))
+    };
+
+    assert!(matches!(row(c).state, NodeState::Rejected { .. }));
+    assert_eq!((row(c).title.as_str(), row(c).attempt), ("docs", 0));
+    assert_eq!(row(c).elapsed(at(100)), None, "a refused task never waited");
+    assert_eq!(row(d).state, NodeState::Queued);
+    assert_eq!(
+        row(d).created_at,
+        at(0),
+        "a waiting row counts from its dispatch"
+    );
+    assert_eq!(row(a).state, NodeState::Succeeded);
+
+    let rows = pane.run_rows(at(10));
+    let grouped: Vec<NodeId> = rows
+        .active
+        .iter()
+        .chain(&rows.recent)
+        .flat_map(|g| g.tasks.iter().map(|t| t.row.logical))
+        .collect();
+    for id in [a, c, d] {
+        assert!(grouped.contains(&id), "{id} sits under its dispatch");
+    }
+}
+
+#[test]
+fn resume_ends_stranded_tasks_and_then_their_dispatch() {
+    use swamp::cmd::resume::{open_dispatches, open_tasks};
+
+    let mut lines = schema_2();
+    let (c, d) = (nid(3), nid(4));
+    let d2 = did(41);
+    let view = fold(&lines);
+    let ends = open_tasks(&view);
+    assert_eq!(ends.len(), 1, "{ends:?}");
+    assert_eq!((ends[0].logical, ends[0].from), (d, Phase::Queued));
+    assert!(matches!(ends[0].to, NodeState::Cancelled { .. }));
+    assert!(
+        open_dispatches(&view).is_empty(),
+        "d2 still has a task open"
+    );
+
+    let seq = lines.len() as u64;
+    lines.push(line(
+        seq,
+        Some(d),
+        changed(ends[0].from, ends[0].to.clone(), "interrupted"),
+    ));
+    let view = fold(&lines);
+    assert!(open_tasks(&view).is_empty());
+    let settle = open_dispatches(&view);
+    assert_eq!(settle.len(), 1);
+    let (caller, id, counts, cost) = settle[0];
+    assert_eq!((caller, id), (nid(0), d2));
+    assert_eq!(
+        counts,
+        DispatchCounts {
+            cancelled: 1,
+            rejected: 1,
+            ..DispatchCounts::default()
+        }
+    );
+    assert!(cost.is_none(), "neither task ran");
+    assert!(view.tasks.contains_key(&c));
+}
+
+/// A task whose last attempt ended while the task itself still reads leased.
+#[test]
+fn resume_ends_a_task_whose_terminal_transition_was_lost() {
+    use swamp::cmd::resume::open_tasks;
+
+    let lines = schema_2();
+    let a = nid(1);
+    let last = lines
+        .iter()
+        .rposition(|l| {
+            l.node == Some(a)
+                && matches!(
+                    l.event,
+                    JournalEvent::NodeStateChanged {
+                        to: NodeState::Succeeded,
+                        ..
+                    }
+                )
+        })
+        .expect("A's terminal transition");
+    let lost: Vec<JournalLine> = lines
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| *i != last)
+        .map(|(_, l)| l.clone())
+        .collect();
+    let view = fold(&lost);
+    assert!(matches!(view.state_of(a), Some(NodeState::Leased { .. })));
+    let ends = open_tasks(&view);
+    let end = ends.iter().find(|e| e.logical == a).expect("A is stranded");
+    assert_eq!(
+        (end.from, end.to.clone()),
+        (Phase::Leased, NodeState::Succeeded)
+    );
+}
+
+#[test]
+fn inspect_carries_the_blocked_verdict_and_the_rejection() {
+    use swamp::journal::inspect;
+    let lines = schema_2();
+    let blocked_at = lines
+        .iter()
+        .position(|l| matches!(l.event, JournalEvent::NodeBlocked { .. }))
+        .expect("the fixture blocks a task");
+    let mut view = RunView::default();
+    for l in &lines[..=blocked_at + 1] {
+        view.apply(l);
+    }
+    let b = inspect::task(&view, nid(2), at(10)).expect("task b");
+    assert_eq!(b.state, Phase::Blocked);
+    assert_eq!(b.depth, Some(1));
+    let blocked = b.blocked.expect("a blocked verdict");
+    assert_eq!(blocked.why, "main cooling");
+    assert_eq!(blocked.ineligible.len(), 1);
+    assert_eq!(blocked.ineligible[0].account, AccountId("main".into()));
+    let json = serde_json::to_value(&blocked).expect("json");
+    assert_eq!(
+        json["ineligible"][0]["reason"],
+        serde_json::json!("cooling")
+    );
+
+    let mut view = RunView::default();
+    for l in &lines {
+        view.apply(l);
+    }
+    let c = inspect::task(&view, nid(3), at(10)).expect("task c");
+    assert_eq!(c.state, Phase::Rejected);
+    assert!(c.attempts.is_empty());
+    assert!(matches!(c.rejected, Some(Failure::WorkerError { .. })));
+    assert!(
+        inspect::task(&view, nid(2), at(10))
+            .expect("b")
+            .blocked
+            .is_none()
+    );
+
+    // Any attempt id names its task.
+    let a = inspect::task(&view, nid(11), at(10)).expect("a by its first attempt");
+    assert_eq!(a.node, nid(1));
+    assert_eq!(a.attempts.len(), 2);
+    assert_eq!(a.dispatches, vec![did(42).to_string()]);
+}
+
+/// A transition journaled after a task ended, such as a racing retry, never revives it.
+#[test]
+fn the_first_terminal_task_state_wins() {
+    let (caller, task, d) = (nid(0), nid(2), did(1));
+    let v = fold(&[
+        line(0, Some(caller), issued(caller, d, Some(1), &[(task, "t")])),
+        line(1, Some(task), queued(task, d, "t", 1)),
+        line(
+            2,
+            Some(task),
+            changed(
+                Phase::Queued,
+                NodeState::Cancelled {
+                    by: swamp::model::core::CancelSource::User,
+                },
+                "cancelled by user",
+            ),
+        ),
+        line(
+            3,
+            Some(task),
+            changed(Phase::Queued, leased("main"), "retry"),
+        ),
+        line(
+            4,
+            Some(task),
+            changed(Phase::Leased, NodeState::Succeeded, "succeeded"),
+        ),
+    ]);
+    assert!(
+        matches!(v.state_of(task), Some(NodeState::Cancelled { .. })),
+        "{:?}",
+        v.state_of(task)
+    );
+    assert_eq!(v.transitions[&task].len(), 3);
+}
+
+/// The brain's own calls before its first dispatch, not the dispatch call, and its cost share.
+#[test]
+fn brain_self_work_counts_the_brain_calls_before_its_first_dispatch() {
+    let view = fold(&schema_2_with_reads(3));
+    let w = view.brain_self_work().expect("a run with a brain");
+    assert_eq!(w.calls, 3, "{w:?}");
+    assert!(w.dispatched);
+    assert_eq!(w.brain_usd, Some(1.0));
+    // The brain's 1.00 plus a1 0.10, e1 0.05, a2 0.50 and b1 0.25.
+    assert!((w.total_usd - 1.9).abs() < 1e-9, "{w:?}");
+    let share = w.cost_share().expect("a share");
+    assert!((share - 1.0 / 1.9).abs() < 1e-9, "{share}");
+    assert!(!w.over(3) && w.over(2));
+}
+
+#[test]
+fn brain_self_work_counts_every_call_while_nothing_was_dispatched() {
+    let lines = schema_2_with_reads(5);
+    let first = lines
+        .iter()
+        .position(|l| {
+            matches!(&l.event, JournalEvent::NodeEvent { event: WorkerEvent::ToolCall { name, .. }, .. }
+                if name.starts_with("mcp__swamp__"))
+        })
+        .expect("the brain's dispatch call");
+    let w = fold(&lines[..first])
+        .brain_self_work()
+        .expect("a run with a brain");
+    assert_eq!(
+        w.calls, 5,
+        "swamp's own tool is not the brain's work: {w:?}"
+    );
+    assert!(!w.dispatched);
+}
+
+/// Reads journaled after the `DispatchIssued` they preceded count: stream order decides.
+#[test]
+fn reads_journaled_after_the_dispatch_they_preceded_still_count() {
+    let mut lines = schema_2_with_reads(3);
+    let issued = lines
+        .iter()
+        .position(|l| matches!(l.event, JournalEvent::DispatchIssued { .. }))
+        .expect("a dispatch");
+    let brain_stream: Vec<JournalLine> = lines
+        .iter()
+        .take(issued)
+        .filter(|l| matches!(l.event, JournalEvent::NodeEvent { .. }))
+        .cloned()
+        .collect();
+    lines.retain(|l| !(l.seq < issued as u64 && matches!(l.event, JournalEvent::NodeEvent { .. })));
+    let at = lines
+        .iter()
+        .position(|l| matches!(l.event, JournalEvent::DispatchIssued { .. }))
+        .expect("a dispatch")
+        + 1;
+    lines.splice(at..at, brain_stream);
+    for (i, l) in lines.iter_mut().enumerate() {
+        l.seq = i as u64;
+    }
+    let w = fold(&lines).brain_self_work().expect("a brain");
+    assert_eq!(w.calls, 3, "{w:?}");
+    assert!(w.dispatched);
+}
+
+#[test]
+fn brain_self_work_is_the_same_however_the_journal_is_replayed() {
+    let lines = schema_2_with_reads(4);
+    let mut twice = RunView::default();
+    for l in lines.iter().chain(lines.iter()) {
+        twice.apply(l);
+    }
+    assert_eq!(twice.brain_self_work(), fold(&lines).brain_self_work());
+}
+
+#[test]
+fn a_run_without_a_brain_has_no_self_work() {
+    let (worker, d) = (nid(7), did(40));
+    let mut rec = record(worker, worker, Some(nid(0)), 1);
+    rec.dispatch = Some(d);
+    let lines = vec![
+        line(
+            0,
+            Some(worker),
+            JournalEvent::NodeSpawned {
+                node: Box::new(rec),
+            },
+        ),
+        line(1, Some(worker), brain_call(0, "Read")),
+    ];
+    assert_eq!(fold(&lines).brain_self_work(), None);
+}
+
+/// Schema 1 journaled no `DispatchIssued`: its `swamp_dispatch` call is the first dispatch.
+#[test]
+fn brain_self_work_reads_a_schema_1_journal() {
+    let view = RunView::load(&fixture_path("journal-schema1.jsonl"), false).expect("load");
+    let w = view.brain_self_work().expect("the fixture has a brain");
+    assert_eq!(w.calls, 0);
+    assert!(w.dispatched);
+    assert_eq!(w.brain_usd, Some(2.0));
+    let share = w.cost_share().expect("a share");
+    assert!((share - 2.0 / view.cost_usd).abs() < 1e-9, "{share}");
+}
+
+/// A brain that reported no cost has no share rather than a zero one.
+#[test]
+fn a_brain_with_no_reported_cost_has_no_share() {
+    let lines: Vec<JournalLine> = schema_2_with_reads(1)
+        .into_iter()
+        .filter(|l| !matches!(l.event, JournalEvent::NodeUsage { .. }))
+        .collect();
+    let w = fold(&lines).brain_self_work().expect("a brain");
+    assert_eq!(w.brain_usd, None);
+    assert_eq!(w.cost_share(), None);
+    assert_eq!(w.calls, 1);
+}
+
+/// A rejected `swamp_dispatch` is not the first dispatch: the reads after it still count.
+#[test]
+fn a_failed_dispatch_call_does_not_cut_the_brain_self_work() {
+    let brain = nid(0);
+    let mut lines = schema_2_with_reads(3);
+    let at = lines
+        .iter()
+        .position(|l| {
+            matches!(&l.event, JournalEvent::NodeEvent { event: WorkerEvent::ToolCall { name, .. }, .. }
+                if name.starts_with("mcp__swamp__"))
+        })
+        .expect("the brain's dispatch call");
+    let mut failed = vec![
+        line(
+            0,
+            Some(brain),
+            brain_call(100, "mcp__swamp__swamp_dispatch"),
+        ),
+        line(
+            0,
+            Some(brain),
+            JournalEvent::BrainToolCall {
+                tool: "swamp_dispatch".into(),
+                args_sha256: String::new(),
+                args_path: Utf8PathBuf::from("tools/bad-swamp_dispatch.json"),
+                call_seq: None,
+                dispatch: None,
+            },
+        ),
+    ];
+    failed.extend((101..105).map(|i| line(0, Some(brain), brain_call(i, "Read"))));
+    let rejected_at = at + 2;
+    lines.splice(at..at, failed);
+    for (i, l) in lines.iter_mut().enumerate() {
+        l.seq = i as u64;
+    }
+    let before = fold(&lines[..rejected_at])
+        .brain_self_work()
+        .expect("a brain");
+    assert_eq!(before.calls, 3, "{before:?}");
+    assert!(!before.dispatched, "a rejected call dispatched nothing");
+    let w = fold(&lines).brain_self_work().expect("a brain");
+    assert_eq!(w.calls, 7, "{w:?}");
+    assert!(w.dispatched);
+}
+
+/// codex repeats a call on each item update and restarts its item ids with each process.
+#[test]
+fn a_codex_brain_counts_each_tool_call_once() {
+    use swamp::model::core::Provider;
+    use swamp::worker::{ParseState, adapter_for};
+    let brain = nid(0);
+    let turns = [
+        vec![
+            r#"{"type":"thread.started","thread_id":"t1"}"#,
+            r#"{"type":"item.started","item":{"id":"item_0","type":"command_execution","command":"git log","status":"in_progress"}}"#,
+            r#"{"type":"item.updated","item":{"id":"item_0","type":"command_execution","command":"git log","status":"in_progress"}}"#,
+            r#"{"type":"item.completed","item":{"id":"item_0","type":"command_execution","command":"git log","exit_code":0,"status":"completed"}}"#,
+            r#"{"type":"item.started","item":{"id":"item_1","type":"command_execution","command":"ls","status":"in_progress"}}"#,
+            r#"{"type":"item.completed","item":{"id":"item_1","type":"command_execution","command":"ls","exit_code":0,"status":"completed"}}"#,
+        ],
+        vec![
+            r#"{"type":"thread.started","thread_id":"t1"}"#,
+            r#"{"type":"item.started","item":{"id":"item_0","type":"command_execution","command":"cat a","status":"in_progress"}}"#,
+            r#"{"type":"item.completed","item":{"id":"item_0","type":"command_execution","command":"cat a","exit_code":0,"status":"completed"}}"#,
+            r#"{"type":"item.started","item":{"id":"item_1","type":"mcp_tool_call","server":"swamp","tool":"swamp_dispatch"}}"#,
+            r#"{"type":"item.completed","item":{"id":"item_1","type":"mcp_tool_call","server":"swamp","tool":"swamp_dispatch"}}"#,
+        ],
+    ];
+    let codex = adapter_for(Provider::Openai);
+    let stream: Vec<JournalLine> = turns
+        .iter()
+        .flat_map(|turn| {
+            let mut st = ParseState::default();
+            turn.iter()
+                .flat_map(|l| codex.parse_line(l, &mut st).events)
+                .collect::<Vec<_>>()
+        })
+        .map(|event| line(0, Some(brain), JournalEvent::NodeEvent { offset: 0, event }))
+        .collect();
+    let mut lines = schema_2();
+    let first = lines
+        .iter()
+        .position(|l| matches!(l.event, JournalEvent::BrainToolCall { .. }))
+        .expect("schema_2 dispatches");
+    lines.splice(first..first, stream);
+    for (i, l) in lines.iter_mut().enumerate() {
+        l.seq = i as u64;
+    }
+    let w = fold(&lines).brain_self_work().expect("a brain");
+    assert_eq!(w.calls, 3, "{w:?}");
+    assert!(w.dispatched);
 }

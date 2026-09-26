@@ -1,0 +1,20 @@
+---
+source: src/ui/board/screens.rs
+expression: trace
+---
+trace 9g5f09·2 · #1 9g5f18 · run 9g5fav
+────────────────────────────────────────────────────────────
+run 9g5fav  /repo  base 9f3c1ad  started 22:12:20  3m30s  ~…
+
+  |
+  +- 9g5f09  [high] backfill the users index            ant…
+       attempt 1  9g5f08  anthropic/main    claude-op…  rat…
+       attempt 2  9g5f09  anthropic/alt     claude-op…  run…
+
+
+
+
+
+
+────────────────────────────────────────────────────────────
+esc back · ↑↓ scroll · r raw · g G ends · q quit

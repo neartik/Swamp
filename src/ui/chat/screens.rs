@@ -1,8 +1,9 @@
 //! Every screen state in `docs/UI.md` §3, drawn through a `TestBackend` and snapshotted.
 
 use crate::brain::BrainEvent;
+use crate::journal::record::{JournalEvent, JournalLine};
 use crate::model::core::{Cost, CostBasis, Usage};
-use crate::ui::chat::app::{App, Effect, Msg};
+use crate::ui::chat::app::{App, Effect, Msg, Phase};
 use crate::ui::chat::tests_support as fx;
 use crate::ui::chat::theme::{Palette, Theme};
 use crate::ui::chat::{render, workers};
@@ -219,6 +220,105 @@ fn a_finished_board_commits_with_its_detail_lines() {
     );
 }
 
+/// The board fixture up to dispatch #2, and from there on.
+fn board_split() -> (Vec<JournalLine>, Vec<JournalLine>) {
+    let lines = fx::board_journal();
+    let at = lines
+        .iter()
+        .position(|l| {
+            matches!(&l.event, JournalEvent::DispatchIssued { record } if record.id == fx::did("1c"))
+        })
+        .expect("dispatch #2");
+    let (first, rest) = lines.split_at(at);
+    (first.to_vec(), rest.to_vec())
+}
+
+/// Dispatch #1 bound to its call, four minutes into the turn.
+fn board_live(width: u16) -> App {
+    let mut app = fx::app(width);
+    app.take_welcome();
+    app.reduce(Msg::Brain(BrainEvent::ToolCall {
+        id: "d1".into(),
+        name: "mcp__swamp__swamp_dispatch".into(),
+        preview: r#"{"tasks":[{},{},{},{},{}]}"#.into(),
+    }));
+    app.reduce(Msg::Journal(board_split().0));
+    app.phase = Phase::Working {
+        since: app.now - time::Duration::seconds(252),
+    };
+    app
+}
+
+#[test]
+fn a_bound_dispatch_block_renders_from_the_dispatch() {
+    let mut app = board_live(100);
+    let wide = live(&mut app, 100);
+    insta::assert_snapshot!("dispatch_live_100", wide);
+    insta::assert_snapshot!("dispatch_live_62", live(&mut app, 62));
+    assert!(
+        wide.contains("#1 9g5f18 · 2 running · 1 blocked · 1 queued · 1 done · ~$0.34 · 3m20s"),
+        "{wide}"
+    );
+    assert!(
+        wide.contains("9g5f09·2"),
+        "the live attempt, retried: {wide}"
+    );
+    assert!(wide.contains("└ attempt 1 9g5f08 on main: rate_limited (five_hour) after 41s"));
+    assert!(wide.contains("└ until 22:54 (in 38m) · main at capacity · alt quota stop"));
+}
+
+#[test]
+fn a_rejected_dispatch_commits_with_its_reason() {
+    let mut app = board_live(100);
+    app.reduce(Msg::Brain(BrainEvent::ToolCall {
+        id: "d2".into(),
+        name: "swamp_dispatch".into(),
+        preview: r#"{"tasks":[{}]}"#.into(),
+    }));
+    assert!(
+        app.reduce(Msg::Journal(board_split().1)).is_empty(),
+        "the call is still out"
+    );
+    let out = app.reduce(Msg::Brain(BrainEvent::ToolDone {
+        id: "d2".into(),
+        name: "swamp_dispatch".into(),
+        ok: true,
+        detail: None,
+    }));
+    let text = committed(out, 100);
+    insta::assert_snapshot!("dispatch_rejected_committed_100", text);
+    assert!(text.contains("(swamp dispatch 9g5f1c)"), "{text}");
+    assert_eq!(
+        app.blocks
+            .iter()
+            .filter(|b| matches!(b, crate::ui::chat::blocks::Block::Dispatch(_)))
+            .count(),
+        1,
+        "#1 is still open"
+    );
+}
+
+#[test]
+fn the_status_line_counts_open_work() {
+    let status = |app: &mut App, width: u16| {
+        app.set_width(width);
+        screen(vec![app.status_line()], width)
+    };
+    let mut app = board_live(100);
+    insta::assert_snapshot!("status_100", status(&mut app, 100));
+    insta::assert_snapshot!("status_62", status(&mut app, 62));
+    insta::assert_snapshot!("status_40", status(&mut app, 40));
+    app.pending_send = Some("and the docs".into());
+    let pending = status(&mut app, 100);
+    insta::assert_snapshot!("status_pending_100", pending);
+    assert!(
+        pending.contains("1 pending · 1 dispatch · 2 running · 1 stuck"),
+        "{pending}"
+    );
+    let mut idle = fx::app(100);
+    insta::assert_snapshot!("status_idle_100", status(&mut idle, 100));
+}
+
 // ---------------------------------------------------------------- 3.6
 
 #[test]
@@ -424,6 +524,34 @@ fn ctrl_c_clears_once_and_quits_twice() {
     );
 }
 
+fn quit_code(effects: &[Effect]) -> i32 {
+    match effects {
+        [Effect::Interrupt, Effect::CancelAll, Effect::Quit(code)] => *code,
+        _ => panic!("expected interrupt, cancel all, then quit"),
+    }
+}
+
+#[test]
+fn ctrl_d_on_an_empty_editor_quits_like_an_armed_ctrl_c() {
+    let mut app = fx::app(100);
+    assert_eq!(quit_code(&app.reduce(ctrl('d'))), 0);
+
+    app.phase = Phase::Working { since: app.now };
+    assert_eq!(
+        quit_code(&app.reduce(ctrl('d'))),
+        6,
+        "leaving mid turn is an interrupted exit"
+    );
+}
+
+#[test]
+fn ctrl_d_with_text_in_the_editor_does_nothing() {
+    let mut app = fx::app(100);
+    typed(&mut app, "x");
+    assert!(app.reduce(ctrl('d')).is_empty());
+    assert_eq!(app.editor.text(), "x", "the buffer is left alone");
+}
+
 #[test]
 fn esc_interrupts_the_turn_and_esc_esc_cancels_the_workers() {
     let mut app = dispatched(100);
@@ -523,4 +651,107 @@ fn two_dispatches_never_steal_each_others_nodes() {
         .collect();
     assert_eq!(batches, vec![2, 1], "{batches:?}");
     assert_eq!(workers::MAX_ROWS, 8);
+}
+
+/// A `ToolDone` that beats its dispatch to the tail poll still binds, leaving no loose block.
+#[test]
+fn a_call_that_returned_before_its_dispatch_was_read_still_binds() {
+    let mut app = fx::app(100);
+    app.take_welcome();
+    app.reduce(Msg::Brain(BrainEvent::ToolCall {
+        id: "d1".into(),
+        name: "mcp__swamp__swamp_dispatch".into(),
+        preview: r#"{"tasks":[{},{},{},{},{}],"wait":false}"#.into(),
+    }));
+    app.reduce(Msg::Brain(BrainEvent::ToolDone {
+        id: "d1".into(),
+        name: "swamp_dispatch".into(),
+        ok: true,
+        detail: None,
+    }));
+    app.reduce(Msg::Journal(board_split().0));
+    let bound: Vec<(bool, Option<crate::ids::DispatchId>)> = app
+        .blocks
+        .iter()
+        .filter_map(|b| match b {
+            crate::ui::chat::blocks::Block::Dispatch(batch) => Some((batch.loose, batch.dispatch)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(bound, vec![(false, Some(fx::did("18")))]);
+
+    app.reduce(Msg::Brain(BrainEvent::ToolCall {
+        id: "d2".into(),
+        name: "swamp_dispatch".into(),
+        preview: r#"{"tasks":[{}]}"#.into(),
+    }));
+    app.reduce(Msg::Brain(BrainEvent::ToolDone {
+        id: "d2".into(),
+        name: "swamp_dispatch".into(),
+        ok: true,
+        detail: None,
+    }));
+    let text = committed(app.reduce(Msg::Journal(board_split().1)), 100);
+    assert!(text.contains("swamp_dispatch("), "{text}");
+    assert!(!text.contains("workers"), "{text}");
+    assert!(text.contains("(swamp dispatch 9g5f1c)"), "{text}");
+    assert_eq!(
+        app.blocks
+            .iter()
+            .filter(|b| matches!(b, crate::ui::chat::blocks::Block::Dispatch(_)))
+            .count(),
+        1,
+        "#1 is still open"
+    );
+}
+
+/// A call refused before it issued anything commits, and never takes the next dispatch.
+#[test]
+fn a_failed_dispatch_call_neither_lingers_nor_steals() {
+    let mut app = fx::app(100);
+    app.take_welcome();
+    app.reduce(Msg::Brain(BrainEvent::ToolCall {
+        id: "bad".into(),
+        name: "swamp_dispatch".into(),
+        preview: r#"{"tasks":[]}"#.into(),
+    }));
+    let out = app.reduce(Msg::Brain(BrainEvent::ToolDone {
+        id: "bad".into(),
+        name: "swamp_dispatch".into(),
+        ok: false,
+        detail: None,
+    }));
+    assert!(!committed(out, 100).is_empty(), "the failed call commits");
+    app.reduce(Msg::Brain(BrainEvent::ToolCall {
+        id: "d1".into(),
+        name: "swamp_dispatch".into(),
+        preview: r#"{"tasks":[{},{},{},{},{}]}"#.into(),
+    }));
+    app.reduce(Msg::Journal(board_split().0));
+    let tools: Vec<String> = app
+        .blocks
+        .iter()
+        .filter_map(|b| match b {
+            crate::ui::chat::blocks::Block::Dispatch(batch) if batch.dispatch.is_some() => {
+                Some(batch.tool_id.clone())
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(tools, vec!["d1".to_owned()]);
+}
+
+/// The zones never touch: at least two spaces between them, whatever the width.
+#[test]
+fn the_status_zones_keep_their_gap() {
+    let mut app = board_live(100);
+    app.pending_send = Some("and the docs".into());
+    for w in 30u16..=100 {
+        app.set_width(w);
+        let line = screen(vec![app.status_line()], w);
+        assert!(
+            !line.contains("shortcuts1") && !line.contains("shortcuts 1"),
+            "{w}: {line:?}"
+        );
+    }
 }

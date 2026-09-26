@@ -3,9 +3,9 @@
 mod common;
 
 use camino::Utf8PathBuf;
-use std::str::FromStr;
+use common::journal::{at, line, nid, rid};
 use std::time::Duration;
-use swamp::ids::{NodeId, RunId};
+use swamp::ids::NodeId;
 use swamp::journal::fold::RunView;
 use swamp::journal::record::{JournalEvent, JournalLine, SCHEMA_VERSION};
 use swamp::model::core::{
@@ -16,37 +16,6 @@ use swamp::model::failure::{Detector, Failure};
 use swamp::model::node::{NodeRecord, WorkResultRef};
 use swamp::ui::fmt;
 use swamp::ui::trace::{Follower, TraceOpts, render};
-use time::OffsetDateTime;
-
-const CROCKFORD: &[u8] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
-
-fn ulid_text(i: usize) -> String {
-    let hi = CROCKFORD[(i / 32) % 32] as char;
-    let lo = CROCKFORD[i % 32] as char;
-    format!("01ARZ3NDEKTSV4RRFFQ69G5F{hi}{lo}")
-}
-
-fn nid(i: usize) -> NodeId {
-    NodeId::from_str(&ulid_text(i)).expect("node id")
-}
-
-fn rid() -> RunId {
-    RunId::from_str(&ulid_text(0)).expect("run id")
-}
-
-fn at(offset: i64) -> OffsetDateTime {
-    OffsetDateTime::from_unix_timestamp(1_700_000_000 + offset).expect("timestamp")
-}
-
-fn line(seq: u64, node: Option<NodeId>, event: JournalEvent) -> JournalLine {
-    JournalLine {
-        seq,
-        at: at(seq as i64),
-        run: rid(),
-        node,
-        event,
-    }
-}
 
 struct Node {
     id: NodeId,
@@ -69,7 +38,7 @@ struct Node {
 fn record(n: &Node) -> NodeRecord {
     NodeRecord {
         id: n.id,
-        run_id: rid(),
+        run_id: rid(0),
         parent: n.parent,
         logical: n.logical,
         attempt: n.attempt,
@@ -106,6 +75,8 @@ fn record(n: &Node) -> NodeRecord {
         summary: None,
         stream_offset: 0,
         unparsed_lines: 0,
+        depth: 1,
+        dispatch: None,
     }
 }
 
@@ -535,4 +506,226 @@ fn the_account_id_survives_the_column_the_provider_prefix_does_not() {
             .count()
     };
     assert_eq!(width(&text), width(&render(&view(), &TraceOpts::default())));
+}
+
+/// Tasks with no attempt lead with their logical id, dash their numbers and still say why.
+#[test]
+fn unstarted_tasks_render_their_state_and_reason() {
+    let mut v = RunView::default();
+    for l in common::journal::schema_2() {
+        v.apply(&l);
+    }
+    let text = render(&v, &TraceOpts::default());
+    let row = |title: &str| -> (String, Option<String>) {
+        let mut it = text.lines().skip_while(|l| !l.contains(title));
+        let row = it
+            .next()
+            .unwrap_or_else(|| panic!("no {title} row:\n{text}"));
+        (row.to_owned(), it.next().map(str::to_owned))
+    };
+
+    let (rejected, why) = row(" docs ");
+    assert!(rejected.trim_end().ends_with("rejected"), "{rejected}");
+    let why = why.expect("a reason line");
+    assert!(
+        why.contains("WorkerError(max_nodes_per_run)"),
+        "{why}\n{text}"
+    );
+
+    let (queued, _) = row(" bench ");
+    assert!(queued.trim_end().ends_with("queued"), "{queued}");
+    let cells: Vec<&str> = queued.split_whitespace().collect();
+    let dashes = cells.iter().filter(|c| **c == "-").count();
+    assert_eq!(dashes, 5, "account, model, time, tokens and cost: {queued}");
+    assert!(queued.contains(&nid(4).short()), "{queued}");
+}
+
+// ---------------------------------------------------------------- dispatches
+
+fn schema_2() -> RunView {
+    let mut v = RunView::default();
+    for l in common::journal::schema_2() {
+        v.apply(&l);
+    }
+    v
+}
+
+fn schema_1() -> RunView {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/journal-schema1.jsonl");
+    let path = camino::Utf8PathBuf::from_path_buf(path).expect("utf8 fixture path");
+    RunView::load(&path, false).expect("the schema-1 fixture folds")
+}
+
+/// `swamp dispatches`: one row per dispatch with seq, age, tasks, states, cost and caller.
+#[test]
+fn dispatches_list_one_row_per_dispatch() {
+    use swamp::ui::dispatches::{ListOpts, render_list};
+    let text = render_list(&schema_2(), ListOpts::default(), at(900));
+    insta::assert_snapshot!("dispatches", text);
+
+    let failed = render_list(
+        &schema_2(),
+        ListOpts {
+            failed: true,
+            ..ListOpts::default()
+        },
+        at(900),
+    );
+    let rows: Vec<&str> = failed
+        .lines()
+        .skip(3)
+        .take_while(|l| !l.is_empty())
+        .collect();
+    assert_eq!(
+        rows.len(),
+        1,
+        "only the dispatch with a rejection:\n{failed}"
+    );
+    assert!(
+        rows[0].starts_with(&common::journal::did(41).short()),
+        "{failed}"
+    );
+}
+
+#[test]
+fn dispatches_json_carries_the_schema_and_every_count() {
+    use swamp::ui::dispatches::{ListOpts, render_list};
+    let text = render_list(
+        &schema_2(),
+        ListOpts {
+            json: true,
+            ..ListOpts::default()
+        },
+        at(900),
+    );
+    let value: serde_json::Value = serde_json::from_str(&text).expect("valid json");
+    assert_eq!(value["schema"], serde_json::json!(2));
+    insta::assert_snapshot!("dispatches_json", text);
+}
+
+/// A schema-1 run has no dispatch events; its nodes sit in one legacy bucket.
+#[test]
+fn a_schema_1_run_lists_its_nodes_in_the_legacy_bucket() {
+    use swamp::ui::dispatches::{ListOpts, render_list};
+    let view = schema_1();
+    let text = render_list(&view, ListOpts::default(), at(900));
+    let rows: Vec<&str> = text.lines().skip(3).take_while(|l| !l.is_empty()).collect();
+    assert_eq!(rows.len(), 1, "{text}");
+    assert!(rows[0].starts_with("legacy"), "{text}");
+    assert!(rows[0].trim_end().ends_with('-'), "no caller: {text}");
+    let tasks = view.dispatches[&swamp::ids::DispatchId::LEGACY].tasks.len();
+    assert!(tasks > 0, "{text}");
+    assert!(
+        rows[0].contains(&format!("  {tasks}  ")),
+        "{tasks} tasks: {text}"
+    );
+    let grouped = render(
+        &view,
+        &TraceOpts {
+            by_dispatch: true,
+            ..TraceOpts::default()
+        },
+    );
+    assert!(grouped.contains("\ndispatch legacy"), "{grouped}");
+}
+
+/// `swamp dispatch <ID>`: the task tree with attempts, the nested dispatch and the rejection.
+#[test]
+fn a_dispatch_renders_its_task_tree() {
+    use swamp::ui::dispatches::render_detail;
+    let view = schema_2();
+    let first = render_detail(&view, common::journal::did(40), false, at(900));
+    assert!(first.contains("attempt 1"), "{first}");
+    assert!(first.contains("attempt 2"), "{first}");
+    assert!(
+        first.contains(&format!("dispatch {}", common::journal::did(42).short())),
+        "the nested dispatch hangs off its caller:\n{first}"
+    );
+    let second = render_detail(&view, common::journal::did(41), false, at(900));
+    assert!(
+        second.contains("rejected: WorkerError(max_nodes_per_run)"),
+        "{second}"
+    );
+    let json = render_detail(&view, common::journal::did(41), true, at(900));
+    let value: serde_json::Value = serde_json::from_str(&json).expect("valid json");
+    assert_eq!(value["schema"], serde_json::json!(2));
+    assert_eq!(value["tasks"][0]["state"], serde_json::json!("rejected"));
+    assert_eq!(value["tasks"][1]["state"], serde_json::json!("queued"));
+}
+
+/// `swamp trace --group-by dispatch`: one section per dispatch, nested ones included.
+#[test]
+fn trace_groups_by_dispatch() {
+    let text = render(
+        &schema_2(),
+        &TraceOpts {
+            by_dispatch: true,
+            ..TraceOpts::default()
+        },
+    );
+    insta::assert_snapshot!("trace_by_dispatch", text);
+}
+
+/// `swamp trace --dispatch <ID>`: that dispatch's tasks and what they dispatched in turn.
+#[test]
+fn trace_narrows_to_one_dispatch() {
+    let view = schema_2();
+    let text = render(
+        &view,
+        &TraceOpts {
+            dispatch: Some(common::journal::did(40)),
+            ..TraceOpts::default()
+        },
+    );
+    let n = common::journal::nid;
+    let titled = |i: usize| format!("task {}", n(i).short());
+    assert!(text.contains(&format!("* {}", n(12).short())), "{text}");
+    assert!(text.contains(&titled(2)), "{text}");
+    assert!(
+        text.contains(&format!("+- {}", n(51).short())),
+        "the nested task hangs below its caller: {text}"
+    );
+    assert!(!text.contains(" docs "), "{text}");
+    assert!(!text.contains(" bench "), "{text}");
+}
+
+/// `swamp dispatches --follow` prints a row when it appears and again only when it changes.
+#[test]
+fn following_dispatches_reprints_only_what_changed() {
+    use swamp::ui::dispatches::{Follower, ListOpts};
+    let lines = common::journal::schema_2();
+    let settled = lines
+        .iter()
+        .position(|l| {
+            matches!(&l.event, JournalEvent::DispatchSettled { dispatch, .. }
+                if *dispatch == common::journal::did(40))
+        })
+        .expect("the fixture settles its first dispatch");
+    let mut f = Follower::new(ListOpts::default());
+    let first = f.ingest(&lines[..settled], at(900));
+    let d1 = common::journal::did(40).short();
+    assert!(first.starts_with("DISPATCH"), "{first}");
+    assert!(first.contains(&format!("{d1}  ")), "{first}");
+    assert!(first.contains(" open "), "{first}");
+
+    let quiet = f.ingest(&[], at(1_800));
+    assert!(
+        quiet.is_empty(),
+        "age alone is no reason to reprint: {quiet}"
+    );
+
+    let rest = f.ingest(&lines[settled..], at(900));
+    let rows: Vec<&str> = rest.lines().collect();
+    assert!(
+        rows.iter()
+            .any(|r| r.starts_with(&d1) && r.contains(" settled ")),
+        "{rest}"
+    );
+    assert!(
+        rows.iter()
+            .all(|r| !r.starts_with(&common::journal::did(42).short())),
+        "an unchanged dispatch is not reprinted: {rest}"
+    );
+    assert!(!f.finished());
 }

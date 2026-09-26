@@ -209,6 +209,7 @@ async fn the_selection_names_the_node_it_leased_for() {
             soon(),
             Some(node),
             None,
+            &mut |_| {},
         )
         .await
         .expect("lease");

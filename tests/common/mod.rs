@@ -1,6 +1,8 @@
 //! Shared test helpers. Fully implemented: every other test suite builds on these.
 #![allow(dead_code)]
 
+pub mod journal;
+
 use camino::Utf8PathBuf;
 use std::path::PathBuf;
 use std::process::Command;

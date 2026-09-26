@@ -1,5 +1,5 @@
 use crate::model::node::WorkResultRef;
-use crate::workspace::git::Git;
+use crate::workspace::git::{Git, GitOutput};
 use camino::Utf8PathBuf;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
@@ -109,13 +109,7 @@ async fn merge(
                 ],
             )
             .await?;
-        return Ok(if out.ok {
-            AdoptResult::Clean { commit: None }
-        } else {
-            AdoptResult::Conflicted {
-                paths: merge_tree_conflicts(&out.stdout),
-            }
-        });
+        return Ok(merge_tree_verdict(&out));
     }
     let out = git
         .output(&root, &["merge", "--no-edit", "--no-ff", &work.branch])
@@ -152,13 +146,7 @@ async fn cherry_pick(
                 ],
             )
             .await?;
-        return Ok(if out.ok {
-            AdoptResult::Clean { commit: None }
-        } else {
-            AdoptResult::Conflicted {
-                paths: merge_tree_conflicts(&out.stdout),
-            }
-        });
+        return Ok(merge_tree_verdict(&out));
     }
     let out = git.output(&root, &["cherry-pick", &work.head]).await?;
     if out.ok {
@@ -217,6 +205,20 @@ fn apply_conflicts(stderr: &str) -> Vec<Utf8PathBuf> {
     paths
 }
 
+/// `merge-tree` exits 1 on a conflict; any other nonzero exit is git refusing the command.
+fn merge_tree_verdict(out: &GitOutput) -> AdoptResult {
+    match out.code {
+        Some(0) => AdoptResult::Clean { commit: None },
+        Some(1) => AdoptResult::Conflicted {
+            paths: merge_tree_conflicts(&out.stdout),
+        },
+        _ => rejected(format!(
+            "git merge-tree could not predict the result (a dry run needs git 2.40 or newer): {}",
+            out.stderr.trim().replace('\n', "; ")
+        )),
+    }
+}
+
 /// `merge-tree --write-tree --name-only` prints the tree oid, then the conflicted paths.
 fn merge_tree_conflicts(stdout: &str) -> Vec<Utf8PathBuf> {
     stdout
@@ -255,5 +257,31 @@ mod tests {
                 Utf8PathBuf::from("README.md")
             ]
         );
+    }
+
+    #[test]
+    fn a_merge_tree_that_git_refuses_is_not_a_conflict() {
+        let out = |code: i32, stdout: &str, stderr: &str| GitOutput {
+            ok: code == 0,
+            code: Some(code),
+            stdout: stdout.to_owned(),
+            stderr: stderr.to_owned(),
+        };
+        assert_eq!(
+            merge_tree_verdict(&out(0, "4b82\n", "")),
+            AdoptResult::Clean { commit: None }
+        );
+        assert_eq!(
+            merge_tree_verdict(&out(1, "4b82\nREADME.md\n", "")),
+            AdoptResult::Conflicted {
+                paths: vec![Utf8PathBuf::from("README.md")]
+            }
+        );
+        let AdoptResult::Rejected { reason } =
+            merge_tree_verdict(&out(129, "", "error: unknown option `merge-base=x'"))
+        else {
+            panic!("an unknown option is not a conflict");
+        };
+        assert!(reason.contains("git 2.40"), "{reason}");
     }
 }

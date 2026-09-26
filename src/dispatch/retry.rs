@@ -1,11 +1,12 @@
 use crate::config::Config;
 use crate::dispatch::account::AccountState;
 use crate::dispatch::pool::{AccountPool, Lease, NoCapacity};
-use crate::ids::{NodeId, NodeIds};
+use crate::ids::{DispatchId, NodeId, NodeIds};
 use crate::journal::{JournalEvent, JournalHandle};
 use crate::model::core::{
     AccountId, NodeKind, NodeState, Provider, SessionHandle, Tier, Usage, WorkspaceRef,
 };
+use crate::model::dispatch::{Phase, settled_state};
 use crate::model::event::WorkerEvent;
 use crate::model::failure::Failure;
 use crate::model::node::NodeRecord;
@@ -19,6 +20,7 @@ use parking_lot::Mutex;
 use rand::Rng;
 use std::collections::HashSet;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use time::OffsetDateTime;
 use tokio::time::Instant;
@@ -59,6 +61,8 @@ pub struct NodeCtx {
     pub parent: Option<NodeId>,
     /// Stable across attempts: every attempt is its own node grouped under this id.
     pub logical: NodeId,
+    pub dispatch: DispatchId,
+    pub depth: u32,
     pub cancel: CancellationToken,
 }
 
@@ -112,7 +116,73 @@ impl From<RunOutcome> for NodeOutcome {
     }
 }
 
-pub async fn run_node(cx: &NodeCtx, mut spec: LaunchSpec, task: &TaskRequest) -> NodeOutcome {
+/// The task-level state, journaled on the logical id across attempts.
+struct TaskPhase<'a> {
+    cx: &'a NodeCtx,
+    state: NodeState,
+}
+
+impl TaskPhase<'_> {
+    fn to(&mut self, next: NodeState, why: impl Into<String>) {
+        // A cancel already journaled the task's last transition.
+        if crate::dispatch::cancel::requested(&self.cx.journal.paths, self.cx.logical).is_some() {
+            return;
+        }
+        emit(
+            self.cx,
+            JournalEvent::NodeStateChanged {
+                from: Phase::from(&self.state),
+                to: next.clone(),
+                why: why.into(),
+            },
+        );
+        self.state = next;
+    }
+}
+
+pub async fn run_node(cx: &NodeCtx, spec: LaunchSpec, task: &TaskRequest) -> NodeOutcome {
+    // Durable, so a waiting task is visible before its first attempt exists.
+    if let Err(e) = cx
+        .journal
+        .emit_durable(
+            Some(cx.logical),
+            JournalEvent::TaskQueued {
+                logical: cx.logical,
+                dispatch: cx.dispatch,
+                title: task.title.clone(),
+                tier: spec.tier,
+                depth: cx.depth,
+            },
+        )
+        .await
+    {
+        tracing::warn!(node = %cx.logical.short(), "cannot journal TaskQueued: {e}");
+    }
+    let mut phase = TaskPhase {
+        cx,
+        state: NodeState::Queued,
+    };
+    let mut out = attempt_loop(cx, spec, task, &mut phase).await;
+    // A cancel marked during finalize already journaled the task Cancelled; the outcome follows it.
+    if let Some(by) = crate::dispatch::cancel::requested(&cx.journal.paths, cx.logical)
+        && !matches!(out.failure, Some(Failure::Cancelled { .. }))
+    {
+        out.failure = Some(Failure::Cancelled { by });
+        if let Some(o) = out.outcome.as_mut() {
+            o.failure = out.failure.clone();
+        }
+    }
+    let why = out.failure.as_ref().map_or("succeeded", Failure::kind);
+    phase.to(settled_state(out.failure.as_ref()), why);
+    out
+}
+
+async fn attempt_loop(
+    cx: &NodeCtx,
+    mut spec: LaunchSpec,
+    task: &TaskRequest,
+    phase: &mut TaskPhase<'_>,
+) -> NodeOutcome {
     let logical = cx.logical;
     let mut excluded: HashSet<AccountId> = HashSet::new();
     let mut providers = cx.provider_order.iter().copied();
@@ -127,8 +197,8 @@ pub async fn run_node(cx: &NodeCtx, mut spec: LaunchSpec, task: &TaskRequest) ->
     // one of the node's attempts.
     let mut attempt = 0;
     while attempt < cx.max_attempts {
-        if cx.cancel.is_cancelled() {
-            return cancelled(logical, attempts);
+        if cancel_source(cx).is_some() {
+            return cancelled(cx, attempts);
         }
         let lease = match held.take() {
             Some(lease) => lease,
@@ -152,7 +222,7 @@ pub async fn run_node(cx: &NodeCtx, mut spec: LaunchSpec, task: &TaskRequest) ->
                 }
                 // The pool journals one NodeBlocked and waits for the earliest reset; it
                 // comes back empty-handed only at the node deadline or on cancellation.
-                match cx
+                let acquired = cx
                     .pool
                     .acquire_node(
                         provider,
@@ -160,11 +230,28 @@ pub async fn run_node(cx: &NodeCtx, mut spec: LaunchSpec, task: &TaskRequest) ->
                         cx.deadline,
                         Some(logical),
                         Some(&cx.cancel),
+                        &mut |blocked| {
+                            let why = match &blocked {
+                                NodeState::Blocked { why, .. } => why.clone(),
+                                _ => String::new(),
+                            };
+                            phase.to(blocked, why);
+                        },
                     )
-                    .await
-                {
-                    Ok(l) => l,
-                    Err(NoCapacity::Cancelled) => return cancelled(logical, attempts),
+                    .await;
+                match acquired {
+                    // A freed slot can wake this waiter before the marker watcher fires the token.
+                    Ok(_) if cancel_source(cx).is_some() => return cancelled(cx, attempts),
+                    Ok(l) => {
+                        phase.to(
+                            NodeState::Leased {
+                                account: l.account.clone(),
+                            },
+                            format!("leased {}", l.account.0),
+                        );
+                        l
+                    }
+                    Err(NoCapacity::Cancelled) => return cancelled(cx, attempts),
                     Err(e) => return give_up(cx, logical, attempts, provider, &excluded, e),
                 }
             }
@@ -278,6 +365,8 @@ pub async fn run_node(cx: &NodeCtx, mut spec: LaunchSpec, task: &TaskRequest) ->
             summary: None,
             stream_offset: 0,
             unparsed_lines: 0,
+            depth: cx.depth,
+            dispatch: Some(cx.dispatch),
         };
         // Journaled durably BEFORE spawning, so a crash still leaves a node with full provenance.
         if let Err(e) = cx
@@ -299,6 +388,7 @@ pub async fn run_node(cx: &NodeCtx, mut spec: LaunchSpec, task: &TaskRequest) ->
             account: lease.account.clone(),
             node: spec.node.id,
             total: Mutex::new(Usage::default()),
+            started: AtomicBool::new(false),
         });
         let _observing = crate::worker::observe_node(spec.node.id, telemetry.clone());
 
@@ -314,10 +404,8 @@ pub async fn run_node(cx: &NodeCtx, mut spec: LaunchSpec, task: &TaskRequest) ->
         }
         // A cancelled node was killed by us: the classifier only sees SIGTERM and would retry.
         // Before the pool hears about it, or our own SIGTERM cools a healthy account.
-        if cx.cancel.is_cancelled() {
-            out.failure = Some(Failure::Cancelled {
-                by: crate::model::core::CancelSource::User,
-            });
+        if let Some(by) = cancel_source(cx) {
+            out.failure = Some(Failure::Cancelled { by });
         }
         cx.pool
             .report(&lease.account, out.failure.as_ref(), out.cost);
@@ -344,11 +432,7 @@ pub async fn run_node(cx: &NodeCtx, mut spec: LaunchSpec, task: &TaskRequest) ->
         record.stream_offset = out.stream_offset;
         record.unparsed_lines = out.unparsed_lines;
         record.ended_at = Some(time::OffsetDateTime::now_utc());
-        record.state = match &out.failure {
-            None => NodeState::Succeeded,
-            Some(Failure::Cancelled { by }) => NodeState::Cancelled { by: *by },
-            Some(f) => NodeState::Failed { failure: f.clone() },
-        };
+        record.state = settled_state(out.failure.as_ref());
         if out.failure.is_none() {
             // The worktree is keyed by the logical node; the diff belongs to this attempt.
             let fwt = NodeWorktree {
@@ -382,6 +466,24 @@ pub async fn run_node(cx: &NodeCtx, mut spec: LaunchSpec, task: &TaskRequest) ->
                 unparsed_lines: record.unparsed_lines,
             },
         );
+        let ran = if telemetry.started.load(Ordering::Relaxed) {
+            Phase::Running
+        } else {
+            Phase::Leased
+        };
+        emit_for(
+            cx,
+            record.id,
+            JournalEvent::NodeStateChanged {
+                from: ran,
+                to: record.state.clone(),
+                why: out
+                    .failure
+                    .as_ref()
+                    .map_or("succeeded", Failure::kind)
+                    .to_owned(),
+            },
+        );
         attempts.push(record.clone());
 
         match &out.failure {
@@ -402,6 +504,7 @@ pub async fn run_node(cx: &NodeCtx, mut spec: LaunchSpec, task: &TaskRequest) ->
                 spec.session = SessionPlan::New {
                     preassigned: cx.new_session_id(provider),
                 };
+                phase.to(NodeState::Queued, format!("{}: rotating", f.kind()));
                 continue;
             }
             Some(f) if f.retries_same_account() => {
@@ -450,9 +553,15 @@ struct NodeTelemetry {
     account: AccountId,
     node: NodeId,
     total: Mutex<Usage>,
+    /// Whether the attempt reached Running, so its last transition leaves the right state.
+    started: AtomicBool,
 }
 
 impl EventObserver for NodeTelemetry {
+    fn on_started(&self) {
+        self.started.store(true, Ordering::Relaxed);
+    }
+
     fn on_event(&self, event: &WorkerEvent) {
         match event {
             WorkerEvent::Usage(u) => {
@@ -655,14 +764,19 @@ fn settle(logical: NodeId, attempts: Vec<NodeRecord>, out: RunOutcome) -> NodeOu
     outcome
 }
 
-fn cancelled(logical: NodeId, attempts: Vec<NodeRecord>) -> NodeOutcome {
-    fail(
-        logical,
-        attempts,
-        Failure::Cancelled {
-            by: crate::model::core::CancelSource::User,
-        },
-    )
+fn cancelled(cx: &NodeCtx, attempts: Vec<NodeRecord>) -> NodeOutcome {
+    let by = cancel_source(cx).unwrap_or(crate::model::core::CancelSource::User);
+    fail(cx.logical, attempts, Failure::Cancelled { by })
+}
+
+/// A fired token, or a cancel another process marked before the token caught up with it.
+fn cancel_source(cx: &NodeCtx) -> Option<crate::model::core::CancelSource> {
+    let marked = crate::dispatch::cancel::requested(&cx.journal.paths, cx.logical);
+    match (marked, cx.cancel.is_cancelled()) {
+        (Some(by), _) => Some(by),
+        (None, true) => Some(crate::model::core::CancelSource::User),
+        (None, false) => None,
+    }
 }
 
 /// A worktree, a prompt file or a tier mapping that would not come up. Exit 3 is reserved for

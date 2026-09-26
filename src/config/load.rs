@@ -17,8 +17,8 @@ version = 1
 [limits]
 max_nodes_per_run = 32
 max_depth = 2
+brain_read_budget = 8
 worker_timeout = "25m"
-brain_turn_timeout = "15m"
 grace_period = "5s"
 max_prompt_bytes = 200000
 max_result_bytes = 8000
@@ -50,6 +50,10 @@ near_exhaustion_penalty = 2.0
   share = 0.15
   weight = 0.05
   idle = 0.02
+
+[providers.anthropic.worker]
+permission_mode = "acceptEdits"
+allow_tools = ["Bash", "Read", "Grep", "Glob", "Edit", "Write", "MultiEdit"]
 
 [providers.openai]
 quota_source = "auto"
@@ -92,6 +96,7 @@ tree_width = 46
 board_width = 46
 show_thinking = false
 tail_lines = 200
+board_actions = true
 "#;
 
 /// Env vars are `SWAMP_<SECTION>__<KEY>`; anything else (SWAMP_LOG, SWAMP_DEPTH) is not config.

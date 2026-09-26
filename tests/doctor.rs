@@ -56,6 +56,12 @@ impl Fixture {
     }
 }
 
+fn write_journal(f: &Fixture, run: swamp::ids::RunId, text: &str) {
+    let journal = f.paths.run_paths(run).journal();
+    std::fs::create_dir_all(journal.parent().expect("run dir")).expect("run dir");
+    std::fs::write(journal, text).expect("journal");
+}
+
 fn config(text: &str) -> Config {
     let schema = toml::from_str(text).expect("test config parses");
     let layers = vec![
@@ -245,8 +251,6 @@ async fn schema_drift_across_recent_runs_fails_the_check() {
 
     let f = Fixture::new();
     let run = RunId::new();
-    let dir = f.paths.dot_swamp.join("runs").join(run.to_string());
-    std::fs::create_dir_all(&dir).expect("run dir");
 
     let mut text = String::new();
     for i in 0..4 {
@@ -276,7 +280,7 @@ async fn schema_drift_across_recent_runs_fails_the_check() {
         text.push_str(&serde_json::to_string(&line).expect("json"));
         text.push('\n');
     }
-    std::fs::write(dir.join("journal.jsonl"), text).expect("journal");
+    write_journal(&f, run, &text);
 
     let cfg = healthy(&f);
     let out = checks(&cfg, &f.paths, false, true).await;
@@ -296,9 +300,7 @@ async fn schema_drift_across_recent_runs_fails_the_check() {
 async fn reap_removes_stale_sockets_and_pidfiles() {
     let f = Fixture::new();
     let run = swamp::ids::RunId::new();
-    let dir = f.paths.dot_swamp.join("runs").join(run.to_string());
-    std::fs::create_dir_all(&dir).expect("run dir");
-    std::fs::write(dir.join("journal.jsonl"), "").expect("journal");
+    write_journal(&f, run, "");
     let socket = f.paths.run_paths(run).socket();
     std::fs::create_dir_all(socket.parent().expect("sock dir")).expect("sock dir");
     std::fs::write(&socket, "").expect("socket");
@@ -336,6 +338,12 @@ async fn a_permission_mode_that_denies_bash_warns_until_bash_is_allowed() {
     let f = Fixture::new();
     let mut cfg = healthy(&f);
     let anthropic = swamp::model::core::Provider::Anthropic;
+    cfg.providers
+        .get_mut(&anthropic)
+        .expect("the anthropic provider")
+        .worker
+        .allow_tools
+        .clear();
 
     for mode in ["acceptEdits", "plan", "manual", "dontAsk"] {
         cfg.providers
@@ -386,6 +394,20 @@ async fn a_permission_mode_that_denies_bash_warns_until_bash_is_allowed() {
             .any(|c| c.name == "providers/anthropic/permission_mode"),
         "--allowedTools Bash in worker.args must not warn"
     );
+}
+
+#[tokio::test]
+async fn the_default_config_gives_no_permission_warning() {
+    let f = Fixture::new();
+    let cfg = healthy(&f);
+    let out = checks(&cfg, &f.paths, false, false).await;
+    let warned: Vec<String> = warnings(&out)
+        .into_iter()
+        .filter(|c| c.name.ends_with("permission_mode"))
+        .map(|c| format!("{}: {}", c.name, c.detail))
+        .collect();
+    assert!(warned.is_empty(), "{warned:?}");
+    assert!(swamp::doctor::permission_checks(&cfg).is_empty());
 }
 
 /// The brain runs the same way, and needs Bash for git and for the tests it verifies with.
@@ -470,13 +492,13 @@ fn the_design_doc_doctor_sample_matches_what_the_code_emits() {
     let root = Utf8PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let doc = std::fs::read_to_string(root.join("docs/DESIGN.md")).expect("DESIGN.md");
     let sample = doc
-        .split("$ swamp doctor\n")
+        .split("$ swamp doctor")
         .nth(1)
         .and_then(|rest| rest.split("```").next())
         .expect("the §9 doctor sample");
     assert!(
         sample.contains(&format!("{} accounts/collision", Level::Error.label())),
-        "the collision is an Error on `accounts/collision` in src/doctor.rs: {sample}"
+        "the collision is an Error on `accounts/collision` in src/doctor/accounts.rs: {sample}"
     );
     assert!(
         !sample.contains("rustc"),
@@ -625,4 +647,226 @@ async fn an_unreadable_state_file_is_one_error_and_not_a_quota_warning() {
         !out.iter().any(|c| c.name.ends_with("/quota")),
         "a telemetry problem that does not exist hides the real one"
     );
+}
+
+/// Every check a representative setup yields, pinned so a refactor cannot change the output.
+#[tokio::test]
+async fn doctor_output_is_stable() {
+    let f = Fixture::new();
+    let mut cfg = healthy(&f);
+    cfg.brain.permission_mode = Some("plan".to_owned());
+    cfg.brain.allow_tools.clear();
+    let run: swamp::ids::RunId = "01J00000000000000000000000".parse().expect("run id");
+    write_journal(&f, run, "");
+
+    let out = checks(&cfg, &f.paths, false, true).await;
+    let exe = std::env::current_exe().expect("current exe");
+    let user = swamp::config::load::user_config_path().expect("a user config path");
+    let git = std::process::Command::new("git")
+        .arg("--version")
+        .output()
+        .expect("git");
+    let git = String::from_utf8_lossy(&git.stdout).trim().to_owned();
+    let head = std::process::Command::new("git")
+        .current_dir(&f.repo)
+        .args(["rev-parse", "--short", "HEAD"])
+        .output()
+        .expect("git rev-parse");
+    let head = format!("HEAD {}", String::from_utf8_lossy(&head.stdout).trim());
+    let redact = |s: &str| {
+        s.replace(&exe.display().to_string(), "[exe]")
+            .replace(user.as_str(), "[user-config]")
+            .replace(f.paths.home_swamp.as_str(), "[home]/.swamp")
+            .replace(f.repo.as_str(), "[repo]")
+            .replace(&git, "[git]")
+            .replace(&head, "HEAD [sha]")
+    };
+    let text: String = out
+        .iter()
+        .map(|c| {
+            // SWAMP_DEPTH is ambient: a worker running the gate would otherwise flip this line.
+            if c.name == "environment/depth" {
+                return format!("{:<5} {:<28} [depth]\n", "[lvl]", c.name);
+            }
+            format!(
+                "{:<5} {:<28} {}\n",
+                c.level.label(),
+                c.name,
+                redact(&c.detail)
+            )
+        })
+        .collect();
+    insta::assert_snapshot!("doctor_checks", text);
+}
+
+/// The depth check follows SWAMP_DEPTH, read as-is since the doctor tests share one process.
+#[tokio::test]
+async fn depth_check_follows_swamp_depth() {
+    let f = Fixture::new();
+    let cfg = healthy(&f);
+    let out = checks(&cfg, &f.paths, false, false).await;
+    let depth = out
+        .iter()
+        .find(|c| c.name == "environment/depth")
+        .expect("the environment/depth check");
+    match std::env::var("SWAMP_DEPTH") {
+        Err(_) => {
+            assert_eq!(depth.level, Level::Ok);
+            assert_eq!(depth.detail, "not inside a worker");
+        }
+        Ok(d) => {
+            assert_eq!(depth.level, Level::Warn);
+            assert!(
+                depth.detail.starts_with(&format!("SWAMP_DEPTH={d}:")),
+                "{}",
+                depth.detail
+            );
+        }
+    }
+}
+
+fn run_started(schema: u32) -> String {
+    use swamp::journal::record::{JournalEvent, JournalLine};
+    let line = JournalLine {
+        seq: 0,
+        at: time::OffsetDateTime::now_utc(),
+        run: swamp::ids::RunId::new(),
+        node: None,
+        event: JournalEvent::RunStarted {
+            swamp_version: "0.1.0".into(),
+            schema,
+            argv: Vec::new(),
+            cwd: "/repo".into(),
+            repo: None,
+            base: None,
+            config_sha256: String::new(),
+            task: None,
+        },
+    };
+    serde_json::to_string(&line).expect("json") + "\n"
+}
+
+/// `--schema` names each recent run's journal schema: current, older or newer.
+#[tokio::test]
+async fn schema_reports_the_journal_schema_of_each_recent_run() {
+    use swamp::journal::record::SCHEMA_VERSION;
+    let f = Fixture::new();
+    let mut ids = Vec::new();
+    for schema in [1, SCHEMA_VERSION, SCHEMA_VERSION + 1] {
+        let run = swamp::ids::RunId::new();
+        write_journal(&f, run, &run_started(schema));
+        ids.push((run, schema));
+    }
+    let out = checks(&healthy(&f), &f.paths, false, true).await;
+    let journals: Vec<&Check> = out
+        .iter()
+        .filter(|c| c.name == "protocol/journal")
+        .collect();
+    assert_eq!(journals.len(), 3, "one line per run");
+    for (run, schema) in ids {
+        let c = journals
+            .iter()
+            .find(|c| c.detail.starts_with(&run.short()))
+            .unwrap_or_else(|| panic!("no line for {run}"));
+        assert!(
+            c.detail.contains(&format!("schema {schema} ")),
+            "{}",
+            c.detail
+        );
+        let level = match schema.cmp(&SCHEMA_VERSION) {
+            std::cmp::Ordering::Less => Level::Note,
+            std::cmp::Ordering::Equal => Level::Ok,
+            std::cmp::Ordering::Greater => Level::Warn,
+        };
+        assert_eq!(c.level, level, "{}", c.detail);
+    }
+}
+
+/// With `--schema`, doctor checks permission-mode spelling against the installed CLI.
+#[tokio::test]
+async fn schema_checks_the_permission_mode_spelling_against_the_cli_help() {
+    let f = Fixture::new();
+    let help = Utf8PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("docs/ref/claude-help.txt");
+    let mut cfg = healthy(&f);
+    for account in &mut cfg.accounts {
+        std::fs::write(&account.exec, format!("#!/bin/sh\ncat '{help}'\n")).expect("fake help");
+    }
+    let spelling = |out: &[Check]| {
+        let c = out
+            .iter()
+            .find(|c| c.name == "protocol/permission_mode")
+            .expect("the spelling check ran");
+        (c.level, c.detail.clone())
+    };
+
+    let (level, detail) = spelling(&checks(&cfg, &f.paths, false, true).await);
+    assert_eq!(level, Level::Ok, "{detail}");
+    assert!(detail.contains("acceptEdits"), "{detail}");
+
+    cfg.brain.permission_mode = Some("acceptedits".into());
+    let (level, detail) = spelling(&checks(&cfg, &f.paths, false, true).await);
+    assert_eq!(level, Level::Error, "{detail}");
+    assert!(
+        detail.contains("brain.permission_mode = \"acceptedits\" is spelt \"acceptEdits\""),
+        "{detail}"
+    );
+
+    let quiet = checks(&cfg, &f.paths, false, false).await;
+    assert!(!quiet.iter().any(|c| c.name == "protocol/permission_mode"));
+}
+
+/// A newer swamp may reshape `run_started`; its schema is still read and reported as newer.
+#[tokio::test]
+async fn schema_reports_a_newer_journal_this_swamp_cannot_parse() {
+    use swamp::journal::record::SCHEMA_VERSION;
+    let f = Fixture::new();
+    let run = swamp::ids::RunId::new();
+    let line = serde_json::json!({
+        "seq": 0,
+        "at": "2026-01-01T00:00:00Z",
+        "run": run.to_string(),
+        "ev": "run_started",
+        "swamp_version": "9.0.0",
+        "schema": SCHEMA_VERSION + 1,
+        "argv": "swamp run",
+        "workspace": {"required": true},
+    });
+    write_journal(&f, run, &format!("{line}\n"));
+    let out = checks(&healthy(&f), &f.paths, false, true).await;
+    let c = out
+        .iter()
+        .find(|c| c.name == "protocol/journal")
+        .expect("a journal line");
+    assert_eq!(c.level, Level::Warn, "{}", c.detail);
+    assert!(c.detail.contains("newer than"), "{}", c.detail);
+    assert!(
+        c.detail
+            .contains(&format!("schema {} (swamp 9.0.0)", SCHEMA_VERSION + 1)),
+        "{}",
+        c.detail
+    );
+}
+
+/// An unreadable runs directory is an error, not "no recorded runs".
+#[cfg(unix)]
+#[tokio::test]
+async fn schema_fails_when_the_runs_directory_cannot_be_read() {
+    use std::os::unix::fs::PermissionsExt;
+    let f = Fixture::new();
+    let runs = f.paths.dot_swamp.join("runs");
+    std::fs::create_dir_all(&runs).expect("runs dir");
+    std::fs::set_permissions(&runs, std::fs::Permissions::from_mode(0o000)).expect("chmod");
+    if std::fs::read_dir(&runs).is_ok() {
+        return;
+    }
+    let out = checks(&healthy(&f), &f.paths, false, true).await;
+    std::fs::set_permissions(&runs, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    for name in ["protocol/journal", "protocol/schema"] {
+        let c = out
+            .iter()
+            .find(|c| c.name == name)
+            .unwrap_or_else(|| panic!("no {name} check"));
+        assert_eq!(c.level, Level::Error, "{name}: {}", c.detail);
+        assert!(c.detail.contains("cannot list runs"), "{}", c.detail);
+    }
 }

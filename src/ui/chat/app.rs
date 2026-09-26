@@ -1,8 +1,9 @@
 use crate::brain::BrainEvent;
 use crate::config::schema::AccountCfg;
 use crate::dispatch::account::AccountState;
-use crate::ids::{NodeId, RunId};
-use crate::journal::fold::RunView;
+use crate::ids::{DispatchId, NodeId, RunId};
+use crate::journal::fold::{DispatchView, RunView};
+use crate::journal::inspect;
 use crate::journal::record::{JournalEvent, JournalLine};
 use crate::model::core::{AccountId, NodeState, Provider, Tier};
 use crate::ui::chat::blocks::{Block, Ctx, ToolState, WelcomeInfo, bullet_first, tool_args};
@@ -11,7 +12,8 @@ use crate::ui::chat::markdown::MdStream;
 use crate::ui::chat::theme::{Glyph, Role, Theme};
 use crate::ui::chat::workers::{Batch, brain_children, expected_tasks};
 use crate::ui::chat::{slash, spinner};
-use crate::ui::{fmt, trace, watch};
+use crate::ui::order::{self, Cell, Drop};
+use crate::ui::{dispatches, fmt, trace, watch};
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::text::Line;
 use std::str::FromStr;
@@ -53,7 +55,10 @@ pub enum Effect {
     CancelAll,
     Cancel(NodeId),
     /// `/trace` needs the event stream, which the board deliberately does not keep.
-    Trace(Option<NodeId>),
+    Trace {
+        node: Option<NodeId>,
+        dispatch: Option<DispatchId>,
+    },
     Clear,
     Quit(i32),
     /// §3.2: one out-of-band quota probe per account whose reading has gone stale.
@@ -75,6 +80,8 @@ pub struct App {
     /// Accounts `accounts.json` remembers that this repo's config no longer names.
     stale_accounts: Vec<(AccountId, AccountState)>,
     quota_max_age: Duration,
+    /// `limits.brain_read_budget`, for the delegation line under `/status` and `/dispatches`.
+    pub read_budget: u32,
     /// `providers.openai.quota_source`: "none" and "rollout" forbid the app-server probe.
     probe_openai: bool,
     pub blocks: Vec<Block>,
@@ -100,6 +107,8 @@ pub struct App {
     /// Every logical node a batch has ever taken. A committed board leaves the live area,
     /// and without this its nodes would be admitted a second time as a loose batch.
     admitted: std::collections::BTreeSet<NodeId>,
+    /// Every dispatch a block has been bound to, committed ones included.
+    bound: std::collections::BTreeSet<DispatchId>,
     last_collapsed: Option<Block>,
     seed: u64,
 }
@@ -125,6 +134,7 @@ impl App {
             account_cfg: cfg.accounts.clone(),
             stale_accounts: Vec::new(),
             quota_max_age: cfg.quota_max_age(),
+            read_budget: cfg.brain_read_budget(),
             probe_openai: cfg.probes_app_server(Provider::Openai),
             blocks: Vec::new(),
             editor: Editor::default(),
@@ -147,6 +157,7 @@ impl App {
             resume_armed: None,
             est_bytes: 0,
             admitted: std::collections::BTreeSet::new(),
+            bound: std::collections::BTreeSet::new(),
             last_collapsed: None,
             seed: spinner::seed_of(run),
         };
@@ -459,7 +470,7 @@ impl App {
         let mut out = Vec::new();
         for l in lines {
             self.view.apply(l);
-            if let JournalEvent::NodeBlocked { until, why } = &l.event {
+            if let JournalEvent::NodeBlocked { until, why, .. } = &l.event {
                 out.push(self.blocked(*until, why));
             }
         }
@@ -493,9 +504,40 @@ impl App {
             .map_or(Provider::Anthropic, |a| a.provider)
     }
 
-    /// Any brain child in the fold joins the open batch; a node with no call behind it joins
-    /// the loose batch. Dispatch calls from one brain are serial, so this is exact.
+    /// Brain calls are serial: the i-th fresh dispatch binds to the i-th unbound call block.
     fn admit(&mut self) {
+        let mut fresh_dispatches: Vec<&DispatchView> = self
+            .view
+            .dispatches
+            .values()
+            .filter(|d| d.id != DispatchId::LEGACY && !self.bound.contains(&d.id))
+            .filter(|d| {
+                d.record
+                    .as_ref()
+                    .is_some_and(|r| inspect::is_brain_caller(&self.view, r.caller))
+            })
+            .collect();
+        fresh_dispatches.sort_by_key(|d| inspect::dispatch_key(d));
+        let fresh_dispatches: Vec<DispatchId> = fresh_dispatches.iter().map(|d| d.id).collect();
+        for id in fresh_dispatches {
+            self.bound.insert(id);
+            let open = self.blocks.iter_mut().find_map(|b| match b {
+                Block::Dispatch(batch) if batch.unbound() => Some(batch),
+                _ => None,
+            });
+            match open {
+                Some(batch) => batch.dispatch = Some(id),
+                None => self
+                    .blocks
+                    .push(Block::Dispatch(Box::new(Batch::for_dispatch(id, self.now)))),
+            }
+        }
+        for id in &self.bound {
+            if let Some(d) = self.view.dispatches.get(id) {
+                self.admitted.extend(d.tasks.iter().copied());
+            }
+        }
+
         let children = brain_children(&self.view, self.brain);
         let fresh: Vec<NodeId> = children
             .into_iter()
@@ -504,14 +546,18 @@ impl App {
         if !fresh.is_empty() {
             self.admitted.extend(fresh.iter().copied());
             let open = self.blocks.iter_mut().rev().find_map(|b| match b {
-                Block::Dispatch(batch) if !batch.closed => Some(batch),
+                Block::Dispatch(batch) if !batch.closed && batch.dispatch.is_none() => Some(batch),
                 _ => None,
             });
             match open {
                 Some(batch) => batch.owned.extend(fresh),
                 None => {
                     let loose = self.blocks.iter_mut().rev().find_map(|b| match b {
-                        Block::Dispatch(batch) if batch.loose && !batch.done() => Some(batch),
+                        Block::Dispatch(batch)
+                            if batch.loose && batch.dispatch.is_none() && !batch.done() =>
+                        {
+                            Some(batch)
+                        }
                         _ => None,
                     });
                     match loose {
@@ -591,7 +637,8 @@ impl App {
         }
         match k.code {
             KeyCode::Char('c') if ctrl => self.on_ctrl_c(),
-            KeyCode::Char('d') if ctrl && self.editor.is_empty() => vec![Effect::Quit(0)],
+            KeyCode::Char('d') if ctrl && self.editor.is_empty() => self.quit_now(),
+            KeyCode::Char('d') if ctrl => Vec::new(),
             KeyCode::Char('l') if ctrl => vec![Effect::Clear],
             KeyCode::Char('o') if ctrl => self.expand(),
             KeyCode::Char('a') if ctrl => {
@@ -700,12 +747,17 @@ impl App {
             return Vec::new();
         }
         if self.quit_armed.is_some() {
-            let code = if self.working() { 6 } else { 0 };
-            return vec![Effect::Interrupt, Effect::CancelAll, Effect::Quit(code)];
+            return self.quit_now();
         }
         self.quit_armed = Some(self.now + ARM);
         self.note("Press ctrl+c again to exit");
         Vec::new()
+    }
+
+    /// Stops the turn and the workers before leaving, so shutdown has nothing left to wait on.
+    fn quit_now(&self) -> Vec<Effect> {
+        let code = if self.working() { 6 } else { 0 };
+        vec![Effect::Interrupt, Effect::CancelAll, Effect::Quit(code)]
     }
 
     fn on_esc(&mut self) -> Vec<Effect> {
@@ -902,14 +954,24 @@ impl App {
         let name = parts.next().unwrap_or_default().to_ascii_lowercase();
         let arg = parts.next().map(str::to_owned);
         match name.as_str() {
-            "help" | "?" => vec![self.output("commands", slash::help_body())],
+            "help" | "?" => vec![self.output("commands", slash::help_body(self.width))],
             "status" => {
-                let body = trace::render(&self.view, &trace::TraceOpts::default());
+                let opts = trace::TraceOpts {
+                    read_budget: Some(self.read_budget),
+                    ..trace::TraceOpts::default()
+                };
+                let body = trace::render(&self.view, &opts);
                 vec![self.output("", lines_of(&body))]
             }
-            "trace" => {
-                let node = arg.as_deref().and_then(|a| self.find_node(a));
-                vec![Effect::Trace(node)]
+            "trace" => self.trace(arg.as_deref()),
+            "dispatches" => {
+                let opts = dispatches::ListOpts {
+                    failed: arg.as_deref() == Some("--failed"),
+                    json: false,
+                    read_budget: Some(self.read_budget),
+                };
+                let body = dispatches::render_list(&self.view, opts, self.now);
+                vec![self.output("", lines_of(&body))]
             }
             "accounts" => {
                 let body = self.accounts_body();
@@ -1013,6 +1075,40 @@ impl App {
             }
             Err(_) => {
                 self.note("/tier takes low, mid or high");
+                Vec::new()
+            }
+        }
+    }
+
+    /// A node narrows the trace to that node, a dispatch id to that dispatch's tasks.
+    fn trace(&mut self, arg: Option<&str>) -> Vec<Effect> {
+        let Some(spec) = arg else {
+            return vec![Effect::Trace {
+                node: None,
+                dispatch: None,
+            }];
+        };
+        if let Some(node) = self.find_node(spec) {
+            return vec![Effect::Trace {
+                node: Some(node),
+                dispatch: None,
+            }];
+        }
+        match crate::journal::inspect::match_dispatches(&self.view, spec)[..] {
+            [one] => vec![Effect::Trace {
+                node: None,
+                dispatch: Some(one),
+            }],
+            [] => {
+                self.note(format!(
+                    "no node or dispatch matches {spec} · try /dispatches"
+                ));
+                Vec::new()
+            }
+            _ => {
+                self.note(format!(
+                    "{spec} names more than one dispatch · try /dispatches"
+                ));
                 Vec::new()
             }
         }
@@ -1214,93 +1310,115 @@ impl App {
         let elapsed: Duration = (self.now - since).try_into().unwrap_or(Duration::ZERO);
         let running: usize = self.batches().map(Batch::running).sum();
         let verb = spinner::verb(self.seed, elapsed, running > 0);
-        let tail = if running > 0 {
-            format!("{running} workers running")
+        let out = self.out_tokens.max(self.est_bytes / 4);
+        let tokens = format!("{} {}", t.g(Glyph::TokenArrow), fmt::tokens(out));
+        let tails = if running > 0 {
+            let mut tails = vec![format!("{running} workers running")];
+            if out > 0 {
+                tails.push(tokens);
+            }
+            tails
         } else {
-            format!(
-                "{} {} tokens",
-                t.g(Glyph::TokenArrow),
-                fmt::tokens(self.out_tokens.max(self.est_bytes / 4))
-            )
+            vec![format!("{tokens} tokens"), tokens]
         };
+        let head = format!("{} ", spinner::brain_frame(t, self.tick));
+        let verb = format!("{verb}… ");
+        let room = (self.width as usize).saturating_sub(head.width() + verb.width());
+        let took = fmt::duration(elapsed);
+        let parens = tails
+            .iter()
+            .map(|tail| format!("(esc to interrupt · {took} · {tail})"))
+            .find(|p| p.width() <= room)
+            .unwrap_or_else(|| fmt::truncate(&format!("(esc to interrupt · {took})"), room));
         Some(Line::from(vec![
-            t.span(
-                format!("{} ", spinner::brain_frame(t, self.tick)),
-                Role::Accent,
-            ),
-            t.span(format!("{verb}… "), Role::Accent),
-            t.span(
-                format!("(esc to interrupt · {} · {tail})", fmt::duration(elapsed)),
-                Role::Meta,
-            ),
+            t.span(head, Role::Accent),
+            t.span(verb, Role::Accent),
+            t.span(parens, Role::Meta),
         ]))
     }
 
-    /// Three zones on one row; the centre goes first when the terminal narrows.
+    /// Three zones on one row; the centre goes first as it narrows, then counts, then the left.
     pub fn status_line(&self) -> Line<'static> {
         let t = &self.theme;
         let width = self.width as usize;
-        let left = match &self.note {
+        let mut left = match &self.note {
             Some((text, _)) => format!("  {text}"),
             None => "  ? for shortcuts".to_owned(),
         };
-        let left = if self.popup.is_some() {
-            "  tab completes · ↑↓ chooses · esc closes".to_owned()
-        } else {
-            left
-        };
-        let running: usize = self.batches().map(Batch::running).sum();
-        let centre = format!(
-            "{} dispatch {}{}",
-            t.g(Glyph::Mode),
-            self.tier,
-            if running > 0 {
-                format!(" · {running} running")
-            } else {
-                String::new()
-            }
-        );
-        let state = if self.pending_send.is_some() {
-            "1 queued".to_owned()
-        } else if running > 0 {
-            format!("{running} running")
-        } else if self.working() {
-            format!(
-                "{} turn{}",
-                self.turns + 1,
-                if self.turns == 0 { "" } else { "s" }
-            )
-        } else if self.turns > 0 {
-            format!(
-                "{} turn{}",
-                self.turns,
-                if self.turns == 1 { "" } else { "s" }
-            )
-        } else {
-            "idle".to_owned()
-        };
+        if self.popup.is_some() {
+            left = "  tab completes · ↑↓ chooses · esc closes".to_owned();
+        }
+        let centre = format!("{} dispatch {}", t.g(Glyph::Mode), self.tier);
         let total = self.cost_usd + self.view.cost_usd;
-        let mut right = format!("run {} · {state} · ~${total:.2}", self.run.short());
-        if width < 80 {
-            right = format!("run {} · {state}", self.run.short());
+        let (open, tally) = order::open_work(&self.view);
+        let pending = self.pending_send.is_some();
+        let mut cells: Vec<Cell> = Vec::new();
+        let drops: &[Drop] = if open > 0 || tally.live() > 0 {
+            if pending {
+                cells.push(Cell::new("pending", "1 pending", Role::Meta));
+            }
+            if open > 0 {
+                let noun = if open == 1 { "dispatch" } else { "dispatches" };
+                cells.push(Cell::new(
+                    "dispatches",
+                    format!("{open} {noun}"),
+                    Role::Meta,
+                ));
+            }
+            cells.extend(tally.summary_cells(total, self.view.cost_complete));
+            &[
+                Drop::Key("dispatches"),
+                Drop::Key("queued"),
+                Drop::Key("cost"),
+            ]
+        } else {
+            let state = if pending {
+                "1 pending".to_owned()
+            } else if self.working() {
+                format!(
+                    "{} turn{}",
+                    self.turns + 1,
+                    if self.turns == 0 { "" } else { "s" }
+                )
+            } else if self.turns > 0 {
+                format!(
+                    "{} turn{}",
+                    self.turns,
+                    if self.turns == 1 { "" } else { "s" }
+                )
+            } else {
+                "idle".to_owned()
+            };
+            cells.push(Cell::new(
+                "run",
+                format!("run {}", self.run.short()),
+                Role::Meta,
+            ));
+            if width >= 50 {
+                cells.push(Cell::new("state", state, Role::Meta));
+            }
+            if width >= 80 {
+                cells.push(Cell::new("cost", fmt::usd(total, true), Role::Meta));
+            }
+            &[Drop::Key("cost"), Drop::Key("state")]
+        };
+        // Display widths; two columns of gap between the zones, two of trailing margin.
+        let cells = order::fit(cells, width.saturating_sub(left.width() + 2 + 2), drops);
+        let rw = order::width(&cells);
+        if left.width() + 2 + rw + 2 > width {
+            left.clear();
         }
-        if width < 50 {
-            right = format!("run {}", self.run.short());
-        }
-        // Display width throughout: the popup hint and the separators are multi-byte, so
-        // byte lengths would drop or misplace the centre segment.
-        let (lw, rw, cw) = (left.width(), right.width(), centre.width());
-        let centre_room = width.saturating_sub(lw + rw + 4);
-        let mut text = left.clone();
-        if width >= 80 && centre_room >= cw {
+        let (lw, cw) = (left.width(), centre.width());
+        let mut spans = vec![t.span(left, Role::Meta)];
+        let mut used = lw;
+        if width >= 80 && width >= lw + cw + rw + 2 + 4 {
             let gap = (width - lw - rw - cw) / 2;
-            text.push_str(&" ".repeat(gap));
-            text.push_str(&centre);
+            spans.push(t.span(format!("{}{centre}", " ".repeat(gap)), Role::Meta));
+            used += gap + cw;
         }
-        let pad = width.saturating_sub(text.width() + rw + 2);
-        text.push_str(&" ".repeat(pad));
-        text.push_str(&right);
-        Line::from(t.span(fmt::truncate(&text, width), Role::Meta))
+        spans.push(t.span(" ".repeat(width.saturating_sub(used + rw + 2)), Role::Meta));
+        spans.extend(order::spans(&cells, t, width.saturating_sub(used)));
+        Line::from(spans)
     }
 }
 

@@ -1,11 +1,11 @@
 use crate::cli::{WorktreesArgs, WorktreesCmd};
-use crate::cmd::{Ctx, worktree_root};
+use crate::cmd::Ctx;
 use crate::workspace::{Git, worktree};
 
 /// Inspect, prune and open worker worktrees. They live outside the repo on purpose.
 pub async fn run(ctx: &Ctx, args: &WorktreesArgs) -> anyhow::Result<i32> {
     let git = Git::discover(&ctx.paths.repo).await?;
-    let root = worktree_root(ctx);
+    let root = crate::workspace::worktree_root(&ctx.paths, &ctx.cfg);
     match args.command.as_ref().unwrap_or(&WorktreesCmd::Ls) {
         WorktreesCmd::Ls => {
             let mut text = String::new();

@@ -18,18 +18,16 @@ pub fn write_pidfile(path: &Utf8Path, pid: i32) -> anyhow::Result<()> {
 
 /// PID-reuse safe: compares the recorded process start time, not just the pid.
 pub fn is_ours(path: &Utf8Path) -> bool {
-    let Ok(text) = std::fs::read_to_string(path) else {
-        return false;
-    };
+    owner(path).is_some()
+}
+
+/// The pid a pidfile names, while that process is still the one that wrote it.
+pub fn owner(path: &Utf8Path) -> Option<i32> {
+    let text = std::fs::read_to_string(path).ok()?;
     let mut parts = text.split_whitespace();
-    let Some(pid) = parts.next().and_then(|p| p.parse::<i32>().ok()) else {
-        return false;
-    };
-    let recorded = parts.next().and_then(|t| t.parse::<u64>().ok());
-    match (recorded, start_time(pid)) {
-        (Some(a), Some(b)) => a == b,
-        _ => false,
-    }
+    let pid = parts.next()?.parse::<i32>().ok()?;
+    let recorded = parts.next()?.parse::<u64>().ok()?;
+    (start_time(pid)? == recorded).then_some(pid)
 }
 
 #[allow(clippy::manual_async_fn)]
@@ -71,14 +69,17 @@ pub fn wait_exit(pid: i32, poll: Duration) -> impl Future<Output = Option<ExitIn
     }
 }
 
-/// Collects whatever of the process group has died. Only ever called where `wait_exit` is
-/// NOT watching the same pid: two collectors race and one of them loses the exit status.
+/// Collects every dead child in the process group; true once none is left, living or dead.
+/// Only ever called where `wait_exit` is NOT watching the same pid: two collectors race and one
+/// of them loses the exit status.
 pub(crate) fn reap(pgid: i32) -> bool {
-    match waitpid(Pid::from_raw(-pgid), Some(WaitPidFlag::WNOHANG)) {
-        Ok(WaitStatus::StillAlive) => false,
-        Ok(_) => true,
-        Err(Errno::ECHILD) => true,
-        Err(_) => false,
+    loop {
+        match waitpid(Pid::from_raw(-pgid), Some(WaitPidFlag::WNOHANG)) {
+            Ok(WaitStatus::StillAlive) => return false,
+            Ok(_) => continue,
+            Err(Errno::ECHILD) => return true,
+            Err(_) => return false,
+        }
     }
 }
 

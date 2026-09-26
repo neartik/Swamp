@@ -1,8 +1,13 @@
-use crate::dispatch::Dispatcher;
-use crate::ids::NodeId;
+use crate::dispatch::{DispatchRequest, Dispatcher, Outcome};
+use crate::ids::{CallSeq, DispatchId, NodeId};
+use crate::journal::inspect;
 use crate::journal::record::NoteAuthor;
-use crate::journal::{JournalEvent, LlmDigest};
+use crate::journal::{JournalEvent, LlmDigest, RunView};
 use crate::mcp::jsonrpc::RpcError;
+use crate::model::core::{CancelSource, NodeState};
+use crate::model::dispatch::Phase;
+use crate::model::failure::Failure;
+use crate::model::node::NodeRecord;
 use crate::model::result::{NodeResult, TaskRequest};
 use camino::Utf8PathBuf;
 use serde::Deserialize;
@@ -97,7 +102,23 @@ pub fn schemas() -> Vec<ToolSchema> {
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "max_bytes": { "type": "integer", "minimum": 200 }
+                    "max_bytes": { "type": "integer", "minimum": 200 },
+                    "dispatch": { "type": "string", "description": "Only this dispatch's nodes." }
+                },
+                "required": [],
+                "additionalProperties": false
+            }),
+        },
+        ToolSchema {
+            name: "swamp_inspect".into(),
+            description: "One dispatch or one node as structured JSON: state, attempts, account, \
+                          model, pid, elapsed, cost rollup, and why it is blocked or was rejected."
+                .into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "dispatch": { "type": "string" },
+                    "node": { "type": "string" }
                 },
                 "required": [],
                 "additionalProperties": false
@@ -133,6 +154,21 @@ pub fn schemas() -> Vec<ToolSchema> {
             }),
         },
         ToolSchema {
+            name: "swamp_cancel".into(),
+            description: "Stop nodes you dispatched in this run, named one by one or by their \
+                          dispatch. Nodes that already ended are left as they are."
+                .into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "nodes": { "type": "array", "items": { "type": "string" }, "minItems": 1 },
+                    "dispatch": { "type": "string" }
+                },
+                "required": [],
+                "additionalProperties": false
+            }),
+        },
+        ToolSchema {
             name: "swamp_note".into(),
             description: "Record a note in the run journal: your plan, a decision, or why a \
                           node was abandoned. Preserved for the user and for replay."
@@ -150,12 +186,17 @@ pub fn schemas() -> Vec<ToolSchema> {
 }
 
 pub async fn call(disp: &Arc<Dispatcher>, name: &str, args: Value) -> Result<Value, RpcError> {
-    journal_call(disp, name, &args).await;
+    let seq = disp.next_call_seq();
+    if name == "swamp_dispatch" {
+        return dispatch(disp, seq, args).await;
+    }
+    journal_call(disp, seq, name, &args, None).await;
     match name {
-        "swamp_dispatch" => dispatch(disp, args).await,
         "swamp_await" => await_nodes(disp, args).await,
         "swamp_status" => status(disp, args).await,
-        "swamp_result" => result(disp, args),
+        "swamp_inspect" => inspect(disp, args).await,
+        "swamp_result" => result(disp, args).await,
+        "swamp_cancel" => cancel(disp, args).await,
         "swamp_worker_diff" => worker_diff(disp, args).await,
         "swamp_note" => note(disp, args),
         _ => Err(RpcError::method_not_found(name)),
@@ -193,17 +234,39 @@ fn yes() -> bool {
     true
 }
 
-async fn dispatch(disp: &Arc<Dispatcher>, args: Value) -> Result<Value, RpcError> {
-    let args: DispatchArgs = parse_args(args)?;
+fn dispatch_args(raw: Value) -> Result<DispatchArgs, RpcError> {
+    let args: DispatchArgs = parse_args(raw)?;
     if args.tasks.is_empty() {
         return Err(RpcError::invalid_params("`tasks` must not be empty"));
     }
+    Ok(args)
+}
+
+async fn dispatch(disp: &Arc<Dispatcher>, seq: CallSeq, raw: Value) -> Result<Value, RpcError> {
+    let args = match dispatch_args(raw.clone()) {
+        Ok(a) => a,
+        Err(e) => {
+            journal_call(disp, seq, "swamp_dispatch", &raw, None).await;
+            return Err(e);
+        }
+    };
+    let id = DispatchId::new();
+    journal_call(disp, seq, "swamp_dispatch", &raw, Some(id)).await;
     let budget = Duration::from_secs(args.max_wait_s.unwrap_or(DEFAULT_MAX_WAIT_S));
-    let wait = if args.wait { budget } else { SETTLE };
-    let results = disp.dispatch_batch(parent(disp), args.tasks, wait).await;
+    let out = disp
+        .dispatch(DispatchRequest {
+            id,
+            caller: caller(disp),
+            call_seq: Some(seq),
+            tasks: args.tasks,
+            wait: args.wait,
+            max_wait: Some(if args.wait { budget } else { SETTLE }),
+        })
+        .await;
     Ok(json!({
-        "nodes": results.iter().map(|r| result_json(disp, r)).collect::<Vec<_>>(),
-        "running": results.iter().filter(|r| r.state == "running").count(),
+        "dispatch_id": out.id.to_string(),
+        "nodes": out.results.iter().map(|r| result_json(disp, r)).collect::<Vec<_>>(),
+        "running": out.results.iter().filter(|r| r.state == "running").count(),
     }))
 }
 
@@ -233,11 +296,18 @@ async fn await_nodes(disp: &Arc<Dispatcher>, args: Value) -> Result<Value, RpcEr
 struct StatusArgs {
     #[serde(default)]
     max_bytes: Option<usize>,
+    #[serde(default)]
+    dispatch: Option<String>,
 }
 
 async fn status(disp: &Arc<Dispatcher>, args: Value) -> Result<Value, RpcError> {
     let args: StatusArgs = parse_args(args)?;
     let max = args.max_bytes.unwrap_or_else(|| result_bytes(disp));
+    if let Some(spec) = args.dispatch {
+        let view = load_view(disp).await?;
+        let id = one_dispatch(&view, &spec)?;
+        return Ok(json!({ "status": LlmDigest::render(&view, max, Some(id)) }));
+    }
     let journal = disp.journal.paths().journal();
     // Blocking file IO off the runtime thread: status must answer while dispatch is in flight.
     let paths = disp.journal.paths().clone();
@@ -257,24 +327,65 @@ struct NodeArgs {
     max_bytes: Option<usize>,
 }
 
-fn result(disp: &Arc<Dispatcher>, args: Value) -> Result<Value, RpcError> {
+async fn result(disp: &Arc<Dispatcher>, args: Value) -> Result<Value, RpcError> {
     let args: NodeArgs = parse_args(args)?;
-    let id = node_id(&args.node)?;
-    let found = disp
-        .result(id)
-        .ok_or_else(|| RpcError::invalid_params(format!("no dispatched node `{}`", args.node)))?;
     let max = args.max_bytes.unwrap_or_else(|| result_bytes(disp));
-    Ok(one_result_json(&found, max))
+    if let Some(found) = live_result(disp, &args.node) {
+        return Ok(one_result_json(&found, max));
+    }
+    // Not dispatched by this process: a resumed run, or a node from before a restart.
+    let view = load_view(disp).await?;
+    let logical = one_task(&view, &args.node)?;
+    if let Some(found) = disp.result(logical) {
+        return Ok(one_result_json(&found, max));
+    }
+    let attempt = settled_attempt(&view, &args.node, logical);
+    let paths = disp.journal.paths();
+    let stored = attempt
+        .and_then(|a| std::fs::read(paths.result(a.id)).ok())
+        .and_then(|b| serde_json::from_slice::<Value>(&b).ok());
+    let mut value = match stored {
+        Some(v) => {
+            let mut value = shape_result(v, logical, max);
+            task_verdict(&mut value, &view, logical, max);
+            value
+        }
+        None => {
+            let mut v = journal_result(&view, logical);
+            wrap_failures(&mut v, logical, max);
+            v
+        }
+    };
+    if let Some(obj) = value.as_object_mut() {
+        obj.insert("attempt".into(), json!(attempt.map(|a| a.id.to_string())));
+        obj.insert("source".into(), json!("journal"));
+    }
+    Ok(value)
 }
 
 async fn worker_diff(disp: &Arc<Dispatcher>, args: Value) -> Result<Value, RpcError> {
     let args: NodeArgs = parse_args(args)?;
-    let id = node_id(&args.node)?;
     let max = args.max_bytes.unwrap_or_else(|| result_bytes(disp));
-    let patch: Utf8PathBuf = disp
-        .result(id)
-        .and_then(|r| r.patch)
-        .unwrap_or_else(|| disp.journal.paths().patch(id));
+    let paths = disp.journal.paths();
+    let live = live_result(disp, &args.node);
+    let direct = NodeId::from_str(&args.node).ok();
+    let (patch, id): (Utf8PathBuf, NodeId) = match (live.and_then(|r| r.patch), direct) {
+        (Some(p), Some(id)) => (p, id),
+        (None, Some(id)) if paths.patch(id).is_file() => (paths.patch(id), id),
+        _ => {
+            let view = load_view(disp).await?;
+            let logical = one_task(&view, &args.node)?;
+            let patch = match settled_attempt(&view, &args.node, logical) {
+                Some(a) => a
+                    .work
+                    .as_ref()
+                    .map(|w| w.patch.clone())
+                    .unwrap_or_else(|| paths.patch(a.id)),
+                None => paths.patch(logical),
+            };
+            (patch, direct.unwrap_or(logical))
+        }
+    };
     let text = tokio::fs::read_to_string(&patch).await.map_err(|e| {
         RpcError::invalid_params(format!("no patch for node `{}` at {patch}: {e}", args.node))
     })?;
@@ -288,6 +399,117 @@ async fn worker_diff(disp: &Arc<Dispatcher>, args: Value) -> Result<Value, RpcEr
 }
 
 #[derive(Debug, Deserialize)]
+struct InspectArgs {
+    #[serde(default)]
+    dispatch: Option<String>,
+    #[serde(default)]
+    node: Option<String>,
+}
+
+async fn inspect(disp: &Arc<Dispatcher>, args: Value) -> Result<Value, RpcError> {
+    let args: InspectArgs = parse_args(args)?;
+    let max = result_bytes(disp);
+    let view = load_view(disp).await?;
+    let now = time::OffsetDateTime::now_utc();
+    match (args.dispatch, args.node) {
+        (Some(spec), None) => {
+            let id = one_dispatch(&view, &spec)?;
+            let detail = inspect::detail(&view, id, now)
+                .ok_or_else(|| RpcError::invalid_params(format!("no dispatch `{spec}`")))?;
+            let mut value = to_json(&detail)?;
+            if let Some(tasks) = value.get_mut("tasks").and_then(Value::as_array_mut) {
+                for t in tasks {
+                    let node = t["node"].as_str().and_then(|n| NodeId::from_str(n).ok());
+                    wrap_failures(t, node.unwrap_or(caller(disp)), max);
+                }
+            }
+            Ok(value)
+        }
+        (None, Some(spec)) => {
+            let logical = one_task(&view, &spec)?;
+            let task = inspect::task(&view, logical, now)
+                .ok_or_else(|| RpcError::invalid_params(format!("no node `{spec}`")))?;
+            let mut task = to_json(&task)?;
+            wrap_failures(&mut task, logical, max);
+            Ok(json!({ "schema": inspect::JSON_SCHEMA, "task": task }))
+        }
+        _ => Err(RpcError::invalid_params(
+            "name exactly one of `dispatch` or `node`",
+        )),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct CancelArgs {
+    #[serde(default)]
+    nodes: Vec<String>,
+    #[serde(default)]
+    dispatch: Option<String>,
+}
+
+/// Scoped to what the brain itself dispatched: a worker's own sub-dispatch is not its to stop.
+async fn cancel(disp: &Arc<Dispatcher>, args: Value) -> Result<Value, RpcError> {
+    let args: CancelArgs = parse_args(args)?;
+    if args.nodes.is_empty() && args.dispatch.is_none() {
+        return Err(RpcError::invalid_params(
+            "name `nodes`, a `dispatch`, or both",
+        ));
+    }
+    let view = load_view(disp).await?;
+    let me = caller(disp);
+    let mine = |d: DispatchId| {
+        view.dispatches
+            .get(&d)
+            .and_then(|v| v.record.as_ref())
+            .is_some_and(|r| r.caller == me)
+    };
+    let mut targets: Vec<NodeId> = Vec::new();
+    let mut refused: Vec<Value> = Vec::new();
+    if let Some(spec) = &args.dispatch {
+        let id = one_dispatch(&view, spec)?;
+        if mine(id) {
+            targets.extend(view.dispatches[&id].tasks.iter().copied());
+        } else {
+            refused
+                .push(json!({ "dispatch": inspect::label(id), "reason": "not dispatched by you" }));
+        }
+    }
+    for spec in &args.nodes {
+        let logical = one_task(&view, spec)?;
+        match view.tasks.get(&logical).map(|t| t.dispatch) {
+            Some(d) if mine(d) => {
+                if !targets.contains(&logical) {
+                    targets.push(logical);
+                }
+            }
+            _ => refused
+                .push(json!({ "node": logical.to_string(), "reason": "not dispatched by you" })),
+        }
+    }
+
+    let mut cancelled = Vec::new();
+    let mut ended = Vec::new();
+    for id in targets {
+        match disp.cancel_as(id, CancelSource::Brain).await {
+            Ok(Outcome::Cancelled { .. }) => cancelled.push(id),
+            Ok(Outcome::Ended(phase) | Outcome::Killed { phase, .. }) => {
+                ended.push(json!({ "node": id.to_string(), "state": phase }))
+            }
+            Err(e) => refused.push(json!({ "node": id.to_string(), "reason": e.to_string() })),
+        }
+    }
+    // Long enough for a SIGTERM to land and the task to settle, never the full grace period.
+    let settle = disp.cfg.grace_period() + SETTLE;
+    let results = disp.await_nodes(&cancelled, Some(settle)).await;
+    Ok(json!({
+        "cancelled": cancelled.iter().map(ToString::to_string).collect::<Vec<_>>(),
+        "ended": ended,
+        "refused": refused,
+        "nodes": results.iter().map(|r| result_json(disp, r)).collect::<Vec<_>>(),
+    }))
+}
+
+#[derive(Debug, Deserialize)]
 struct NoteArgs {
     text: String,
 }
@@ -295,7 +517,7 @@ struct NoteArgs {
 fn note(disp: &Arc<Dispatcher>, args: Value) -> Result<Value, RpcError> {
     let args: NoteArgs = parse_args(args)?;
     disp.journal.emit(
-        Some(parent(disp)),
+        Some(caller(disp)),
         JournalEvent::Note {
             author: NoteAuthor::Brain,
             text: args.text,
@@ -315,6 +537,109 @@ fn node_id(s: &str) -> Result<NodeId, RpcError> {
     NodeId::from_str(s).map_err(|e| RpcError::invalid_params(format!("bad node id `{s}`: {e}")))
 }
 
+fn to_json<T: serde::Serialize>(v: &T) -> Result<Value, RpcError> {
+    serde_json::to_value(v).map_err(|e| RpcError::internal(e.to_string()))
+}
+
+/// The run's journal folded off the runtime thread, with dead processes marked orphaned.
+async fn load_view(disp: &Arc<Dispatcher>) -> Result<RunView, RpcError> {
+    let paths = disp.journal.paths().clone();
+    tokio::task::spawn_blocking(move || {
+        let mut view = RunView::load(&paths.dir, false)?;
+        view.mark_orphans_in(&paths);
+        anyhow::Ok(view)
+    })
+    .await
+    .map_err(|e| RpcError::internal(format!("reading the journal failed: {e}")))?
+    .map_err(|e| RpcError::internal(format!("reading the journal failed: {e:#}")))
+}
+
+fn one_dispatch(view: &RunView, spec: &str) -> Result<DispatchId, RpcError> {
+    match inspect::match_dispatches(view, spec)[..] {
+        [one] => Ok(one),
+        [] => Err(RpcError::invalid_params(format!(
+            "no dispatch `{spec}` in this run"
+        ))),
+        _ => Err(RpcError::invalid_params(format!(
+            "dispatch `{spec}` is ambiguous"
+        ))),
+    }
+}
+
+fn one_task(view: &RunView, spec: &str) -> Result<NodeId, RpcError> {
+    match inspect::match_tasks(view, spec)[..] {
+        [one] => Ok(one),
+        [] => Err(RpcError::invalid_params(format!(
+            "no node `{spec}` in this run"
+        ))),
+        _ => Err(RpcError::invalid_params(format!(
+            "node `{spec}` is ambiguous"
+        ))),
+    }
+}
+
+fn live_result(disp: &Arc<Dispatcher>, spec: &str) -> Option<NodeResult> {
+    disp.result(NodeId::from_str(spec).ok()?)
+}
+
+/// The attempt `spec` names outright, else the task's latest attempt that finished.
+fn settled_attempt<'a>(view: &'a RunView, spec: &str, logical: NodeId) -> Option<&'a NodeRecord> {
+    let attempts = view.attempts(logical);
+    if let Some(a) = attempts
+        .iter()
+        .find(|a| a.id != logical && a.id.matches(spec))
+    {
+        return Some(a);
+    }
+    attempts
+        .iter()
+        .rev()
+        .find(|a| a.ended_at.is_some())
+        .or(attempts.last())
+        .copied()
+}
+
+/// An attempt's result speaks for its task only while the task is in the same state.
+fn task_verdict(value: &mut Value, view: &RunView, logical: NodeId, max: usize) {
+    let Some(state) = view.state_of(logical) else {
+        return;
+    };
+    let phase = json!(Phase::from(&state));
+    if value.get("state") == Some(&phase) {
+        return;
+    }
+    let mut journal = journal_result(view, logical);
+    wrap_failures(&mut journal, logical, max);
+    if let Some(obj) = value.as_object_mut() {
+        obj.insert("state".into(), phase);
+        obj.insert("ok".into(), journal["ok"].take());
+        if state.is_terminal() {
+            obj.insert("failure".into(), journal["failure"].take());
+        }
+    }
+}
+
+/// What the journal alone knows about a task that left no result.json behind.
+fn journal_result(view: &RunView, logical: NodeId) -> Value {
+    let state = view.state_of(logical);
+    let task = view.tasks.get(&logical);
+    let failure = match &state {
+        Some(NodeState::Failed { failure }) => Some(failure.clone()),
+        Some(NodeState::Rejected { reason }) => Some(reason.clone()),
+        Some(NodeState::Cancelled { by }) => Some(Failure::Cancelled { by: *by }),
+        _ => None,
+    };
+    json!({
+        "node": logical.to_string(),
+        "title": task.map(|t| t.title.clone()),
+        "ok": state == Some(NodeState::Succeeded),
+        "state": state.as_ref().map(Phase::from),
+        "tier": task.map(|t| t.tier),
+        "attempts": view.attempts(logical).len(),
+        "failure": failure,
+    })
+}
+
 fn result_bytes(disp: &Arc<Dispatcher>) -> usize {
     disp.cfg
         .limits
@@ -322,9 +647,8 @@ fn result_bytes(disp: &Arc<Dispatcher>) -> usize {
         .unwrap_or(DEFAULT_RESULT_BYTES)
 }
 
-/// Nodes the brain creates hang off a run-scoped root, so depth and parentage stay meaningful
-/// even though a tool call carries no node id of its own.
-fn parent(disp: &Arc<Dispatcher>) -> NodeId {
+/// The brain, whose id is the run's: its dispatches hang off the node that asked for them.
+fn caller(disp: &Arc<Dispatcher>) -> NodeId {
     NodeId(disp.journal.run().0)
 }
 
@@ -333,65 +657,106 @@ fn result_json(disp: &Arc<Dispatcher>, r: &NodeResult) -> Value {
 }
 
 fn one_result_json(r: &NodeResult, max_bytes: usize) -> Value {
-    let mut value = serde_json::to_value(r).unwrap_or_else(|_| json!({}));
+    shape_result(
+        serde_json::to_value(r).unwrap_or_else(|_| json!({})),
+        r.node,
+        max_bytes,
+    )
+}
+
+/// A `NodeResult`, live or read back from result.json, with every worker-derived field wrapped.
+fn shape_result(mut value: Value, node: NodeId, max_bytes: usize) -> Value {
     if let Some(obj) = value.as_object_mut() {
-        obj.insert("node".into(), json!(r.node.to_string()));
-        let summary = r
-            .summary
-            .as_deref()
-            .map(|s| wrap_untrusted(r.node, s, max_bytes));
+        obj.insert("node".into(), json!(node.to_string()));
+        let summary = obj
+            .get("summary")
+            .and_then(Value::as_str)
+            .map(|s| wrap_untrusted(node, s, max_bytes));
         obj.insert("summary".into(), json!(summary));
-        // `failure` and the file list are built from the worker's own output too. Leaving them
-        // raw made the system prompt's "everything a worker returns is wrapped" claim false.
-        if let Some(f) = obj.get_mut("failure").and_then(Value::as_object_mut) {
-            for key in ["detail", "evidence"] {
-                let Some(text) = f.get(key).and_then(Value::as_str).map(str::to_owned) else {
-                    continue;
-                };
-                f.insert(key.into(), json!(wrap_untrusted(r.node, &text, max_bytes)));
-            }
-        }
-        if let Some(files) = obj.get_mut("files").and_then(Value::as_array_mut) {
-            for file in files.iter_mut() {
-                let Some(entry) = file.as_object_mut() else {
-                    continue;
-                };
-                let Some(path) = entry.get("path").and_then(Value::as_str).map(str::to_owned)
-                else {
-                    continue;
-                };
-                entry.insert("path".into(), json!(escape_envelope(&path)));
-            }
+    }
+    // `failure` and the file list come from the worker's own output too.
+    wrap_failures(&mut value, node, max_bytes);
+    if let Some(files) = value.get_mut("files").and_then(Value::as_array_mut) {
+        for file in files.iter_mut() {
+            let Some(entry) = file.as_object_mut() else {
+                continue;
+            };
+            let Some(path) = entry.get("path").and_then(Value::as_str).map(str::to_owned) else {
+                continue;
+            };
+            entry.insert("path".into(), json!(escape_envelope(&path)));
         }
     }
     value
 }
 
-/// Every tool call is journaled with its arguments on disk: the brain's reasoning, preserved.
-async fn journal_call(disp: &Arc<Dispatcher>, name: &str, args: &Value) {
+/// Wraps the worker-derived text of every failure found under `value`, however deep.
+fn wrap_failures(value: &mut Value, node: NodeId, max_bytes: usize) {
+    match value {
+        Value::Object(obj) => {
+            for (key, v) in obj.iter_mut() {
+                if matches!(key.as_str(), "failure" | "rejected" | "reason")
+                    && let Some(f) = v.as_object_mut()
+                {
+                    for field in ["detail", "evidence"] {
+                        if let Some(text) = f.get(field).and_then(Value::as_str).map(str::to_owned)
+                        {
+                            f.insert(field.into(), json!(wrap_untrusted(node, &text, max_bytes)));
+                        }
+                    }
+                }
+                wrap_failures(v, node, max_bytes);
+            }
+        }
+        Value::Array(items) => {
+            for v in items {
+                wrap_failures(v, node, max_bytes);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Every tool call is journaled, its arguments in one file per call that is never overwritten.
+async fn journal_call(
+    disp: &Arc<Dispatcher>,
+    seq: CallSeq,
+    name: &str,
+    args: &Value,
+    dispatch: Option<DispatchId>,
+) {
     let text = serde_json::to_string(args).unwrap_or_else(|_| "null".to_owned());
     let sha: String = Sha256::digest(text.as_bytes())
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect();
     let dir = disp.journal.paths().dir.join("tools");
-    let path = dir.join(format!("{name}-{}.json", &sha[..16]));
+    let path = dir.join(format!("{seq}-{name}.json"));
     if let Err(e) = write_args(&dir, &path, &text).await {
         tracing::warn!("cannot record tool arguments at {path}: {e}");
     }
     disp.journal.emit(
-        Some(parent(disp)),
+        Some(caller(disp)),
         JournalEvent::BrainToolCall {
             tool: name.to_owned(),
             args_sha256: sha,
             args_path: path,
+            call_seq: Some(seq),
+            dispatch,
         },
     );
 }
 
 async fn write_args(dir: &Utf8PathBuf, path: &Utf8PathBuf, text: &str) -> std::io::Result<()> {
+    use tokio::io::AsyncWriteExt;
     tokio::fs::create_dir_all(dir).await?;
-    tokio::fs::write(path, text).await
+    let mut f = tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .await?;
+    f.write_all(text.as_bytes()).await?;
+    f.flush().await
 }
 
 /// A worker that emits the closing delimiter must not be able to end the envelope early.

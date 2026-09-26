@@ -2,34 +2,29 @@
 source: src/ui/board/screens.rs
 expression: mid
 ---
-swamp board           2 runs · 1 stale · 5 in flight · 22:16
+swamp board  1 stale · 2 running · 1 stuck · observed 4s ago
 ────────────────────────────────────────────────────────────
-anthropic                                         2 accounts
-● main           4/4  5h ▇▇▇▇▇▇▇░░░  71% ↻ 38m        ↓ 812k
-                      7d ▇▇▇░░░░░░░  32% ↻ 4d02h       stale
-  ◆ 9g5fav   -    orchestrating                3m10s  ↓ 214k
-  ⠋ 9g5f01   mid  add pagination to /users     3m10s  ↓ 118k
-  ⠙ 9g5f02   low  rename the fixtures          1m02s   ↓ 61k
-  ? 9g5fbz   -    brain                        3m10s  ↓ 214k
-◐ alt            1/-  5h ▇▇▇▇▇▇▇▇▇░  93% ↻ 12m        ↓ 402k
-                      7d ▇▇▇▇▇░░░░░  54% ↻ 2d07h    degraded
-  ⠹ 9g5f09·2 high backfill the users index     2m48s  ↓ 223k
-openai                                             1 account
-✘ codex-main     0/2  5h ▇▇▇▇▇▇▇▇▇▇  99% ↻ 1h04m         ↓ 0
-                      7d ▇▇▇▇▇▇▇▇░░  81% ↻ 3d01h
-    cooling until 23:20
+  ? brain      brain                main      4m12s   ~$0.09
 
-waiting 1
-  · 9g5f04   mid  rebuild the index            3m18s blocked
-    every anthropic account is at its limit
-    earliest reset 22:54 (in 38m)
-recent 3
-  ⊘ 9g5f07   low  probe the migration          3m00s    ↓ 2k
-  ✔ 9g5f05   low  add the /users route         2m10s   ↓ 96k
-  ✘ 9g5f06   mid  seed script                  2m06s   ↓ 12k
+  ▾ #1 9g5f18 · 2 running · 1 blocked         3m20s   ~$0.34
+    ? 9g5f01   add pagination to /… main      3m10s   ~$0.08
+    ? 9g5f09·2 backfill the users … alt       2m48s   ~$0.22
+▌   ⏸ 9g5f04   rebuild the index              3m20s
+      until 22:54 · main at capacity · alt quota stop
+    · 9g5f0a   write the changelog            3m20s
+    ✔ 9g5f05   add the /users route main      2m10s   ~$0.04
+
+  recent
+  ▸ #2 9g5f1c · 1 task · 1 rejected · max_nodes_per_run
 ────────────────────────────────────────────────────────────
-9g5f09 → alt   score .41 = util .93×.50 + load .33×.30 +
-               share .12×.15 − weight .00 − idle .02
-               main ineligible (at 4/4)
+  ● main        2/2   5h ▇▇▇▇▇▇▇░░░  71% ↻ 38m     7d  32%
+  ◐ alt         1/-   5h ▇▇▇▇▇▇▇▇▇░  93% ↻ 12m     7d  54%
+  ✘ codex-main  0/2   cooling until 23:20
 ────────────────────────────────────────────────────────────
-↑↓ select · ↵ trace · tab run · a accounts · q quit
+  9g5f04 blocked · until 22:54 (in 38m)
+    main  at capacity (2/2)
+    alt   quota stop (93%)
+
+
+
+↑↓ select · k cancel · enter open · r raw · ? keys · q quit

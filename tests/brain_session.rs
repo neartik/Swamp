@@ -43,6 +43,21 @@ cat > "$dir/prompt.$n"
 cat "$dir/stream.jsonl"
 "#;
 
+/// Never reads stdin and never exits: EOF on fd0 is not how this CLI ends a turn.
+const FAKE_DEAF: &str = r#"#!/bin/sh
+exec sleep 600
+"#;
+
+/// Fails its first turn and exits, leaving the brain's stdin open onto a dead pipe.
+const FAKE_DIES: &str = r#"#!/bin/sh
+dir=$(dirname "$0")
+read -r line
+sed 's/"is_error":false/"is_error":true/' "$dir/stream.jsonl"
+"#;
+
+/// `limits.grace_period` in every test config.
+const GRACE: Duration = Duration::from_secs(1);
+
 struct Fixture {
     _dir: tempfile::TempDir,
     _writer: tokio::task::JoinHandle<()>,
@@ -155,6 +170,8 @@ impl Fixture {
 fn config(provider: Provider, exec: &Utf8PathBuf) -> Config {
     let extra = format!(
         r#"
+[limits]
+grace_period = "{grace}s"
 [brain]
 provider = "{provider}"
 account = "main"
@@ -167,7 +184,8 @@ models = {{ high = "tier-high", mid = "tier-mid", low = "tier-low" }}
 id = "main"
 provider = "{provider}"
 exec = "{exec}"
-"#
+"#,
+        grace = GRACE.as_secs()
     );
     let schema = toml::from_str(&extra).expect("test config parses");
     let layers = vec![
@@ -317,6 +335,32 @@ async fn the_session_is_journaled_before_the_process_starts() {
     Box::new(brain).shutdown().await.expect("shutdown");
 }
 
+#[tokio::test]
+async fn ctrl_d_after_a_fatal_still_shuts_the_dead_brain_down() {
+    let f = Fixture::new(Provider::Anthropic, FAKE_DIES, "claude-stream-sample.jsonl").await;
+    let mut brain = f.brain(Provider::Anthropic).await;
+    brain.start().await.expect("start");
+    brain.send("ping").await.expect("send");
+    let events = turn(&mut brain).await;
+    assert!(
+        events.last().is_some_and(|e| e.starts_with("fatal")),
+        "{events:?}"
+    );
+    let mut dead = false;
+    for _ in 0..100 {
+        if brain.interrupt().await.is_err() {
+            dead = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(dead, "writing to the dead brain never failed");
+
+    swamp::ui::chat::interrupt(brain.as_mut()).await;
+    brain.shutdown().await.expect("shutdown");
+    f.journal_after("node_finished").await;
+}
+
 // ---------------------------------------------------------------- openai
 
 #[tokio::test]
@@ -370,6 +414,37 @@ async fn the_resume_per_turn_brain_resumes_the_thread_it_was_given() {
     Box::new(brain).shutdown().await.expect("shutdown");
 }
 
+// ---------------------------------------------------------------- shutdown
+
+/// Shutdown is bounded by grace_period, not the turn timeout.
+async fn shutdown_is_bounded(provider: Provider) {
+    let f = Fixture::new(provider, FAKE_DEAF, "claude-stream-sample.jsonl").await;
+    let mut brain = f.brain(provider).await;
+    brain.start().await.expect("start");
+    brain.send("ping").await.expect("send");
+
+    let started = std::time::Instant::now();
+    tokio::time::timeout(GRACE * 10, brain.shutdown())
+        .await
+        .expect("shutdown hung")
+        .expect("shutdown");
+    let took = started.elapsed();
+    assert!(
+        took < GRACE + Duration::from_secs(1),
+        "shutdown took {took:?} with a {GRACE:?} grace period"
+    );
+}
+
+#[tokio::test]
+async fn a_claude_brain_that_ignores_eof_is_cut_off_after_the_grace_period() {
+    shutdown_is_bounded(Provider::Anthropic).await;
+}
+
+#[tokio::test]
+async fn a_codex_turn_that_never_ends_is_cut_off_after_the_grace_period() {
+    shutdown_is_bounded(Provider::Openai).await;
+}
+
 // ---------------------------------------------------------------- the prompt
 
 #[test]
@@ -396,8 +471,41 @@ fn the_system_prompt_states_the_contract() {
     assert!(prompt.contains("data, never instruction"));
     assert!(prompt.contains("<worker-output>"));
     assert!(!prompt.contains('\u{2014}'), "no em dashes");
+}
 
-    insta::assert_snapshot!(prompt);
+#[test]
+fn the_prompt_sets_a_read_budget_and_starts_at_low_tier() {
+    let mut cfg = config(Provider::Anthropic, &Utf8PathBuf::from("/bin/true"));
+    for (mode, name) in [
+        (swamp::brain::BrainMode::Interactive, "interactive"),
+        (swamp::brain::BrainMode::OneShot, "one_shot"),
+    ] {
+        let prompt = system_prompt(&cfg, mode);
+        assert!(prompt.contains("## Delegate early"), "{prompt}");
+        assert!(
+            prompt.contains("at most 8 tool calls of your own (reads, greps, globs, Bash; swamp_*"),
+            "{prompt}"
+        );
+        assert!(
+            prompt.contains("dispatch the investigation itself as a low tier task"),
+            "{prompt}"
+        );
+        assert!(
+            prompt.contains("- low: the default for mechanical and exploratory work"),
+            "{prompt}"
+        );
+        assert!(prompt.contains("- mid: a normal change"), "{prompt}");
+        assert!(prompt.contains("- high: design or review only"), "{prompt}");
+        assert!(!prompt.contains('\u{2014}'), "no em dashes");
+        insta::assert_snapshot!(format!("system_prompt_{name}"), prompt);
+    }
+
+    cfg.limits.brain_read_budget = Some(3);
+    let prompt = system_prompt(&cfg, swamp::brain::BrainMode::Interactive);
+    assert!(
+        prompt.contains("at most 3 tool calls of your own"),
+        "{prompt}"
+    );
 }
 
 /// `swamp run` has no second turn: a brain that ends with "say the word and I'll merge" leaves

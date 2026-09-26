@@ -45,8 +45,11 @@ pub struct Schema {
 pub struct Limits {
     pub max_nodes_per_run: Option<u32>,
     pub max_depth: Option<u32>,
+    /// Files the brain may read before its first `swamp_dispatch`.
+    pub brain_read_budget: Option<u32>,
     #[serde(default, with = "humantime_serde")]
     pub worker_timeout: Option<Duration>,
+    /// Unused: still parsed so older config files load.
     #[serde(default, with = "humantime_serde")]
     pub brain_turn_timeout: Option<Duration>,
     #[serde(default, with = "humantime_serde")]
@@ -267,4 +270,6 @@ pub struct UiCfg {
     pub chat_theme: Option<String>,
     pub collapse_lines: Option<usize>,
     pub chat_history: Option<usize>,
+    /// `swamp board` may cancel the selected task or dispatch, after a y / n confirm.
+    pub board_actions: Option<bool>,
 }

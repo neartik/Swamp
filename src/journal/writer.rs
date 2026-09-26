@@ -4,7 +4,7 @@ use camino::Utf8Path;
 use serde::Deserialize;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 
 /// Records buffered before `Barrier` forces a sync.
 const BATCH_RECORDS: u32 = 64;
@@ -48,12 +48,24 @@ fn parse_duration(s: &str) -> anyhow::Result<Duration> {
     Ok(d)
 }
 
+/// A durable line on its way to the writer task, acked once it is synced.
+pub(crate) type DurableTx = tokio::sync::mpsc::UnboundedSender<(
+    Option<crate::ids::NodeId>,
+    JournalEvent,
+    tokio::sync::oneshot::Sender<anyhow::Result<u64>>,
+)>;
+
 /// Owns the journal fd. One instance per run, driven by the single writer task.
 pub struct Writer {
     pub path: camino::Utf8PathBuf,
     pub policy: FsyncPolicy,
     pub seq: u64,
+    /// Set when a writer task drains the queue, so durable lines queue behind it.
+    pub(crate) durable: Option<DurableTx>,
     file: tokio::fs::File,
+    lock: Arc<std::fs::File>,
+    /// Bytes this writer knows are in the file; more means another process appended.
+    len: u64,
     redact: Option<Arc<Redactor>>,
     pending: u32,
     last_sync: Instant,
@@ -71,7 +83,9 @@ impl Writer {
             .append(true)
             .open(path)
             .await?;
+        let lock = Arc::new(std::fs::File::open(path)?);
 
+        let guard = Guard::acquire(&lock, path).await?;
         let mut bytes = Vec::new();
         file.read_to_end(&mut bytes).await?;
         let (valid, seq) = repair_point(&bytes);
@@ -83,12 +97,16 @@ impl Writer {
             file.set_len(valid).await?;
             file.sync_data().await?;
         }
+        drop(guard);
 
         Ok(Writer {
             path: path.to_path_buf(),
             policy,
             seq,
+            durable: None,
             file,
+            lock,
+            len: valid,
             redact: None,
             pending: 0,
             last_sync: Instant::now(),
@@ -104,15 +122,44 @@ impl Writer {
     }
 
     pub async fn append(&mut self, line: &JournalLine) -> anyhow::Result<u64> {
-        let mut text = self.encode(line)?;
+        let guard = Guard::acquire(&self.lock, &self.path).await?;
+        let seq = self.catch_up().await?.max(line.seq);
+        let mut text = if seq == line.seq {
+            self.encode(line)?
+        } else {
+            self.encode(&JournalLine {
+                seq,
+                ..line.clone()
+            })?
+        };
         text.push('\n');
         self.file.write_all(text.as_bytes()).await?;
-        self.seq = line.seq + 1;
+        self.file.flush().await?;
+        drop(guard);
+        self.len += text.len() as u64;
+        self.seq = seq + 1;
         self.pending += 1;
         if self.should_sync(&line.event) {
             self.sync().await?;
         }
-        Ok(line.seq)
+        Ok(seq)
+    }
+
+    /// Continues past any line another process appended since this writer last wrote.
+    async fn catch_up(&mut self) -> anyhow::Result<u64> {
+        // Waits for our own in-flight write, so the length below is not stale.
+        self.file.flush().await?;
+        let len = self.file.metadata().await?.len();
+        if len > self.len {
+            let mut f = tokio::fs::File::open(&self.path).await?;
+            f.seek(std::io::SeekFrom::Start(self.len)).await?;
+            let mut bytes = Vec::new();
+            f.read_to_end(&mut bytes).await?;
+            let (valid, next) = repair_point(&bytes);
+            self.len += valid;
+            self.seq = self.seq.max(next);
+        }
+        Ok(self.seq)
     }
 
     pub async fn sync(&mut self) -> anyhow::Result<()> {
@@ -163,6 +210,91 @@ impl Writer {
     }
 }
 
+const SHARED_TORN_RETRIES: u32 = 40;
+const SHARED_TORN_WAIT: Duration = Duration::from_millis(25);
+const LOCK_TIMEOUT: Duration = Duration::from_secs(10);
+const LOCK_POLL: Duration = Duration::from_millis(1);
+
+/// An exclusive flock on the journal, so every appender computes and writes its seq atomically.
+struct Guard(Arc<std::fs::File>);
+
+impl Guard {
+    async fn acquire(file: &Arc<std::fs::File>, path: &Utf8Path) -> anyhow::Result<Self> {
+        let deadline = Instant::now() + LOCK_TIMEOUT;
+        loop {
+            match file.try_lock() {
+                Ok(()) => return Ok(Guard(file.clone())),
+                Err(std::fs::TryLockError::WouldBlock) if Instant::now() < deadline => {
+                    tokio::time::sleep(LOCK_POLL).await;
+                }
+                Err(std::fs::TryLockError::WouldBlock) => {
+                    anyhow::bail!("timed out waiting for the journal lock on {path}")
+                }
+                Err(std::fs::TryLockError::Error(e)) => return Err(e.into()),
+            }
+        }
+    }
+}
+
+impl Drop for Guard {
+    fn drop(&mut self) {
+        let _ = self.0.unlock();
+    }
+}
+
+/// Appends one line from a process that does not own the run's writer, such as `swamp cancel`.
+pub async fn append_shared(
+    path: &Utf8Path,
+    run: crate::ids::RunId,
+    node: Option<crate::ids::NodeId>,
+    event: JournalEvent,
+) -> anyhow::Result<u64> {
+    let mut file = tokio::fs::OpenOptions::new()
+        .read(true)
+        .append(true)
+        .open(path)
+        .await?;
+    let lock = Arc::new(std::fs::File::open(path)?);
+    for _ in 0..SHARED_TORN_RETRIES {
+        let guard = Guard::acquire(&lock, path).await?;
+        let mut bytes = Vec::new();
+        file.seek(std::io::SeekFrom::Start(0)).await?;
+        file.read_to_end(&mut bytes).await?;
+        if !bytes.is_empty() && !bytes.ends_with(b"\n") {
+            drop(guard);
+            tokio::time::sleep(SHARED_TORN_WAIT).await;
+            continue;
+        }
+        let (_, seq) = repair_point(&bytes);
+        let line = JournalLine {
+            seq,
+            at: time::OffsetDateTime::now_utc(),
+            run,
+            node,
+            event,
+        };
+        let mut text = serde_json::to_string(&line)?;
+        text.push('\n');
+        file.write_all(text.as_bytes()).await?;
+        file.flush().await?;
+        drop(guard);
+        file.sync_data().await?;
+        return Ok(seq);
+    }
+    // A tail torn for this long is a crash leftover, which `open` repairs.
+    let mut w = Writer::open(path, FsyncPolicy::Always).await?;
+    let line = JournalLine {
+        seq: w.seq,
+        at: time::OffsetDateTime::now_utc(),
+        run,
+        node,
+        event,
+    };
+    let seq = w.append(&line).await?;
+    w.sync().await?;
+    Ok(seq)
+}
+
 /// Records that must be on disk before the side effect they announce.
 fn is_barrier(event: &JournalEvent) -> bool {
     matches!(
@@ -170,6 +302,11 @@ fn is_barrier(event: &JournalEvent) -> bool {
         JournalEvent::RunStarted { .. }
             | JournalEvent::NodeSpawned { .. }
             | JournalEvent::ProcessStarted { .. }
+            | JournalEvent::ProcessExited { .. }
+            | JournalEvent::DispatchIssued { .. }
+            | JournalEvent::TaskQueued { .. }
+            | JournalEvent::DispatchRejected { .. }
+            | JournalEvent::DispatchSettled { .. }
             | JournalEvent::WorktreeCreated { .. }
             | JournalEvent::NodeFinished { .. }
             | JournalEvent::Adopted { .. }

@@ -1,0 +1,5 @@
+---
+source: src/ui/chat/screens.rs
+expression: "status(&mut app, 40)"
+---
+  ? for shortcuts  2 running · 1 stuck

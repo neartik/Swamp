@@ -1,0 +1,140 @@
+---
+source: tests/render_trace.rs
+expression: text
+---
+{
+  "schema": 2,
+  "run": "run_01ARZ3NDEKTSV4RRFFQ69G5F00",
+  "dispatches": [
+    {
+      "id": "dsp_01ARZ3NDEKTSV4RRFFQ69G5F18",
+      "short": "9g5f18",
+      "state": "settled",
+      "call_seq": 1,
+      "caller": {
+        "node": "nd_01ARZ3NDEKTSV4RRFFQ69G5F00",
+        "kind": "brain",
+        "task": null
+      },
+      "at": "2023-11-14T22:13:20Z",
+      "age_s": 900,
+      "wait": true,
+      "max_wait_s": 600,
+      "tasks": 2,
+      "counts": {
+        "queued": 0,
+        "blocked": 0,
+        "leased": 0,
+        "running": 0,
+        "succeeded": 2,
+        "failed": 0,
+        "cancelled": 0,
+        "rejected": 0
+      },
+      "cost": {
+        "usd": 0.85,
+        "complete": true,
+        "usage": {
+          "input_tokens": 300,
+          "cached_input_tokens": 0,
+          "cache_write_tokens": 0,
+          "output_tokens": 30,
+          "reasoning_tokens": 0
+        },
+        "nodes": 2,
+        "failed": 0,
+        "rejected": 0
+      }
+    },
+    {
+      "id": "dsp_01ARZ3NDEKTSV4RRFFQ69G5F19",
+      "short": "9g5f19",
+      "state": "open",
+      "call_seq": 2,
+      "caller": {
+        "node": "nd_01ARZ3NDEKTSV4RRFFQ69G5F00",
+        "kind": "brain",
+        "task": null
+      },
+      "at": "2023-11-14T22:13:20Z",
+      "age_s": 900,
+      "wait": true,
+      "max_wait_s": 600,
+      "tasks": 2,
+      "counts": {
+        "queued": 1,
+        "blocked": 0,
+        "leased": 0,
+        "running": 0,
+        "succeeded": 0,
+        "failed": 0,
+        "cancelled": 0,
+        "rejected": 1
+      },
+      "cost": {
+        "usd": 0.0,
+        "complete": true,
+        "usage": {
+          "input_tokens": 0,
+          "cached_input_tokens": 0,
+          "cache_write_tokens": 0,
+          "output_tokens": 0,
+          "reasoning_tokens": 0
+        },
+        "nodes": 1,
+        "failed": 0,
+        "rejected": 1
+      }
+    },
+    {
+      "id": "dsp_01ARZ3NDEKTSV4RRFFQ69G5F1A",
+      "short": "9g5f1a",
+      "state": "settled",
+      "call_seq": null,
+      "caller": {
+        "node": "nd_01ARZ3NDEKTSV4RRFFQ69G5F01",
+        "kind": "task",
+        "task": "nd_01ARZ3NDEKTSV4RRFFQ69G5F01"
+      },
+      "at": "2023-11-14T22:13:20Z",
+      "age_s": 900,
+      "wait": true,
+      "max_wait_s": 600,
+      "tasks": 1,
+      "counts": {
+        "queued": 0,
+        "blocked": 0,
+        "leased": 0,
+        "running": 0,
+        "succeeded": 1,
+        "failed": 0,
+        "cancelled": 0,
+        "rejected": 0
+      },
+      "cost": {
+        "usd": 0.05,
+        "complete": true,
+        "usage": {
+          "input_tokens": 100,
+          "cached_input_tokens": 0,
+          "cache_write_tokens": 0,
+          "output_tokens": 10,
+          "reasoning_tokens": 0
+        },
+        "nodes": 1,
+        "failed": 0,
+        "rejected": 0
+      }
+    }
+  ],
+  "brain": {
+    "calls": 0,
+    "budget": 8,
+    "over_budget": false,
+    "dispatched": true,
+    "brain_usd": 1.0,
+    "total_usd": 1.9,
+    "cost_share": 0.5263,
+    "cost_complete": true
+  }
+}

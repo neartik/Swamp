@@ -253,3 +253,257 @@ fn the_brain_node_writes_a_pidfile_naming_its_supervisor() {
         .unwrap_or_else(|| panic!("unreadable pidfile {text:?}"));
     assert_eq!(pid, supervisor, "the brain pidfile names another process");
 }
+
+/// Two identical `swamp_dispatch` calls are two dispatches with two argument files.
+#[test]
+fn identical_dispatch_calls_are_distinct_dispatches() {
+    use swamp::journal::record::{JournalEvent, JournalLine};
+    use swamp::model::dispatch::{DispatchState, Phase};
+
+    let h = Harness::new().max_concurrency(3).scenario(
+        "main",
+        Scenario::claude()
+            .edits("worker-{n}.txt", "written by invocation {n}\n")
+            .dispatches("lex", "write the lexer")
+            .dispatch_calls(2),
+    );
+    h.swamp(&["run", TASK]).assert().success();
+
+    let run = h.last_run();
+    let lines: Vec<JournalLine> = h
+        .journal_text(run.run)
+        .lines()
+        .map(|l| serde_json::from_str(l).expect("a journal line"))
+        .collect();
+
+    let calls: Vec<_> = lines
+        .iter()
+        .filter_map(|l| match &l.event {
+            JournalEvent::BrainToolCall {
+                tool,
+                args_path,
+                call_seq,
+                dispatch,
+                ..
+            } if tool == "swamp_dispatch" => Some((args_path.clone(), *call_seq, *dispatch)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(calls.len(), 2, "{calls:?}");
+    assert_ne!(calls[0].1, calls[1].1, "each call has its own sequence");
+    let ids: Vec<_> = calls
+        .iter()
+        .map(|c| c.2.expect("a dispatch call names its dispatch"))
+        .collect();
+    assert_ne!(ids[0], ids[1]);
+    assert_ne!(
+        calls[0].0, calls[1].0,
+        "the second call overwrote the first"
+    );
+    for (path, seq, _) in &calls {
+        let seq = seq.expect("a call sequence");
+        assert!(
+            path.ends_with(format!("{seq}-swamp_dispatch.json")),
+            "{path}"
+        );
+        let args = std::fs::read_to_string(path).expect("the recorded arguments");
+        assert!(args.contains("write the lexer"), "{args}");
+    }
+    let files = std::fs::read_dir(run.dir.join("tools"))
+        .expect("the tools directory")
+        .count();
+    assert_eq!(files, 2);
+
+    // The record precedes its first task, and the brain was told its id.
+    for id in &ids {
+        let issued = lines
+            .iter()
+            .position(
+                |l| matches!(&l.event, JournalEvent::DispatchIssued { record } if record.id == *id),
+            )
+            .expect("the dispatch is journaled");
+        let queued = lines
+            .iter()
+            .position(|l| matches!(&l.event, JournalEvent::TaskQueued { dispatch, .. } if *dispatch == *id))
+            .expect("its task is journaled");
+        assert!(issued < queued);
+    }
+    let brain_stream =
+        std::fs::read_to_string(run.stream(swamp::NodeId(run.run.0))).expect("the brain's stream");
+    for id in &ids {
+        assert!(
+            brain_stream.contains(&id.to_string()),
+            "swamp_dispatch did not answer with {id}"
+        );
+    }
+
+    let view = h.last_view();
+    let workers: Vec<_> = view
+        .nodes
+        .values()
+        .filter(|n| n.kind == NodeKind::Worker)
+        .collect();
+    assert_eq!(workers.len(), 2);
+    for w in &workers {
+        assert_eq!(w.depth, 1, "{}", w.id);
+        assert!(w.dispatch.is_some_and(|d| ids.contains(&d)), "{}", w.id);
+    }
+    for id in &ids {
+        let d = &view.dispatches[id];
+        assert_eq!(d.state, DispatchState::Settled);
+        assert_eq!(d.tasks.len(), 1);
+        let cost = d.cost.expect("a settled dispatch carries its cost");
+        let rollup = view.rollup(swamp::journal::fold::Scope::Dispatch(*id));
+        assert!(rollup.cost_complete, "{id}: {rollup:?}");
+        assert!(
+            (cost.usd - rollup.cost_usd).abs() < 1e-9,
+            "{id}: {cost:?} vs {rollup:?}"
+        );
+    }
+
+    // A waiting task is visible before it is leased or spawned.
+    for logical in ids.iter().flat_map(|id| &view.dispatches[id].tasks) {
+        let at = |pred: &dyn Fn(&JournalLine) -> bool| {
+            lines
+                .iter()
+                .position(pred)
+                .unwrap_or_else(|| panic!("no such line for {logical}"))
+        };
+        let queued = at(
+            &|l| matches!(&l.event, JournalEvent::TaskQueued { logical: q, .. } if q == logical),
+        );
+        let spawned = at(
+            &|l| matches!(&l.event, JournalEvent::NodeSpawned { node } if node.logical == *logical),
+        );
+        let changed = at(&|l| {
+            l.node == Some(*logical) && matches!(l.event, JournalEvent::NodeStateChanged { .. })
+        });
+        assert!(queued < spawned && queued < changed, "{logical}");
+        assert_eq!(
+            view.transitions[logical][0].from,
+            Phase::Queued,
+            "{logical}"
+        );
+    }
+
+    // Chained per node, and never out of a terminal state.
+    assert!(!view.transitions.is_empty());
+    for (node, chain) in &view.transitions {
+        for t in chain {
+            assert!(!t.from.is_terminal(), "{node}: {chain:?}");
+        }
+        for w in chain.windows(2) {
+            assert_eq!(Phase::from(&w[0].to), w[1].from, "{node}: {chain:?}");
+        }
+    }
+    for w in &workers {
+        let phases: Vec<Phase> = view.transitions[&w.id]
+            .iter()
+            .map(|t| Phase::from(&t.to))
+            .collect();
+        assert_eq!(phases, vec![Phase::Running, Phase::Succeeded], "{}", w.id);
+        assert!(view.exited.contains(&w.id), "no ProcessExited for {}", w.id);
+    }
+}
+
+/// `swamp replay` renders a run and must never change what the journal folds to.
+#[test]
+fn replay_leaves_the_run_view_unchanged() {
+    let h = Harness::new().max_concurrency(3).scenario(
+        "main",
+        Scenario::claude()
+            .edits("worker-{n}.txt", "written by invocation {n}\n")
+            .dispatches("lex", "write the lexer")
+            .dispatches("parse", "write the parser"),
+    );
+    h.swamp(&["run", TASK]).assert().success();
+
+    let digest = |v: &swamp::RunView| {
+        format!(
+            "{:?}|{:?}|{:?}|{:?}|{:?}|{:?}",
+            v.nodes,
+            v.dispatches,
+            v.tasks,
+            v.transitions,
+            v.tree()
+                .iter()
+                .map(|r| (r.logical, r.depth, r.state.clone(), r.attempts.clone()))
+                .collect::<Vec<_>>(),
+            v.totals().cost_usd,
+        )
+    };
+    let view = h.last_view();
+    let before = digest(&view);
+    let journal = h.journal_text(h.last_run().run);
+    h.swamp(&["replay", "last"]).assert().success();
+    assert_eq!(h.journal_text(h.last_run().run), journal);
+    assert_eq!(digest(&h.last_view()), before);
+
+    // A reparse rewrites the journal: the tree and the dispatch grouping have to survive it.
+    let shape = |v: &swamp::RunView| {
+        let tree: Vec<_> = v
+            .tree()
+            .iter()
+            .map(|r| (r.logical, r.depth, r.state.clone()))
+            .collect();
+        let dispatches: Vec<_> = v
+            .dispatches
+            .values()
+            .map(|d| (d.id, d.state, d.tasks.clone()))
+            .collect();
+        format!("{tree:?}|{dispatches:?}|{:?}", v.call_seq)
+    };
+    h.swamp(&["replay", "last", "--reparse"]).assert().success();
+    let after = h.last_view();
+    assert_ne!(
+        h.journal_text(h.last_run().run),
+        journal,
+        "the journal was rewritten"
+    );
+    assert_eq!(shape(&after), shape(&view));
+    for t in view.tasks.keys() {
+        assert_eq!(after.state_of(*t), Some(NodeState::Succeeded), "{t}");
+    }
+}
+
+/// The brain's reads before its dispatch, not the dispatch call, count against the budget.
+#[test]
+fn the_brain_reads_before_its_dispatch_are_counted_against_the_budget() {
+    let h = Harness::new().scenario(
+        "main",
+        Scenario::claude()
+            .reads_first(&["src/lib.rs", "src/main.rs", "Cargo.toml"])
+            .dispatches("lex", "write the lexer"),
+    );
+    // The repo layer, over the harness's user layer that already has a [limits] table.
+    let dot_swamp = h.paths().dot_swamp;
+    std::fs::create_dir_all(&dot_swamp).expect(".swamp");
+    std::fs::write(
+        dot_swamp.join("config.toml"),
+        "[limits]\nbrain_read_budget = 2\n",
+    )
+    .expect("repo config");
+    h.swamp(&["run", TASK]).assert().success();
+
+    let view = h.last_view();
+    let work = view.brain_self_work().expect("a brain run");
+    assert_eq!(work.calls, 3, "{work:?}");
+    assert!(work.dispatched && work.over(2));
+
+    let stdout = |args: &[&str]| {
+        let out = h.swamp(args).assert().success();
+        String::from_utf8_lossy(&out.get_output().stdout).into_owned()
+    };
+    let over = "brain  3/2 calls before the first dispatch";
+    let trace = stdout(&["trace"]);
+    assert!(trace.contains(over), "{trace}");
+    assert!(trace.contains("over limits.brain_read_budget"), "{trace}");
+    let dispatches = stdout(&["dispatches"]);
+    assert!(dispatches.contains(over), "{dispatches}");
+    let json: serde_json::Value =
+        serde_json::from_str(&stdout(&["dispatches", "--json"])).expect("json");
+    assert_eq!(json["brain"]["calls"], 3);
+    assert_eq!(json["brain"]["over_budget"], true);
+    let board = stdout(&["board", "--once", "--run", "last"]);
+    assert!(board.contains("brain 3/2 over"), "{board}");
+}

@@ -18,7 +18,7 @@ pub mod workspace;
 pub use cli::{Cli, Command};
 pub use config::Config;
 pub use error::{SwampError, exit_code};
-pub use ids::{NodeId, NodeIds, RunId};
+pub use ids::{CallSeq, DispatchId, NodeId, NodeIds, RunId};
 pub use journal::{Journal, JournalEvent, JournalHandle, JournalLine, Paths, RunPaths, RunView};
 pub use model::{
     AccountId, Cost, Failure, FileChange, IsolationMode, NodeRecord, NodeResult, NodeState,

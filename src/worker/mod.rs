@@ -19,8 +19,10 @@ use crate::ids::NodeId;
 use crate::journal::raw::{RawSink, Redactor};
 use crate::journal::{JournalEvent, JournalHandle};
 use crate::model::core::{
-    AccountId, Cost, FileChange, FinalSummary, Provider, RateLimitSnapshot, SessionHandle, Usage,
+    AccountId, Cost, FileChange, FinalSummary, NodeState, Provider, RateLimitSnapshot,
+    SessionHandle, Usage,
 };
+use crate::model::dispatch::Phase;
 use crate::model::event::WorkerEvent;
 use crate::model::failure::Failure;
 use crate::model::node::ExitInfo;
@@ -40,6 +42,8 @@ use tokio_util::sync::CancellationToken;
 /// the same consumer loop that journals, instead of only once the node is terminal.
 pub trait EventObserver: Send + Sync + 'static {
     fn on_event(&self, event: &WorkerEvent);
+    /// The process was spawned and journaled as running.
+    fn on_started(&self) {}
 }
 
 /// Registered per node rather than passed down `NodeRunner::run`, whose implementors live in
@@ -68,7 +72,6 @@ fn observers() -> &'static Mutex<BTreeMap<NodeId, Arc<dyn EventObserver>>> {
 }
 
 const STDERR_TAIL: usize = 64;
-const DEFAULT_GRACE: Duration = Duration::from_secs(5);
 const EVENT_QUEUE: usize = 256;
 
 pub struct RunOutcome {
@@ -193,7 +196,7 @@ impl Executor {
             journal: Some(&self.journal),
             resume,
             timeout,
-            grace: self.cfg.limits.grace_period.unwrap_or(DEFAULT_GRACE),
+            grace: self.cfg.grace_period(),
             max_line: self
                 .cfg
                 .journal
@@ -250,6 +253,21 @@ pub async fn execute(req: ExecReq<'_>) -> anyhow::Result<RunOutcome> {
                         cwd: spec.cwd.clone(),
                     },
                 );
+                j.emit(
+                    Some(io.node),
+                    JournalEvent::NodeStateChanged {
+                        from: Phase::Leased,
+                        to: NodeState::Running {
+                            pid: d.pid,
+                            pgid: d.pgid,
+                            since: time::OffsetDateTime::now_utc(),
+                        },
+                        why: format!("pid {}", d.pid),
+                    },
+                );
+            }
+            if let Some(o) = &observer {
+                o.on_started();
             }
             (d.pid, d.pgid, 0)
         }
@@ -318,6 +336,15 @@ pub async fn execute(req: ExecReq<'_>) -> anyhow::Result<RunOutcome> {
     .await?;
     let _ = consumer.await;
     let exit = waiter.await.ok().flatten();
+    if let Some(j) = journal {
+        j.emit(
+            Some(io.node),
+            JournalEvent::ProcessExited {
+                code: exit.and_then(|e| e.code),
+                signal: exit.and_then(|e| e.signal),
+            },
+        );
+    }
     // NOT aborted: the direct child can die on SIGTERM while a grandchild in the same group
     // does not, and aborting here would drop `terminate` before it ever sends SIGKILL.
     let _ = supervisor.await;
@@ -402,7 +429,7 @@ fn stderr_tail(path: &camino::Utf8Path) -> std::collections::VecDeque<String> {
         .collect()
 }
 
-fn depth_from_env() -> u32 {
+pub(crate) fn depth_from_env() -> u32 {
     std::env::var("SWAMP_DEPTH")
         .ok()
         .and_then(|d| d.parse().ok())

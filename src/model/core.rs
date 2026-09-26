@@ -141,13 +141,17 @@ pub enum NodeState {
     Cancelled {
         by: CancelSource,
     },
+    /// Refused by a hard dispatch limit before it was ever queued.
+    Rejected {
+        reason: Failure,
+    },
 }
 
 impl NodeState {
     pub fn is_terminal(&self) -> bool {
         matches!(
             self,
-            Self::Succeeded | Self::Failed { .. } | Self::Cancelled { .. }
+            Self::Succeeded | Self::Failed { .. } | Self::Cancelled { .. } | Self::Rejected { .. }
         )
     }
 }
@@ -668,6 +672,9 @@ mod tests {
             },
             NodeState::Cancelled {
                 by: CancelSource::User,
+            },
+            NodeState::Rejected {
+                reason: Failure::Timeout { after_s: 1 },
             },
         ];
         for s in terminal {

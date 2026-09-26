@@ -148,12 +148,14 @@ async fn plain_slash(command: &str, disp: &Arc<Dispatcher>, ctx: &Ctx) -> anyhow
             Effect::Commit(body) => {
                 println!("{}", blocks::text_of(&body).join("\n"));
             }
-            Effect::Trace(node) => {
+            Effect::Trace { node, dispatch } => {
                 let text = render(
                     &app.view,
                     &TraceOpts {
                         node,
+                        dispatch,
                         events: true,
+                        read_budget: Some(app.read_budget),
                         ..TraceOpts::default()
                     },
                 );
@@ -163,12 +165,26 @@ async fn plain_slash(command: &str, disp: &Arc<Dispatcher>, ctx: &Ctx) -> anyhow
                 let n = disp.cancel_all();
                 effects.extend(app.note_cancelled(n));
             }
-            Effect::Cancel(id) => disp.cancel(id).await?,
+            Effect::Cancel(id) => cancel(disp, id).await,
             Effect::Quit(_) => quit = true,
             _ => {}
         }
     }
     Ok(quit)
+}
+
+/// A node that already ended, or the brain itself, is not worth ending the chat over.
+async fn cancel(disp: &Arc<Dispatcher>, id: crate::ids::NodeId) {
+    if let Err(e) = disp.cancel(id).await {
+        tracing::warn!("cancelling {}: {e:#}", id.short());
+    }
+}
+
+/// A dead brain cannot be interrupted, and that must not stop the chat from quitting.
+pub async fn interrupt(brain: &mut dyn Brain) {
+    if let Err(e) = brain.interrupt().await {
+        tracing::warn!("interrupt failed: {e}");
+    }
 }
 
 async fn interactive(
@@ -272,7 +288,7 @@ async fn interactive(
         };
         app.now = OffsetDateTime::now_utc();
         let mut effects: std::collections::VecDeque<Effect> = app.reduce(msg).into();
-        app.mark_orphans(&|id| crate::worker::liveness::is_ours(&paths.pidfile(id)));
+        app.mark_orphans(&|id| paths.is_live(id));
         let mut quit = None;
         while let Some(effect) = effects.pop_front() {
             match effect {
@@ -284,19 +300,21 @@ async fn interactive(
                     term.commit(lines)?;
                 }
                 Effect::Send(text) => brain.send(&text).await?,
-                Effect::Interrupt => brain.interrupt().await?,
+                Effect::Interrupt => interrupt(brain.as_mut()).await,
                 Effect::CancelAll => {
                     let n = disp.cancel_all();
                     effects.extend(app.note_cancelled(n));
                 }
-                Effect::Cancel(id) => disp.cancel(id).await?,
-                Effect::Trace(node) => {
+                Effect::Cancel(id) => cancel(&disp, id).await,
+                Effect::Trace { node, dispatch } => {
                     let view = RunView::load(&paths.dir, true)?;
                     let text = render(
                         &view,
                         &TraceOpts {
                             node,
+                            dispatch,
                             events: true,
+                            read_budget: Some(app.read_budget),
                             ..TraceOpts::default()
                         },
                     );

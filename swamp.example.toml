@@ -5,16 +5,17 @@ version = 1
 [limits]
 max_nodes_per_run     = 32
 max_depth             = 2          # brain -> worker -> refused (also via SWAMP_DEPTH)
+brain_read_budget     = 8          # tool calls the brain may make before its first dispatch;
+                                   # trace, dispatches and the board header warn past it
 worker_timeout        = "25m"
-brain_turn_timeout    = "15m"
-grace_period          = "5s"       # SIGTERM -> SIGKILL window
+grace_period          = "5s"       # SIGTERM -> SIGKILL window; also how long quitting chat waits
 max_prompt_bytes      = 200000
 max_result_bytes      = 8000       # cap on worker output fed back to the brain
 unsafe_ack            = false      # required before any --dangerously-* flag is accepted
 
 # ---------------------------------------------------------------- brain
 [brain]
-transport = "cli"                  # "cli" (default, subscription-safe) | "api" (feature api-brain)
+transport = "cli"                  # "cli" is the only transport compiled in; anything else is refused
 provider  = "anthropic"
 account   = "main"
 tier      = "high"
@@ -26,7 +27,8 @@ reserve_brain_slot = true          # keep this account out of the worker pool
 # works is "acceptEdits" plus "Bash" in allow_tools, here and for the workers below. The
 # trade-off is real: an allowed Bash runs commands without asking, the same trust you extend
 # to a CLI agent in your own shell, and a worktree is a directory, not a sandbox.
-# deny_tools below still keeps the brain from editing files.
+# deny_tools below still keeps the brain from editing files. The spelling is the CLI's own:
+# `swamp doctor --schema` checks it against `claude --help`.
 permission_mode    = "acceptEdits"
 include_partial_messages = true    # smooth chat streaming; workers keep this off
 # Every mcp__swamp__* tool is allowed automatically, from the registry: the brain answers no
@@ -102,11 +104,12 @@ tier_extra = { high = { effort = "high" }, mid = { effort = "medium" }, low = { 
 
   [providers.anthropic.worker]
   # "acceptEdits" so edits land, plus Bash by name so the worker can run the tests it was
-  # sent to run. See the note under [brain]: "auto" denies the writes.
+  # sent to run. See the note under [brain]: "auto" denies the writes. Both ship as built-in
+  # defaults; never "bypassPermissions".
   permission_mode = "acceptEdits"
   # Rendered as one --allowed-tools / --disallowed-tools flag. Put tool names here, not raw
-  # flags in `args`.
-  allow_tools = ["Bash"]
+  # flags in `args`. Listing tools here replaces the default list rather than adding to it.
+  allow_tools = ["Bash", "Read", "Grep", "Glob", "Edit", "Write", "MultiEdit"]
   # A worker does the work itself. Left alone it inherits your own CLAUDE.md, spawns a team of
   # subagents and reports on their behalf, which is slower, more expensive and less honest.
   # Swamp's built-in worker role prompt says so too; this makes it unavailable, not just
@@ -225,6 +228,8 @@ tail_lines    = 200
 chat_theme     = "auto"
 collapse_lines = 3
 chat_history   = 500
+# `swamp board` cancels the selected task or dispatch with `k`, after a y / n.
+board_actions  = true
 
 # ---------------------------------------------------------------- profiles
 # `swamp --profile cheap run "..."` layers this over everything above.

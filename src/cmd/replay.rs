@@ -21,6 +21,7 @@ pub async fn run(ctx: &Ctx, args: &ReplayArgs) -> anyhow::Result<i32> {
             &TraceOpts {
                 events: true,
                 json: ctx.json,
+                read_budget: Some(ctx.cfg.brain_read_budget()),
                 ..TraceOpts::default()
             },
         ));
@@ -39,7 +40,11 @@ pub async fn run(ctx: &Ctx, args: &ReplayArgs) -> anyhow::Result<i32> {
         paths.run
     );
     let view = ctx.view(&paths, false)?;
-    ctx.out(&render(&view, &TraceOpts::default()));
+    let opts = TraceOpts {
+        read_budget: Some(ctx.cfg.brain_read_budget()),
+        ..TraceOpts::default()
+    };
+    ctx.out(&render(&view, &opts));
     Ok(0)
 }
 
@@ -140,6 +145,8 @@ fn from_result(ctx: &Ctx, paths: &RunPaths, r: &serde_json::Value) -> Option<Nod
         summary: text("summary"),
         stream_offset: 0,
         unparsed_lines: 0,
+        depth: 0,
+        dispatch: None,
     })
 }
 
@@ -147,7 +154,7 @@ fn from_result(ctx: &Ctx, paths: &RunPaths, r: &serde_json::Value) -> Option<Nod
 /// raw streams instead of losing it.
 async fn rewrite(ctx: &Ctx, paths: &RunPaths, records: Vec<NodeRecord>) -> anyhow::Result<u32> {
     let journal = paths.journal();
-    let carried = account_lines(&journal);
+    let carried = carried_lines(&journal);
     if journal.is_file() {
         std::fs::rename(&journal, journal.with_extension("jsonl.prev"))?;
     }
@@ -300,32 +307,47 @@ async fn rewrite(ctx: &Ctx, paths: &RunPaths, records: Vec<NodeRecord>) -> anyho
     Ok(count)
 }
 
-/// Account history no raw stream carries: which account served the run, its health and
-/// cooldown, and the pool's token counters. The rewrite replaces the journal, so these lines
-/// are copied across it verbatim instead of being dropped with it.
-fn account_lines(journal: &camino::Utf8Path) -> Vec<JournalLine> {
+/// Lines no raw stream can rebuild, copied across the rewrite.
+fn carried_lines(journal: &camino::Utf8Path) -> Vec<JournalLine> {
     #[derive(Default)]
-    struct Accounts(Vec<JournalLine>);
-    impl crate::journal::fold::Projection for Accounts {
+    struct Carried {
+        lines: Vec<JournalLine>,
+        attempts: std::collections::HashSet<crate::ids::NodeId>,
+    }
+    impl crate::journal::fold::Projection for Carried {
         type Out = Vec<JournalLine>;
         fn apply(&mut self, l: &JournalLine) {
-            if matches!(
-                l.event,
+            let carry = match &l.event {
+                JournalEvent::NodeSpawned { node } => {
+                    self.attempts.insert(node.id);
+                    false
+                }
+                // An attempt's state is re-derived from its stream; a task's is not.
+                JournalEvent::NodeStateChanged { .. } => {
+                    l.node.is_some_and(|n| !self.attempts.contains(&n))
+                }
                 JournalEvent::AccountSelected { .. }
-                    | JournalEvent::AccountHealth { .. }
-                    | JournalEvent::AccountUsage { .. }
-            ) {
-                self.0.push(l.clone());
+                | JournalEvent::AccountHealth { .. }
+                | JournalEvent::AccountUsage { .. }
+                | JournalEvent::BrainToolCall { .. }
+                | JournalEvent::DispatchIssued { .. }
+                | JournalEvent::TaskQueued { .. }
+                | JournalEvent::DispatchRejected { .. }
+                | JournalEvent::DispatchSettled { .. } => true,
+                _ => false,
+            };
+            if carry {
+                self.lines.push(l.clone());
             }
         }
         fn finish(self) -> Vec<JournalLine> {
-            self.0
+            self.lines
         }
     }
     if !journal.is_file() {
         return Vec::new();
     }
-    crate::journal::reader::replay(journal, Accounts::default()).unwrap_or_default()
+    crate::journal::reader::replay(journal, Carried::default()).unwrap_or_default()
 }
 
 fn line(
