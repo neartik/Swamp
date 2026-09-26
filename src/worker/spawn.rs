@@ -102,10 +102,9 @@ pub async fn terminate(pgid: i32, grace: Duration, reaper: Reaper) -> anyhow::Re
 async fn settle(pgid: i32, grace: Duration, reaper: Reaper) -> bool {
     let deadline = Instant::now() + grace;
     loop {
-        if reaper == Reaper::Here {
-            reap(pgid);
-        }
-        if !group_alive(pgid) {
+        // macOS killpg skips zombies, so the group can look gone before its zombies are reaped.
+        let reaped = reaper != Reaper::Here || reap(pgid);
+        if reaped && !group_alive(pgid) {
             return true;
         }
         if Instant::now() >= deadline {
