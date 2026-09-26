@@ -240,6 +240,8 @@ async fn attempt_loop(
                     )
                     .await;
                 match acquired {
+                    // A freed slot can wake this waiter before the marker watcher fires the token.
+                    Ok(_) if cancel_source(cx).is_some() => return cancelled(cx, attempts),
                     Ok(l) => {
                         phase.to(
                             NodeState::Leased {
