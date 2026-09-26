@@ -540,8 +540,9 @@ Bullet `err`, first body line `err`, the rest `meta`.
 
 Argument preview, `blocks::tool_args::preview(name, raw)`: `raw` is `ToolCall.preview`. If it
 parses as JSON, per-tool rules apply - `swamp_dispatch` -> `"{n} tasks"`, `swamp_await` ->
-`"{n} nodes"`, `swamp_result` / `swamp_worker_diff` -> the short node id, `swamp_status` -> `""`,
-`swamp_note` -> first 40 chars. Otherwise whitespace is collapsed and the string is
+`"{n} nodes"`, `swamp_result` / `swamp_worker_diff` -> the short node id, `swamp_status` -> `""`
+(or `"dispatch {short}"` when filtered), `swamp_inspect` / `swamp_cancel` -> `"dispatch {short}"`,
+the short node id or `"{n} nodes"`, `swamp_note` -> first 40 chars. Otherwise whitespace is collapsed and the string is
 `fmt::truncate`d to `width - name.len() - 6`. The `mcp__swamp__` prefix is stripped from the name.
 
 ### 3.4 swamp_dispatch, two workers live

@@ -153,9 +153,11 @@ brain needs it.
 |---|---|
 | `swamp_dispatch` | create 1..N worker nodes `{title, prompt, tier, provider?, isolation?}`; returns node ids; `wait` defaults true with `max_wait_s` |
 | `swamp_await` | block on node ids with a timeout; returns `NodeResult` per node |
-| `swamp_status` | the run tree rendered compactly for an LLM, byte-budgeted |
-| `swamp_result` | one node: final text, files, usage, cost, failure class |
+| `swamp_status` | the run tree rendered compactly for an LLM, byte-budgeted; `dispatch` narrows it to one dispatch |
+| `swamp_inspect` | one dispatch or one node as structured JSON (docs/DISPATCH.md): state, attempts, account, model, pid/pgid, elapsed, cost rollup, blocked verdict, depth |
+| `swamp_result` | one node: final text, files, usage, cost, failure class; falls back to the journal and `nodes/<attempt>/result.json` for a node this process did not dispatch |
 | `swamp_worker_diff` | a node's patch, truncated, with a path to the full file |
+| `swamp_cancel` | stop `nodes` or a whole `dispatch`, limited to what the brain itself dispatched in this run |
 | `swamp_note` | write an annotation into the journal (the brain's reasoning, preserved) |
 
 Caps are enforced in the dispatcher, never in the prompt: `max_nodes_per_run` and `max_depth`. There
@@ -1734,6 +1736,7 @@ with `swamp accounts reset <id>`. Nothing deletes them silently.
     run.json                              # header: cwd, git HEAD, config hash, swamp version, argv
     journal.jsonl                         # THE tree: append-only JournalLine stream
     tools/                                # the arguments of every brain tool call, one file per call (<call_seq>-<tool>.json, never overwritten); results live in the journal
+    cancel/<logical_id>                   # present once a task is cancelled, by any process; the supervisor honours it instead of retrying
     nodes/<node_short>/                     # the ATTEMPT id; the branch keeps the LOGICAL one
       prompt.md                           # the exact bytes fed to fd0
       stream.jsonl                        # RAW provider stdout, verbatim, never rewritten
@@ -1893,6 +1896,12 @@ pub enum FsyncPolicy { Always, Barrier, Interval(Duration), Never }
 Startup repairs a torn tail: a crash mid-write leaves a partial last line, so `open` seeks back to
 the last newline and truncates. `seq` is rebuilt from the tail so a restart continues the sequence
 rather than forking it.
+
+One other process may append: `swamp cancel` (and `k` in `swamp watch`) journals a task's
+`NodeStateChanged -> Cancelled` into a run it does not own, through `writer::append_shared`, which
+never truncates and waits out a line the owner is still writing. Before every append the owner's
+writer checks whether the file grew behind its back and continues `seq` past whatever it finds, so
+the fold never drops a line as a replay.
 
 ### 7.4 Fold
 

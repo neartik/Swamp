@@ -197,12 +197,14 @@ Inside tmux with no `swamp board` attached, chat prints a one-line hint pointing
 | Command | What it does |
 |---|---|
 | `swamp run <TASK>` | One-shot. `--no-brain` sends the task straight to one worker. `--tier`, `--provider`, `--account`, `--isolation`, `--detach`. |
-| `swamp trace [RUN\|last\|-2]` | Render a run tree: nodes, attempts, accounts, failures, cost. `--events`, `--raw`, `--follow`, `--failed`, `--json`. |
+| `swamp trace [RUN\|last\|-2]` | Render a run tree: nodes, attempts, accounts, failures, cost. `--events`, `--raw`, `--follow`, `--failed`, `--json`, `--dispatch <ID>` for one dispatch, `--group-by dispatch` for one section per dispatch. |
+| `swamp dispatches [RUN\|last]` | One row per dispatch of a run: call seq, age, tasks, per-state counts, cost, caller. `--failed`, `--follow`, `--json`. |
+| `swamp dispatch <ID>` | One dispatch's task tree: attempts, accounts, models, why a task is blocked or was rejected, and what it dispatched in turn. `--json`; the shape is in [docs/DISPATCH.md](docs/DISPATCH.md). |
 | `swamp watch [RUN\|last]` | Live read-only TUI. Attach from a second terminal while a run is going. |
 | `swamp board` | Read-only dispatch board: which account works on what, across every live run. `--run`, `--all`, `--interval`, `--once`, `--json`. Meant to sit in a tmux pane beside `swamp chat`. |
 | `swamp doctor` | Health checks. `--probe` calls each account's CLI, `--schema` reports adapter drift, `--reap` removes stale worktrees and pidfiles, and sweeps `~/.swamp/sock` for sockets no process is listening on, `--fix` creates the directories and the git exclude. Exit 1 on any error, so CI can gate on it. |
 | `swamp chat` | Interactive brain session. |
-| `swamp runs`, `swamp resume`, `swamp cancel` | List runs, recover an interrupted one (`--plan` first, it spends nothing), stop one. |
+| `swamp runs`, `swamp resume`, `swamp cancel` | List runs, recover an interrupted one (`--plan` first, it spends nothing), stop one. `swamp cancel` takes a run, a node or a dispatch id and works from any terminal: every live node it names is killed and journaled as cancelled, and the supervising run does not retry it. |
 | `swamp accounts` | Health, in-flight count, cooldowns, lifetime spend, including the brain's. Entries for ids no longer in the config are listed under `not in config`. Also `cooldown`, `clear`, `enable`, `disable`, `reset [ID]`. |
 | `swamp usage` | Per-account tokens and quota windows, the same table as `/usage` in chat. `--probe` forces a fresh out-of-band read first; `--json` for machine-readable output. |
 | `swamp diff`, `swamp adopt`, `swamp worktrees` | Inspect a worker's patch, land it, manage the worktrees. A node is named by its full id, either short id (the attempt's, printed by `swamp trace`, or the logical one in the branch name) or a prefix, searched across every run; `last` and `-2` name a run and resolve to its node. |
