@@ -1,5 +1,9 @@
 # Bugs
 
+Every entry below is resolved; there are no open bugs. Each names the fix and the tests that pin
+it, and `CHANGELOG.md` carries the same fixes. New bugs go here as `Status: open` until they are
+fixed.
+
 ## CTRL + D
 
 Status: resolved.
@@ -29,9 +33,16 @@ The system prompt now sets a read budget before the first `swamp_dispatch`
 the tier rubric at low: low for mechanical and exploratory work, mid for normal changes, high
 only for design and review.
 
+The delegation is now measured, not only asked for: `swamp trace`, `swamp dispatches` and the
+board header show the brain's own tool calls before its first dispatch against the budget and its
+share of the cost, and warn past the budget (`docs/DISPATCH.md`, "Delegation").
+
 Tests:
 - `tests/brain_session.rs`: `the_prompt_sets_a_read_budget_and_starts_at_low_tier`, with the
   `system_prompt_interactive` and `system_prompt_one_shot` snapshots
+- `tests/journal_fold.rs`: `brain_self_work_counts_the_brain_calls_before_its_first_dispatch`,
+  `reads_journaled_after_the_dispatch_they_preceded_still_count`
+- `tests/e2e_brain.rs`: `the_brain_reads_before_its_dispatch_are_counted_against_the_budget`
 
 ## Tools
 
@@ -50,4 +61,5 @@ Tests:
 - `tests/parse_claude.rs`:
   `the_default_worker_accepts_edits_and_may_run_bash_without_bypassing_permissions`,
   `read_only_isolation_still_denies_the_edit_tools_the_default_allows`
-- `tests/doctor.rs`: `the_default_config_gives_no_permission_warning`
+- `tests/doctor.rs`: `the_default_config_gives_no_permission_warning`,
+  `schema_checks_the_permission_mode_spelling_against_the_cli_help`

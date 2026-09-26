@@ -2089,7 +2089,7 @@ run_01JZQ8  ~/projects/api  base 9f3c1ad  started 14:02:11  4m12s  ~$1.84  1.2M 
 
 usage  in 1.2M  out 84.1k  cache-read 9.4M  cache-write 220k
 cost   ~$1.84   (1 node reported no cost data)
-brain  3/8 calls before the first dispatch, 39% of the cost
+brain  3/8 calls before the first dispatch, 39% of the known cost
 ```
 
 The leading column is the ATTEMPT node id: it names `nodes/<node_short>/` and is what `swamp
@@ -2351,7 +2351,7 @@ version = 1
 max_nodes_per_run     = 32
 max_depth             = 2          # brain -> worker -> refused (also via SWAMP_DEPTH)
 brain_read_budget     = 8          # tool calls the brain may make before its first dispatch;
-                                   # trace, dispatches and the board warn past it
+                                   # trace, dispatches and the board header warn past it
 worker_timeout        = "25m"
 grace_period          = "5s"       # SIGTERM -> SIGKILL window; also how long quitting chat waits
 max_prompt_bytes      = 200000
@@ -2372,7 +2372,8 @@ reserve_brain_slot = true          # keep this account out of the worker pool
 # works is "acceptEdits" plus "Bash" in allow_tools, here and for the workers below. The
 # trade-off is real: an allowed Bash runs commands without asking, the same trust you extend
 # to a CLI agent in your own shell, and a worktree is a directory, not a sandbox.
-# deny_tools below still keeps the brain from editing files.
+# deny_tools below still keeps the brain from editing files. The spelling is the CLI's own:
+# `swamp doctor --schema` checks it against `claude --help`.
 permission_mode    = "acceptEdits"
 include_partial_messages = true    # smooth chat streaming; workers keep this off
 # Every mcp__swamp__* tool is allowed automatically, from the registry: the brain answers no
