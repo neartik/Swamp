@@ -161,9 +161,10 @@ to answer a follow-up, so it is told to end by naming the nodes worth landing an
 `swamp chat` (and bare `swamp`) draws an inline terminal UI: finished blocks scroll into your
 terminal's own scrollback, where the mouse can still select them, and only the live tail is
 redrawn. Assistant text renders as markdown while it streams, and a `swamp_dispatch` call opens
-a live worker board, folded from the same journal `swamp watch` reads: one row per worker with
-its spinner, tier, account, model, elapsed time and cost, and, when it lands, its branch and
-`+N -M`. When stdout is not a terminal the whole thing falls back to the plain transcript, so
+a live block for the dispatch it issued, folded from the same journal `swamp watch` reads: one
+row per task, queued, blocked and rejected ones included, stuck ones first, with its tier,
+account, model, elapsed time and cost, why it waits or was refused, and, when it lands, its
+branch and `+N -M`. The status line counts open dispatches and running, stuck and queued tasks. When stdout is not a terminal the whole thing falls back to the plain transcript, so
 pipes, CI and `swamp run` are unaffected.
 
 The keys are in [Keys](#keys), with every other surface's.

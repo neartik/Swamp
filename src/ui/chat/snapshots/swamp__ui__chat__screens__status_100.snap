@@ -1,0 +1,5 @@
+---
+source: src/ui/chat/screens.rs
+expression: "status(&mut app, 100)"
+---
+  ? for shortcuts        ⏵⏵ dispatch mid      1 dispatch · 2 running · 1 stuck · 1 queued · ~$0.43

@@ -403,7 +403,9 @@ glyph is width 1 under `unicode_width` except the multi-cell strings noted.
 | brain spinner | `·` `✢` `✳` `✶` `✻` `✽` | `.` `o` `O` `0` `@` `*` |
 | worker spinner | `⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏` | `.oOo` |
 | succeeded / failed / cancelled / orphaned | `✔` `✘` `⊘` `?` | `+` `x` `/` `?` |
+| rejected / blocked | `⊗` `⏸` | `X` `~` |
 | queued / leased | `·` `◦` | `.` `o` |
+| board: fold / folded / brain | `▾` `▸` `◆` | `v` `>` `*` |
 | mode marker | `⏵⏵` | `>>` |
 | token arrow | `↓` | `v` |
 | ellipsis | `…` | `...` |
@@ -545,79 +547,140 @@ parses as JSON, per-tool rules apply - `swamp_dispatch` -> `"{n} tasks"`, `swamp
 the short node id or `"{n} nodes"`, `swamp_note` -> first 40 chars. Otherwise whitespace is collapsed and the string is
 `fmt::truncate`d to `width - name.len() - 6`. The `mcp__swamp__` prefix is stripped from the name.
 
-### 3.4 swamp_dispatch, two workers live
+### 3.4 swamp_dispatch, live
+
+A `swamp_dispatch` block binds to the dispatch its call issued: in `admit()`, every
+`DispatchView` whose caller is the brain and that no block holds yet binds to the newest open
+`swamp_dispatch` block without one, or to a block of its own when no call is waiting (a resumed
+run). Its rows then come from `journal::inspect::detail(view, id, now).tasks`, the same shape
+`swamp dispatch --json` prints, so a task that is queued, blocked before its lease or rejected has
+a row from the moment the dispatch is journaled. A schema-1 run has no dispatch to bind to and
+keeps the old path: the brain's children, as they appear. Nested dispatches are the board's, not
+chat's.
 
 ```
-● swamp_dispatch(2 tasks)
-  ⎿  ⠹ 2 running · 0 done · ~$0.19 · 1m04s
-     ⠹ f3a91c  [low ]  add pagination to /users                  main/sonnet-4     1m04s   ~$0.08
-     ⠙ 7c02de  [mid ]  backfill the users index                  alt/sonnet-4        48s   ~$0.11
+● swamp_dispatch(5 tasks)
+  ⎿  ⠋ #1 9g5f18 · 2 running · 1 blocked · 1 queued · 1 done · ~$0.34 · 3m20s
+     ⠋ 9g5f01    [mid ]  add pagination to /users                main/sonnet-4-5      3m10s   ~$0.08
+     ⠙ 9g5f09·2  [high]  backfill the users index                alt/opus-4-1         2m48s   ~$0.22
+       └ attempt 1 9g5f08 on main: rate_limited (five_hour) after 41s
+     ⏸ 9g5f04    [mid ]  rebuild the index                                            3m20s
+       └ until 22:54 (in 38m) · main at capacity · alt quota stop
+     · 9g5f0a    [low ]  write the changelog                                          3m20s
+     ✔ 9g5f05    [low ]  add the /users route                    main/sonnet-4-5      2m10s   ~$0.04
 
-✻ Orchestrating… (esc to interrupt · 1m12s · 2 workers running)
+· Orchestrating… (esc to interrupt · 4m12s · 2 workers running)
 ────────────────────────────────────────────────────────────────────────────────────────────────────
-> while those run, check whether the index already exists█
+>
 ────────────────────────────────────────────────────────────────────────────────────────────────────
-  ? for shortcuts            ⏵⏵ dispatch mid · 2 running           run 4x4kj6 · 2 running · ~$0.19
+  ? for shortcuts        ⏵⏵ dispatch mid      1 dispatch · 2 running · 1 stuck · 1 queued · ~$0.43
 ```
 
-The headline row is the batch summary and is what survives collapse. Row layout from the body
-column (5):
+At 62 columns the tier cell is the last optional one left, the title keeps its 12 columns and the
+headline sheds its trailing counts:
+
+```
+● swamp_dispatch(5 tasks)
+  ⎿  ⠋ #1 9g5f18 · 2 running · 1 blocked · ~$0.34 · 3m20s
+     ⠋ 9g5f01    [mid ]  add paginat…   3m10s   ~$0.08
+     ⠙ 9g5f09·2  [high]  backfill th…   2m48s   ~$0.22
+       └ attempt 1 9g5f08 on main: rate_limited (five_hour) a…
+     ⏸ 9g5f04    [mid ]  rebuild the…   3m20s
+       └ until 22:54 (in 38m) · main at capacity · alt quota …
+     · 9g5f0a    [low ]  write the c…   3m20s
+     ✔ 9g5f05    [low ]  add the /us…   2m10s   ~$0.04
+
+· Orchestrating… (esc to interrupt · 4m12s · 2 workers running
+──────────────────────────────────────────────────────────────
+>
+──────────────────────────────────────────────────────────────
+  ? for shortcuts    2 running · 1 stuck · 1 queued · ~$0.43
+```
+
+- **Head**: unchanged, `● swamp_dispatch(args)`.
+- **Headline**: `⎿  {glyph} #N {short} · {counts} · {cost} · {elapsed}`, passed through
+  `ui::order::fit` in `width - 7`: trailing queued/done/cancelled counts drop first, then the short
+  id, then the cost; failures and running and blocked counts never do. The glyph is a spinner
+  while anything runs, else `⏸` while anything is blocked, `·` while anything is queued, `✔` when
+  everything succeeded, `⊗` when everything was rejected, `✘` otherwise.
+- **Rows** are ranked like the board's (`ui::order::rank`: failures, running, blocked, queued,
+  done), ties in dispatch order. The id is the live attempt's, `·N` on a retry. Elapsed is the
+  live attempt's, the wait since the dispatch for a task that has not started, blank for one that
+  ended without starting. Cost is the task's rollup, every attempt included, blank when nothing
+  reported one.
+- **`└` lines**, indent 7: earlier attempts (`attempt 1 9g5f08 on main: rate_limited (five_hour)
+  after 41s`, one line past two), the wait (`until 22:54 (in 38m) · main at capacity · …`, the
+  refusals `NodeBlocked` recorded, as words), `rejected: <reason>` and the failure in `err`, then
+  the branch. A live block shows all of them but the branch.
 
 | Field | Width | Source | Style |
 |---|---|---|---|
-| state glyph | 1 | worker spinner while `Running`, `·`/`◦` when `Queued`/`Leased`, else `fmt::glyph(&state)` | `run` / `ok` / `err` / `meta` |
-| gap | 1 | | |
-| attempt short id | 6 | `rec.id.short()` | `meta` |
-| gap | 2 | | |
+| state glyph | 1 | worker spinner while `Running`, else `Theme::state_glyph` | `run` / `ok` / `err` / `meta` |
+| attempt id | 8 | `short()`, `·N` on a retry | `meta` |
 | tier | 6 | `format!("[{}]", fmt::pad(tier, 4))` | `meta`, `tier_hi` for `high` |
-| gap | 2 | | |
-| title | flex | `fmt::truncate(&row.title, flex)` | `name` |
-| gap | 2 | | |
-| account/model | 18 | `trace::account_cell` shortened to `main/sonnet-4` | `meta` |
-| gap | 2 | | |
+| title | flex | `fmt::truncate(&row.title, flex)` | `name`, `meta` once ended |
+| account/model | 18 | `main/sonnet-4-5` | `meta` |
 | elapsed | 6, right | `fmt::duration` | `meta` |
-| gap | 2 | | |
-| cost | 7, right | `fmt::cost` | `meta` |
+| cost | 7, right | the task rollup | `meta` |
 
-`flex = width.saturating_sub(60).clamp(12, 40)`. Below 78 columns the account/model cell drops,
-below 62 the tier cell drops, below 50 the cost drops. Glyph, id and title never drop. The
-account/model cell drops its provider prefix before it drops the account id.
+Gaps are two columns. `flex = (width - 62).clamp(12, 40)`. Below 78 columns the account/model cell
+drops, below 62 the tier cell drops, below 50 the cost drops. Glyph, id and title never drop.
 
-The board is a live block: it lives in the viewport and redraws every tick. With more than 8
-workers it shows the 8 least-advanced rows plus `     … +N more (ctrl+o to expand)`; the headline
-always shows the true totals.
+With more than 8 rows a collapsed block keeps the first 8 in rank order plus
+`     … +N more (ctrl+o to expand)`; the headline always counts every task.
 
 Input stays usable while workers run. Submitting during a turn queues the text
-(`pending_send: Option<String>`) and sends it on `TurnDone`; the status line shows `1 queued`.
+(`pending_send: Option<String>`) and sends it on `TurnDone`; the status line shows `1 pending`.
 
-### 3.5 Workers finished, board committed
+**Status line.** While a dispatch is open or any task is live, the right zone counts it with the
+board header's own definitions: `[1 pending · ]N dispatch(es) · N running · N stuck · N queued ·
+~$X`, `stuck` and `queued` only when non-zero. When it does not fit, `dispatches`, then `queued`,
+then the cost drop, then the left zone; `pending`, `running` and `stuck` never do. The centre,
+`⏵⏵ dispatch mid`, shows at 80 columns or more with two spaces either side. With nothing open the
+right zone is `run 9g5fav · {idle|N turns|1 pending} · ~$X` as before.
+
+```
+  ? for shortcuts        ⏵⏵ dispatch mid      1 dispatch · 2 running · 1 stuck · 1 queued · ~$0.43
+  ? for shortcuts    2 running · 1 stuck · 1 queued · ~$0.43
+  ? for shortcuts  2 running · 1 stuck
+  ? for shortcuts                 1 pending · 1 dispatch · 2 running · 1 stuck · 1 queued · ~$0.43
+```
+
+### 3.5 Dispatch settled, block committed
+
+A bound block commits once its call returned and its dispatch settled (`DispatchSettled`); an
+unbound one once every task it owns is terminal. Committed, it prints every `└` line, branches
+included, and a totals row: `{tasks} · {counts} · {elapsed} · {cost}`, then, in `accent`, the one
+string in the block meant to be copied: `(swamp adopt <id>)` when a task left a branch, else
+`(swamp dispatch <short>)` when a task failed, was rejected or was cancelled.
+
+```
+● swamp_dispatch(1 task)
+  ⎿  ⊗ #2 9g5f1c · 1 rejected · 0s
+     ⊗ 9g5f0c    [low ]  probe the migration
+       └ rejected: max_nodes_per_run
+     1 task · 1 rejected · 0s   (swamp dispatch 9g5f1c)
+```
+
+A schema-1 batch, two workers, one landed:
 
 ```
 ● swamp_dispatch(2 tasks)
-  ⎿  ✔ 1 done · ✘ 1 failed · ~$0.23 · 2m10s
-     ✔ f3a91c  [low ]  add pagination to /users                  main/sonnet-4     2m10s   ~$0.14
-       └ branch swamp/4x4kj6/f3a91c-1   +21 -1   2 files
-     ✘ 7c02de  [mid ]  backfill the users index                  alt/sonnet-4      1m52s   ~$0.09
-       └ PermissionDenied: Bash x2
-     2 nodes · 1 failed · 2m14s · ~$0.23   (swamp adopt f3a91c)
-
-● The handler change landed on `swamp/4x4kj6/f3a91c-1`. The backfill worker was denied Bash twice,
-  so the migration never ran. I'll re-dispatch it with Bash allowed.
-
-      swamp diff f3a91c --stat
-      swamp adopt f3a91c
+  ⎿  ✘ 1 failed · 1 done · ~$0.23 · 2m10s
+     ✘ 9g5f02    [mid ]  backfill the users index                alt/sonnet-4         2m06s   ~$0.09
+       └ PermissionDenied: 2 tool calls were auto-denied: Bash x2
+     ✔ 9g5f01    [low ]  add pagination to /users                main/sonnet-4        2m10s   ~$0.14
+       └ branch swamp/9g5fav/9g5f01-1   +21 -1   2 files
+     2 tasks · 1 failed · 1 done · 2m10s · ~$0.23   (swamp adopt 9g5f01)
 ```
 
-- Detail lines indent 7, connector `└ ` in `meta`.
 - The branch line reuses `trace::block`'s exact wording (`branch {b}   +{i} -{d}   {n} files`) and
   is omitted when `work` is empty; a zero-diff worker prints no branch line, matching `trace`.
-- The failure line uses `trace::failure_summary` verbatim, in `err`, so chat and `swamp trace`
+- The failure line uses `trace::failure_detail` verbatim, in `err`, so chat and `swamp trace`
   never disagree.
-- The totals row is `meta`; the trailing `(swamp adopt <id>)` appears only when at least one node
-  has non-empty `work` and is `accent`, because it is the one thing in the block meant to be copied.
 - The brain's closing text follows as an ordinary assistant block. Nothing about it is special.
 
-If the tool returns before the nodes finish (`wait: false`, or `max_wait_s` elapsed), the board
+If the tool returns before the tasks finish (`wait: false`, or `max_wait_s` elapsed), the block
 stays live and subsequent assistant text commits above it. That is correct: it is the state the
 brain is actually in.
 
@@ -634,10 +697,10 @@ brain is actually in.
 
 A node that finds every account of its provider cooling, past its measured `quota_stop_at`, or
 hard-gated does **not** fail: `AccountPool::acquire_node` journals one `NodeBlocked { until, why }`
-for it and waits, so `NodeState::Blocked` renders exactly like `Queued` in the board above -
-dim `·` glyph, account and elapsed both `-` - for as long as the wait lasts, and counts toward
-`running` in the headline, never toward `failed`. The reason and the reset time are not spelled out
-in the row, but the wait is never silent: chat commits one `Notice` block per blocked node,
+for it and waits, so `NodeState::Blocked` renders as a `⏸` row with its wait as elapsed and a
+`└ until 22:54 (in 38m) · main at capacity · …` line naming the refusals, for as long as the wait
+lasts, and counts as `blocked` in the headline and `stuck` in the status line, never as `failed`.
+The wait is never silent: chat also commits one `Notice` block per blocked node,
 `⏸ every anthropic account is at its limit · earliest reset 22:57 (in 41m) · esc esc to cancel`
 (`fmt::blocked_notice`), and `swamp run`, which has no live view to render one in, prints the same
 line on stderr with `ctrl-c to cancel`. The journal line and a `WARN`-level log, `every anthropic
@@ -728,7 +791,7 @@ handled (Windows consoles repeat otherwise).
 | `enter` | popup open | complete the selected command into the input, close the popup, do not submit |
 | `enter` | buffer ends in `\` | replace the `\` with a newline |
 | `enter` | buffer non-empty | commit the `> ` bar, then run the slash command or `Effect::Send` |
-| `enter` | turn running | queue the text, status shows `1 queued`, sent on `TurnDone` |
+| `enter` | turn running | queue the text, status shows `1 pending`, sent on `TurnDone` |
 | `enter` | buffer empty | nothing |
 | `shift+enter`, `alt+enter` | | insert a newline |
 | `esc` | popup or overlay open | close it, highest priority |

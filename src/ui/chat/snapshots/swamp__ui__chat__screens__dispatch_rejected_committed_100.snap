@@ -1,0 +1,9 @@
+---
+source: src/ui/chat/screens.rs
+expression: text
+---
+● swamp_dispatch(1 task)
+  ⎿  ⊗ #2 9g5f1c · 1 rejected · 0s
+     ⊗ 9g5f0c    [low ]  probe the migration
+       └ rejected: max_nodes_per_run
+     1 task · 1 rejected · 0s   (swamp dispatch 9g5f1c)

@@ -1,6 +1,7 @@
 //! Every screen state in `docs/UI.md` §3, drawn through a `TestBackend` and snapshotted.
 
 use crate::brain::BrainEvent;
+use crate::journal::record::{JournalEvent, JournalLine};
 use crate::model::core::{Cost, CostBasis, Usage};
 use crate::ui::chat::app::{App, Effect, Msg, Phase};
 use crate::ui::chat::tests_support as fx;
@@ -217,6 +218,105 @@ fn a_finished_board_commits_with_its_detail_lines() {
         app.blocks.is_empty(),
         "a settled board leaves the live area"
     );
+}
+
+/// The P4 fixture up to dispatch #2, and from there on.
+fn p4_split() -> (Vec<JournalLine>, Vec<JournalLine>) {
+    let lines = fx::p4_journal();
+    let at = lines
+        .iter()
+        .position(|l| {
+            matches!(&l.event, JournalEvent::DispatchIssued { record } if record.id == fx::did("1c"))
+        })
+        .expect("dispatch #2");
+    let (first, rest) = lines.split_at(at);
+    (first.to_vec(), rest.to_vec())
+}
+
+/// Dispatch #1 bound to its call, four minutes into the turn.
+fn p4_live(width: u16) -> App {
+    let mut app = fx::app(width);
+    app.take_welcome();
+    app.reduce(Msg::Brain(BrainEvent::ToolCall {
+        id: "d1".into(),
+        name: "mcp__swamp__swamp_dispatch".into(),
+        preview: r#"{"tasks":[{},{},{},{},{}]}"#.into(),
+    }));
+    app.reduce(Msg::Journal(p4_split().0));
+    app.phase = Phase::Working {
+        since: app.now - time::Duration::seconds(252),
+    };
+    app
+}
+
+#[test]
+fn a_bound_dispatch_block_renders_from_the_dispatch() {
+    let mut app = p4_live(100);
+    let wide = live(&mut app, 100);
+    insta::assert_snapshot!("dispatch_live_100", wide);
+    insta::assert_snapshot!("dispatch_live_62", live(&mut app, 62));
+    assert!(
+        wide.contains("#1 9g5f18 · 2 running · 1 blocked · 1 queued · 1 done · ~$0.34 · 3m20s"),
+        "{wide}"
+    );
+    assert!(
+        wide.contains("9g5f09·2"),
+        "the live attempt, retried: {wide}"
+    );
+    assert!(wide.contains("└ attempt 1 9g5f08 on main: rate_limited (five_hour) after 41s"));
+    assert!(wide.contains("└ until 22:54 (in 38m) · main at capacity · alt quota stop"));
+}
+
+#[test]
+fn a_rejected_dispatch_commits_with_its_reason() {
+    let mut app = p4_live(100);
+    app.reduce(Msg::Brain(BrainEvent::ToolCall {
+        id: "d2".into(),
+        name: "swamp_dispatch".into(),
+        preview: r#"{"tasks":[{}]}"#.into(),
+    }));
+    assert!(
+        app.reduce(Msg::Journal(p4_split().1)).is_empty(),
+        "the call is still out"
+    );
+    let out = app.reduce(Msg::Brain(BrainEvent::ToolDone {
+        id: "d2".into(),
+        name: "swamp_dispatch".into(),
+        ok: true,
+        detail: None,
+    }));
+    let text = committed(out, 100);
+    insta::assert_snapshot!("dispatch_rejected_committed_100", text);
+    assert!(text.contains("(swamp dispatch 9g5f1c)"), "{text}");
+    assert_eq!(
+        app.blocks
+            .iter()
+            .filter(|b| matches!(b, crate::ui::chat::blocks::Block::Dispatch(_)))
+            .count(),
+        1,
+        "#1 is still open"
+    );
+}
+
+#[test]
+fn the_status_line_counts_open_work() {
+    let status = |app: &mut App, width: u16| {
+        app.set_width(width);
+        screen(vec![app.status_line()], width)
+    };
+    let mut app = p4_live(100);
+    insta::assert_snapshot!("status_100", status(&mut app, 100));
+    insta::assert_snapshot!("status_62", status(&mut app, 62));
+    insta::assert_snapshot!("status_40", status(&mut app, 40));
+    app.pending_send = Some("and the docs".into());
+    let pending = status(&mut app, 100);
+    insta::assert_snapshot!("status_pending_100", pending);
+    assert!(
+        pending.contains("1 pending · 1 dispatch · 2 running · 1 stuck"),
+        "{pending}"
+    );
+    let mut idle = fx::app(100);
+    insta::assert_snapshot!("status_idle_100", status(&mut idle, 100));
 }
 
 // ---------------------------------------------------------------- 3.6

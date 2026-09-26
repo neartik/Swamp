@@ -1,0 +1,5 @@
+---
+source: src/ui/chat/screens.rs
+expression: pending
+---
+  ? for shortcuts                 1 pending · 1 dispatch · 2 running · 1 stuck · 1 queued · ~$0.43

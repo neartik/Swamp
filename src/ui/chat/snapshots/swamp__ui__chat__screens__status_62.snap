@@ -1,0 +1,5 @@
+---
+source: src/ui/chat/screens.rs
+expression: "status(&mut app, 62)"
+---
+  ? for shortcuts    2 running · 1 stuck · 1 queued · ~$0.43
