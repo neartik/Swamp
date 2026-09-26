@@ -7,7 +7,7 @@ ok    environment/repo             [repo] HEAD [sha], dirty
 WARN  environment/.swamp           [repo]/.swamp is not listed in .git/info/exclude; run any swamp command from the repo root to add it
 ok    environment/state            [home]/.swamp writable
 ok    environment/swamp            [exe] (the MCP bridge is spawned by absolute path)
-ok    environment/depth            not inside a worker
+[lvl] environment/depth            [depth]
 ok    accounts/main                [repo]/bin/worker-main -> [repo]/bin/worker-main (anthropic) env TEST_CONFIG_DIR
 ok    accounts/alt                 [repo]/bin/worker-alt -> [repo]/bin/worker-alt (anthropic) env TEST_CONFIG_DIR
 WARN  providers/main/quota         no quota source; tokens only, utilization is estimated

@@ -1,7 +1,10 @@
 //! WP4: the attempt loop. Who rotates, who retries, and who must never do either.
 
+mod common;
+
 use async_trait::async_trait;
 use camino::Utf8PathBuf;
+use common::journal::well_formed;
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -17,7 +20,7 @@ use swamp::model::core::NodeState;
 use swamp::model::core::{
     AccountId, Cost, CostBasis, LimitScope, NodeKind, Provider, SessionHandle, Tier, WorkspaceRef,
 };
-use swamp::model::dispatch::{DispatchState, NodeTransition, Phase};
+use swamp::model::dispatch::{DispatchState, Phase};
 use swamp::model::failure::{Detector, Failure};
 use swamp::model::node::WorkResultRef;
 use swamp::model::result::{IsolationMode, TaskRequest};
@@ -407,12 +410,6 @@ impl Projection for Collect {
     fn finish(self) -> Vec<JournalLine> {
         self.0
     }
-}
-
-/// Chained (each `from` is the previous `to`) and never leaving a terminal state.
-fn well_formed(chain: &[NodeTransition]) -> bool {
-    chain.iter().all(|t| !t.from.is_terminal())
-        && chain.windows(2).all(|w| Phase::from(&w[0].to) == w[1].from)
 }
 
 // ---------------------------------------------------------------- tests

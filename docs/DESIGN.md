@@ -1971,9 +1971,10 @@ impl JournalHandle {
 }
 
 pub enum FsyncPolicy { Always, Barrier, Interval(Duration), Never }
-// Barrier is the default: RunStarted / NodeSpawned / ProcessStarted / WorktreeCreated /
-// NodeFinished / Adopted / RunFinished sync immediately; high-frequency text batches at
-// 64 records or 250ms.
+// Barrier is the default: RunStarted / NodeSpawned / ProcessStarted / ProcessExited /
+// WorktreeCreated / NodeFinished / Adopted / DispatchIssued / TaskQueued / DispatchRejected /
+// DispatchSettled / RunFinished sync immediately; high-frequency text batches at 64 records
+// or 250ms.
 ```
 
 Startup repairs a torn tail: a crash mid-write leaves a partial last line, so `open` seeks back to
@@ -2067,14 +2068,14 @@ pub enum Recovery {
 pub fn plan(view: &RunView, paths: &RunPaths) -> Vec<Recovery>;
 ```
 
-`swamp` on startup scans for runs with no `RunFinished`, prints them, and offers `swamp resume`.
-Nothing auto-resumes, because relaunching workers spends quota.
+Interrupted runs (no `RunFinished`) are listed by `swamp runs --interrupted`; nothing auto-resumes,
+because relaunching workers spends quota.
 
 ### 7.6 `swamp trace`
 
 ```
 $ swamp trace last
-run_01JZQ8  ~/projects/api  base 9f3c1ad  started 14:02:11  4m12s  ~$1.84  1.2M tok
+run q69g5f  ~/projects/api  base 9f3c1ad  started 14:02:11  4m12s  ~$1.84  1.2M tok
 
 * a13f70  brain            anthropic/main  opus     4m12s  214k  ~$0.71  ok
   |
@@ -2118,8 +2119,9 @@ broadcast channel when it happens to be the same process. It never requires the 
 alive, so an interrupted run is inspectable with the same tool, and `swamp watch` from a second
 terminal works against a run started elsewhere.
 
-- Left 40%: the run tree, spinner and elapsed timer and live token counter on running nodes.
-- Right 60%: the selected node's normalized event log; `r` toggles the raw JSONL view.
+- Left: the run tree, `ui.tree_width` columns (default 46), spinner and elapsed timer and live
+  token counter on running nodes.
+- Right: the rest, the selected node's normalized event log; `r` toggles the raw JSONL view.
 - Footer: per-account utilization gauges coloured by `Health`, with cooldown countdowns.
 
 Keys: up/down select, `r` raw toggle, `d` open the node diff in `$PAGER`, `k` cancel node (asks

@@ -3,9 +3,9 @@
 mod common;
 
 use camino::Utf8PathBuf;
-use std::str::FromStr;
+use common::journal::{at, line, nid, rid};
 use std::time::Duration;
-use swamp::ids::{NodeId, RunId};
+use swamp::ids::NodeId;
 use swamp::journal::fold::RunView;
 use swamp::journal::record::{JournalEvent, JournalLine, SCHEMA_VERSION};
 use swamp::model::core::{
@@ -16,37 +16,6 @@ use swamp::model::failure::{Detector, Failure};
 use swamp::model::node::{NodeRecord, WorkResultRef};
 use swamp::ui::fmt;
 use swamp::ui::trace::{Follower, TraceOpts, render};
-use time::OffsetDateTime;
-
-const CROCKFORD: &[u8] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
-
-fn ulid_text(i: usize) -> String {
-    let hi = CROCKFORD[(i / 32) % 32] as char;
-    let lo = CROCKFORD[i % 32] as char;
-    format!("01ARZ3NDEKTSV4RRFFQ69G5F{hi}{lo}")
-}
-
-fn nid(i: usize) -> NodeId {
-    NodeId::from_str(&ulid_text(i)).expect("node id")
-}
-
-fn rid() -> RunId {
-    RunId::from_str(&ulid_text(0)).expect("run id")
-}
-
-fn at(offset: i64) -> OffsetDateTime {
-    OffsetDateTime::from_unix_timestamp(1_700_000_000 + offset).expect("timestamp")
-}
-
-fn line(seq: u64, node: Option<NodeId>, event: JournalEvent) -> JournalLine {
-    JournalLine {
-        seq,
-        at: at(seq as i64),
-        run: rid(),
-        node,
-        event,
-    }
-}
 
 struct Node {
     id: NodeId,
@@ -69,7 +38,7 @@ struct Node {
 fn record(n: &Node) -> NodeRecord {
     NodeRecord {
         id: n.id,
-        run_id: rid(),
+        run_id: rid(0),
         parent: n.parent,
         logical: n.logical,
         attempt: n.attempt,
@@ -568,10 +537,7 @@ fn unstarted_tasks_render_their_state_and_reason() {
     let cells: Vec<&str> = queued.split_whitespace().collect();
     let dashes = cells.iter().filter(|c| **c == "-").count();
     assert_eq!(dashes, 5, "account, model, time, tokens and cost: {queued}");
-    assert!(
-        queued.contains(&common::journal::nid(4).short()),
-        "{queued}"
-    );
+    assert!(queued.contains(&nid(4).short()), "{queued}");
 }
 
 // ---------------------------------------------------------------- dispatches

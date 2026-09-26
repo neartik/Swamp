@@ -19,7 +19,7 @@ use swamp::journal::{Journal, JournalHandle};
 use swamp::model::core::{
     AccountId, ChangeKind, Cost, CostBasis, EvidenceSource, FileChange, NodeState, Usage,
 };
-use swamp::model::dispatch::{DispatchCounts, DispatchState, NodeTransition, Phase};
+use swamp::model::dispatch::{DispatchCounts, DispatchState, Phase};
 use swamp::model::event::WorkerEvent;
 use swamp::model::failure::{Detector, Failure};
 
@@ -1008,12 +1008,6 @@ fn seq_of(lines: &[JournalLine], pred: impl Fn(&JournalEvent) -> bool) -> usize 
         .iter()
         .position(|l| pred(&l.event))
         .expect("the fixture has the line")
-}
-
-/// Chained (each `from` is the previous `to`) and never leaving a terminal state.
-fn well_formed(chain: &[NodeTransition]) -> bool {
-    chain.iter().all(|t| !t.from.is_terminal())
-        && chain.windows(2).all(|w| Phase::from(&w[0].to) == w[1].from)
 }
 
 #[test]

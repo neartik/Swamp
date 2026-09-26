@@ -47,8 +47,9 @@ the brain. Every surface prints it:
   budget it is the first header cell to give way; past it the cell turns red, reads
   `brain 11/8 over`, and outlasts the queued count and the cost. The header shows the tailed run
   whose brain made the most calls.
-- `--json`: `swamp dispatches --json` and `swamp trace --json` carry a top-level `brain`, and each
-  run of `swamp board --json` carries one, `null` for a run without a brain:
+- `--json`: `swamp dispatches --json` and `swamp trace --json` (without `--dispatch` or `--node`)
+  carry a top-level `brain`, and each run of `swamp board --json` carries one, `null` for a run
+  without a brain:
 
 ```json
 "brain": {
@@ -242,8 +243,9 @@ retrying), `state` and `ok` follow the task, and so does `failure` once the task
 
 ### `swamp trace --json`
 
-The document carries a top-level `brain` (see [Delegation](#delegation)) unless `--dispatch`
-narrows it. With `--dispatch <ID>`, `tree`, `nodes` and `events` hold only that dispatch's tasks and what they
+The document carries a top-level `brain` (see [Delegation](#delegation)) unless `--dispatch` or
+`--node` narrows it. `--node <ID> --json` prints only that node's `NodeRecord`: no `brain`, `tree`,
+`totals` or `events`. With `--dispatch <ID>`, `tree`, `nodes` and `events` hold only that dispatch's tasks and what they
 dispatched in turn, `totals` is the dispatch's rollup, and a `dispatch` field names it.
 `--group-by dispatch` has no JSON form (use `swamp dispatches --json`) and does not combine with
 `--follow`; `--dispatch` does not combine with `--node`.

@@ -684,6 +684,10 @@ async fn doctor_output_is_stable() {
     let text: String = out
         .iter()
         .map(|c| {
+            // SWAMP_DEPTH is ambient: a worker running the gate would otherwise flip this line.
+            if c.name == "environment/depth" {
+                return format!("{:<5} {:<28} [depth]\n", "[lvl]", c.name);
+            }
             format!(
                 "{:<5} {:<28} {}\n",
                 c.level.label(),
@@ -693,6 +697,32 @@ async fn doctor_output_is_stable() {
         })
         .collect();
     insta::assert_snapshot!("doctor_checks", text);
+}
+
+/// The depth check follows SWAMP_DEPTH, read as-is since the doctor tests share one process.
+#[tokio::test]
+async fn depth_check_follows_swamp_depth() {
+    let f = Fixture::new();
+    let cfg = healthy(&f);
+    let out = checks(&cfg, &f.paths, false, false).await;
+    let depth = out
+        .iter()
+        .find(|c| c.name == "environment/depth")
+        .expect("the environment/depth check");
+    match std::env::var("SWAMP_DEPTH") {
+        Err(_) => {
+            assert_eq!(depth.level, Level::Ok);
+            assert_eq!(depth.detail, "not inside a worker");
+        }
+        Ok(d) => {
+            assert_eq!(depth.level, Level::Warn);
+            assert!(
+                depth.detail.starts_with(&format!("SWAMP_DEPTH={d}:")),
+                "{}",
+                depth.detail
+            );
+        }
+    }
 }
 
 fn run_started(schema: u32) -> String {

@@ -8,7 +8,7 @@ use swamp::journal::record::{JournalEvent, JournalLine};
 use swamp::model::core::{
     AccountId, Cost, CostBasis, NodeKind, NodeState, Provider, Tier, Usage, WorkspaceRef,
 };
-use swamp::model::dispatch::{DispatchCounts, DispatchRecord, Phase, TaskRef};
+use swamp::model::dispatch::{DispatchCounts, DispatchRecord, NodeTransition, Phase, TaskRef};
 use swamp::model::event::WorkerEvent;
 use swamp::model::failure::{Detector, Failure};
 use swamp::model::node::NodeRecord;
@@ -462,4 +462,10 @@ pub fn schema_2_with_reads(reads: usize) -> Vec<JournalLine> {
         .enumerate()
         .map(|(i, (node, event))| line(i as u64, node, event))
         .collect()
+}
+
+/// Chained (each `from` is the previous `to`) and never leaving a terminal state.
+pub fn well_formed(chain: &[NodeTransition]) -> bool {
+    chain.iter().all(|t| !t.from.is_terminal())
+        && chain.windows(2).all(|w| Phase::from(&w[0].to) == w[1].from)
 }
