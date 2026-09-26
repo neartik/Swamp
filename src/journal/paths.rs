@@ -371,6 +371,10 @@ impl RunPaths {
     pub fn result(&self, n: NodeId) -> Utf8PathBuf {
         self.node_dir(n).join("result.json")
     }
+    /// Present once a task was cancelled, by whichever process asked; keyed by the logical id.
+    pub fn cancel_marker(&self, logical: NodeId) -> Utf8PathBuf {
+        self.dir.join("cancel").join(logical.to_string())
+    }
     /// Short by construction. macOS caps a unix socket path at 104 bytes (SUN_LEN) and a repo
     /// can sit arbitrarily deep, so the control socket never lives under the run directory.
     pub fn socket(&self) -> Utf8PathBuf {

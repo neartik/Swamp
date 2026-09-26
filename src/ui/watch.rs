@@ -511,15 +511,29 @@ async fn pager(patch: &camino::Utf8Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// `k` cancels one node, never the run: the TUI is an observer.
+/// `k` cancels one node, never the run: the TUI is an observer, so it cancels the way
+/// `swamp cancel` does from outside the supervising process.
 async fn cancel_node(app: &App, node: NodeId) {
-    if let Some(NodeState::Running { pgid, .. }) = app.view.nodes.get(&node).map(|n| &n.state) {
-        let _ = crate::worker::spawn::terminate(
-            *pgid,
-            std::time::Duration::from_secs(5),
-            crate::worker::spawn::Reaper::Here,
-        )
-        .await;
+    let Some(paths) = app.paths.as_ref() else {
+        return;
+    };
+    let Some(logical) = app.view.nodes.get(&node).map(|n| n.logical) else {
+        return;
+    };
+    let stop = crate::dispatch::cancel::Stop::Kill {
+        grace: std::time::Duration::from_secs(5),
+    };
+    if let Err(e) = crate::dispatch::cancel::cancel_node(
+        paths,
+        &app.view,
+        crate::dispatch::cancel::Sink::Shared,
+        logical,
+        crate::model::core::CancelSource::User,
+        stop,
+    )
+    .await
+    {
+        tracing::warn!("cancelling {}: {e:#}", node.short());
     }
 }
 

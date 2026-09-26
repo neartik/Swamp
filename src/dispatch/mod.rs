@@ -1,4 +1,5 @@
 pub mod account;
+pub mod cancel;
 pub mod cooldown;
 pub mod persist;
 pub mod policy;
@@ -6,6 +7,7 @@ pub mod pool;
 pub mod retry;
 
 pub use account::{Account, AccountState, Health};
+pub use cancel::{Outcome, Sink, Stop, cancel_node};
 pub use policy::SelectionPolicy;
 pub use pool::{AccountPool, Lease, NoCapacity};
 pub use retry::{NodeCtx, NodeOutcome, NodeRunner, run_node};
@@ -13,8 +15,8 @@ pub use retry::{NodeCtx, NodeOutcome, NodeRunner, run_node};
 use crate::config::Config;
 use crate::ids::{CallSeq, DispatchId, NodeId, NodeIds};
 use crate::journal::{JournalEvent, JournalHandle, RunView};
-use crate::model::core::{Cost, CostBasis, NodeKind, NodeState, Provider, Tier};
-use crate::model::dispatch::{DispatchCounts, DispatchRecord, TaskRef, settled_state};
+use crate::model::core::{CancelSource, Cost, CostBasis, NodeKind, NodeState, Provider, Tier};
+use crate::model::dispatch::{DispatchCounts, DispatchRecord, Phase, TaskRef, settled_state};
 use crate::model::failure::Failure;
 use crate::model::node::WorkResultRef;
 use crate::model::result::{IsolationMode, NodeResult, TaskRequest};
@@ -33,6 +35,7 @@ use tokio_util::sync::CancellationToken;
 const DEFAULT_MAX_ATTEMPTS: u32 = 3;
 const DEFAULT_MAX_NODES_PER_RUN: u32 = 32;
 const DEFAULT_MAX_DEPTH: u32 = 2;
+const DEFAULT_GRACE: Duration = Duration::from_secs(5);
 
 pub(crate) fn emit(h: &JournalHandle, node: Option<NodeId>, event: JournalEvent) {
     h.emit(node, event);
@@ -295,14 +298,45 @@ impl Dispatcher {
     }
 
     pub async fn cancel(&self, id: NodeId) -> anyhow::Result<()> {
-        let token = self.cancels.lock().get(&id).cloned();
-        match token {
-            Some(t) => {
-                t.cancel();
-                Ok(())
-            }
-            None => anyhow::bail!("no dispatched node {id}"),
+        self.cancel_as(id, CancelSource::User).await.map(|_| ())
+    }
+
+    /// Cancels the task `id` names (its logical id or any attempt's) through the same helper
+    /// `swamp cancel` uses, so both journal the same transition.
+    pub async fn cancel_as(&self, id: NodeId, by: CancelSource) -> anyhow::Result<Outcome> {
+        let dir = self.journal.paths().dir.clone();
+        let view = tokio::task::spawn_blocking(move || RunView::load(&dir, false)).await??;
+        let logical = view.attempts(id).first().map_or(id, |n| n.logical);
+        let token = self.cancels.lock().get(&logical).cloned();
+        if token.is_none() && !view.tasks.contains_key(&logical) {
+            anyhow::bail!("no dispatched node {id}");
         }
+        // The results map is ahead of the journal on disk: a task it settled has ended.
+        if let Some(r) = self.result(logical).filter(|r| r.state != "running") {
+            let journaled = view.state_of(logical).filter(NodeState::is_terminal);
+            return Ok(Outcome::Ended(journaled.map_or(
+                match r.state {
+                    "succeeded" => Phase::Succeeded,
+                    "cancelled" => Phase::Cancelled,
+                    _ => Phase::Failed,
+                },
+                |s| Phase::from(&s),
+            )));
+        }
+        let grace = self.cfg.limits.grace_period.unwrap_or(DEFAULT_GRACE);
+        let stop = match &token {
+            Some(t) => Stop::Token(t),
+            None => Stop::Kill { grace },
+        };
+        cancel::cancel_node(
+            &self.journal.paths,
+            &view,
+            Sink::Live(&self.journal),
+            logical,
+            by,
+            stop,
+        )
+        .await
     }
 
     pub fn set_base_depth(&self, depth: u32) {
@@ -393,6 +427,11 @@ impl Dispatcher {
 
         let cancel = CancellationToken::new();
         self.cancels.lock().insert(id, cancel.clone());
+        let watcher = tokio::spawn(cancel::watch(
+            (*self.journal.paths).clone(),
+            id,
+            cancel.clone(),
+        ));
 
         let cx = NodeCtx {
             cfg: Arc::clone(&self.cfg),
@@ -416,6 +455,7 @@ impl Dispatcher {
         };
         let spec = self.launch_spec(&task, tier, provider);
         let outcome = run_node(&cx, spec, &task).await;
+        watcher.abort();
         let cost = total_cost(outcome.attempts.iter().map(|a| a.cost));
         let state = settled_state(outcome.failure.as_ref());
         self.settle(from_outcome(id, &task, tier, provider, outcome));

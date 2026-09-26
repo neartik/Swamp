@@ -136,6 +136,50 @@ async fn concurrent_emits_round_trip_with_a_dense_sequence() {
     assert_eq!(notes, expected, "every emitted event survives exactly once");
 }
 
+/// `swamp cancel` appends to a journal whose writer lives in another process. The owner has
+/// to continue the sequence past that line, or the fold drops its next one as a replay.
+#[tokio::test]
+async fn a_line_appended_by_another_process_keeps_the_sequence_dense() {
+    let sb = sandbox();
+    let (handle, task) = open(&sb.paths, FsyncPolicy::Barrier).await;
+    handle
+        .emit_durable(None, note("owner 0"))
+        .await
+        .expect("owner line");
+    let theirs = swamp::journal::writer::append_shared(
+        &sb.paths.journal(),
+        sb.paths.run,
+        None,
+        note("from another process"),
+    )
+    .await
+    .expect("shared append");
+    assert_eq!(theirs, 1);
+    handle
+        .emit_durable(None, note("owner 1"))
+        .await
+        .expect("owner line");
+    drop(handle);
+    task.await.expect("writer task");
+
+    let lines = replay(&sb.paths.journal(), Collect::default()).expect("replay");
+    let texts: Vec<(u64, String)> = lines
+        .iter()
+        .filter_map(|l| match &l.event {
+            JournalEvent::Note { text, .. } => Some((l.seq, text.clone())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        texts,
+        vec![
+            (0, "owner 0".to_owned()),
+            (1, "from another process".to_owned()),
+            (2, "owner 1".to_owned()),
+        ]
+    );
+}
+
 #[tokio::test]
 async fn emit_after_the_writer_task_is_gone_only_logs() {
     let sb = sandbox();

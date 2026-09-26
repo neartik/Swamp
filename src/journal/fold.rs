@@ -1,4 +1,5 @@
 use crate::dispatch::account::AccountState;
+use crate::dispatch::policy::Ineligible;
 use crate::ids::{CallSeq, DispatchId, NodeId, RunId};
 use crate::journal::record::{JournalEvent, JournalLine};
 use crate::model::core::{AccountId, Cost, NodeKind, NodeState, Tier, Usage, WorkspaceRef};
@@ -113,6 +114,8 @@ pub struct TaskView {
     pub depth: Option<u32>,
     /// None in schema 1, where the latest attempt is the task's state.
     pub state: Option<NodeState>,
+    /// Why every account was refused, from the latest `NodeBlocked`.
+    pub ineligible: Vec<(AccountId, Ineligible)>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -234,11 +237,18 @@ impl RunView {
                     n.files = files.clone();
                 }
             }
-            JournalEvent::NodeBlocked { until, why, .. } => {
+            JournalEvent::NodeBlocked {
+                until,
+                why,
+                ineligible,
+            } => {
                 let blocked = NodeState::Blocked {
                     until: *until,
                     why: why.clone(),
                 };
+                if let Some(t) = l.node.and_then(|id| self.tasks.get_mut(&id)) {
+                    t.ineligible = ineligible.clone();
+                }
                 if let Some(t) = self.tracked_task_mut(l.node) {
                     t.state = Some(blocked.clone());
                 }
@@ -357,6 +367,7 @@ impl RunView {
                         tier: t.tier,
                         depth: None,
                         state: Some(NodeState::Queued),
+                        ineligible: Vec::new(),
                     });
                 }
                 self.dispatches
@@ -381,6 +392,7 @@ impl RunView {
                     tier: *tier,
                     depth: None,
                     state: None,
+                    ineligible: Vec::new(),
                 });
                 t.title = title.clone();
                 t.tier = *tier;
@@ -411,6 +423,7 @@ impl RunView {
                         tier,
                         depth: None,
                         state: None,
+                        ineligible: Vec::new(),
                     }
                 });
                 t.state = Some(NodeState::Rejected {
@@ -427,9 +440,11 @@ impl RunView {
                         to: to.clone(),
                         why: why.clone(),
                     });
-                // An attempt's state comes from its payload events; a task's from this.
+                // An attempt's state comes from its payload events; a task's from this. A
+                // schema-1 task only takes the terminal state a later cancel journals for it.
                 if !self.nodes.contains_key(&id)
-                    && let Some(t) = self.tracked_task_mut(Some(id))
+                    && let Some(t) = self.tasks.get_mut(&id)
+                    && (t.state.is_some() || to.is_terminal())
                 {
                     t.state = Some(to.clone());
                 }
@@ -523,6 +538,7 @@ impl RunView {
             tier: node.tier,
             depth: node.dispatch.map(|_| node.depth),
             state: None,
+            ineligible: Vec::new(),
         });
     }
 
@@ -806,40 +822,58 @@ impl Projection for LlmDigest {
             self.view
                 .mark_orphans(&|id| crate::worker::liveness::is_ours(&paths.pidfile(id)));
         }
-        let t = self.view.totals();
-        let run = self
-            .view
+        LlmDigest::render(&self.view, self.max_bytes, None)
+    }
+}
+
+impl LlmDigest {
+    /// The digest of a folded view, optionally narrowed to one dispatch's tasks.
+    pub fn render(view: &RunView, max_bytes: usize, dispatch: Option<DispatchId>) -> String {
+        let run = view
             .header
             .as_ref()
             .map(|h| h.run.short())
             .unwrap_or_else(|| "?".to_owned());
+        let state = if view.finished { "finished" } else { "running" };
+        let (t, scope) = match dispatch {
+            Some(d) => (
+                view.rollup(Scope::Dispatch(d)),
+                format!(" dispatch {}", d.short()),
+            ),
+            None => (view.totals(), String::new()),
+        };
         let cost = if t.cost_complete {
             format!("~${:.2}", t.cost_usd)
         } else {
             format!("~${:.2}+", t.cost_usd)
         };
-        let state = if self.view.finished {
-            "finished"
-        } else {
-            "running"
-        };
         let mut out = format!(
-            "run {run} {state} nodes {} failed {} in {} out {} cost {cost}\n",
+            "run {run} {state}{scope} nodes {} failed {} in {} out {} cost {cost}\n",
             t.nodes,
             t.failed,
             tokens(t.usage.input_tokens),
             tokens(t.usage.output_tokens),
         );
 
-        let rows = self.view.tree();
+        let tasks = dispatch.map(|d| {
+            view.dispatches
+                .get(&d)
+                .map(|v| v.tasks.clone())
+                .unwrap_or_default()
+        });
+        let rows: Vec<TreeRow> = view
+            .tree()
+            .into_iter()
+            .filter(|r| tasks.as_ref().is_none_or(|t| t.contains(&r.logical)))
+            .collect();
         let (failed, rest): (Vec<&TreeRow>, Vec<&TreeRow>) = rows
             .iter()
             .partition(|r| matches!(r.state, NodeState::Failed { .. }));
         let mut skipped = 0usize;
         // Failures are the point of the digest: they are emitted before anything optional.
         for r in failed.iter().chain(rest.iter()) {
-            let line = self.line(r);
-            if out.len() + line.len() <= self.max_bytes {
+            let line = Self::line(r);
+            if out.len() + line.len() <= max_bytes {
                 out.push_str(&line);
             } else {
                 skipped += 1;
@@ -847,11 +881,11 @@ impl Projection for LlmDigest {
         }
         if skipped > 0 {
             let more = format!("+{skipped} more\n");
-            if out.len() + more.len() <= self.max_bytes {
+            if out.len() + more.len() <= max_bytes {
                 out.push_str(&more);
             }
         }
-        while out.len() > self.max_bytes {
+        while out.len() > max_bytes {
             out.pop();
         }
         out
@@ -859,7 +893,7 @@ impl Projection for LlmDigest {
 }
 
 impl LlmDigest {
-    fn line(&self, r: &TreeRow) -> String {
+    fn line(r: &TreeRow) -> String {
         let mark = match &r.state {
             NodeState::Failed { failure } => format!("FAIL {}", failure.kind()),
             NodeState::Succeeded => "ok".to_owned(),

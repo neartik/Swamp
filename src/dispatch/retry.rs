@@ -124,6 +124,10 @@ struct TaskPhase<'a> {
 
 impl TaskPhase<'_> {
     fn to(&mut self, next: NodeState, why: impl Into<String>) {
+        // A cancel already journaled the task's last transition.
+        if crate::dispatch::cancel::requested(&self.cx.journal.paths, self.cx.logical).is_some() {
+            return;
+        }
         emit(
             self.cx,
             JournalEvent::NodeStateChanged {
@@ -184,8 +188,8 @@ async fn attempt_loop(
     // one of the node's attempts.
     let mut attempt = 0;
     while attempt < cx.max_attempts {
-        if cx.cancel.is_cancelled() {
-            return cancelled(logical, attempts);
+        if cancel_source(cx).is_some() {
+            return cancelled(cx, attempts);
         }
         let lease = match held.take() {
             Some(lease) => lease,
@@ -236,7 +240,7 @@ async fn attempt_loop(
                         );
                         l
                     }
-                    Err(NoCapacity::Cancelled) => return cancelled(logical, attempts),
+                    Err(NoCapacity::Cancelled) => return cancelled(cx, attempts),
                     Err(e) => return give_up(cx, logical, attempts, provider, &excluded, e),
                 }
             }
@@ -389,10 +393,8 @@ async fn attempt_loop(
         }
         // A cancelled node was killed by us: the classifier only sees SIGTERM and would retry.
         // Before the pool hears about it, or our own SIGTERM cools a healthy account.
-        if cx.cancel.is_cancelled() {
-            out.failure = Some(Failure::Cancelled {
-                by: crate::model::core::CancelSource::User,
-            });
+        if let Some(by) = cancel_source(cx) {
+            out.failure = Some(Failure::Cancelled { by });
         }
         cx.pool
             .report(&lease.account, out.failure.as_ref(), out.cost);
@@ -751,14 +753,19 @@ fn settle(logical: NodeId, attempts: Vec<NodeRecord>, out: RunOutcome) -> NodeOu
     outcome
 }
 
-fn cancelled(logical: NodeId, attempts: Vec<NodeRecord>) -> NodeOutcome {
-    fail(
-        logical,
-        attempts,
-        Failure::Cancelled {
-            by: crate::model::core::CancelSource::User,
-        },
-    )
+fn cancelled(cx: &NodeCtx, attempts: Vec<NodeRecord>) -> NodeOutcome {
+    let by = cancel_source(cx).unwrap_or(crate::model::core::CancelSource::User);
+    fail(cx.logical, attempts, Failure::Cancelled { by })
+}
+
+/// A fired token, or a cancel another process marked before the token caught up with it.
+fn cancel_source(cx: &NodeCtx) -> Option<crate::model::core::CancelSource> {
+    let marked = crate::dispatch::cancel::requested(&cx.journal.paths, cx.logical);
+    match (marked, cx.cancel.is_cancelled()) {
+        (Some(by), _) => Some(by),
+        (None, true) => Some(crate::model::core::CancelSource::User),
+        (None, false) => None,
+    }
 }
 
 /// A worktree, a prompt file or a tier mapping that would not come up. Exit 3 is reserved for
