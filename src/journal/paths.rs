@@ -64,13 +64,6 @@ impl Paths {
         self.home_swamp.join("sock")
     }
 
-    /// ~/.swamp/worktrees/<repo>-<hash8>
-    pub fn worktree_root(&self) -> Utf8PathBuf {
-        self.home_swamp
-            .join("worktrees")
-            .join(crate::workspace::repo_slug(&self.repo))
-    }
-
     /// ~/.swamp/accounts.json
     pub fn accounts_state(&self) -> Utf8PathBuf {
         self.home_swamp.join("accounts.json")

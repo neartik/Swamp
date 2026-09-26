@@ -8,8 +8,7 @@ use std::sync::Arc;
 pub const PROTOCOL_VERSION: &str = "2025-06-18";
 pub const SERVER_NAME: &str = "swamp";
 
-/// `swamp_dispatch` for one of swamp's own tools as a brain CLI names it:
-/// `mcp__swamp__swamp_dispatch` from claude, `swamp__swamp_dispatch` from codex.
+/// A swamp tool's bare name from its CLI-prefixed form.
 pub fn swamp_tool(name: &str) -> Option<&str> {
     let rest = name.strip_prefix("mcp__").unwrap_or(name);
     rest.strip_prefix(SERVER_NAME)?.strip_prefix("__")

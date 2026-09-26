@@ -496,7 +496,7 @@ fn the_design_doc_doctor_sample_matches_what_the_code_emits() {
         .expect("the §9 doctor sample");
     assert!(
         sample.contains(&format!("{} accounts/collision", Level::Error.label())),
-        "the collision is an Error on `accounts/collision` in src/doctor.rs: {sample}"
+        "the collision is an Error on `accounts/collision` in src/doctor/accounts.rs: {sample}"
     );
     assert!(
         !sample.contains("rustc"),
@@ -647,8 +647,7 @@ async fn an_unreadable_state_file_is_one_error_and_not_a_quota_warning() {
     );
 }
 
-/// Every check a representative setup yields, machine paths replaced, pinned so a refactor of
-/// `src/doctor` cannot change what `swamp doctor` prints.
+/// Every check a representative setup yields, pinned so a refactor cannot change the output.
 #[tokio::test]
 async fn doctor_output_is_stable() {
     let f = Fixture::new();
@@ -717,8 +716,7 @@ fn run_started(schema: u32) -> String {
     serde_json::to_string(&line).expect("json") + "\n"
 }
 
-/// `--schema` names the journal schema of every recent run: current, older (still folds) or
-/// newer than this binary reads.
+/// `--schema` names each recent run's journal schema: current, older or newer.
 #[tokio::test]
 async fn schema_reports_the_journal_schema_of_each_recent_run() {
     use swamp::journal::record::SCHEMA_VERSION;
@@ -760,8 +758,7 @@ async fn schema_reports_the_journal_schema_of_each_recent_run() {
     }
 }
 
-/// claude refuses a misspelt `--permission-mode` only once a worker starts; with `--schema`
-/// doctor asks the installed CLI which spellings it takes.
+/// With `--schema`, doctor checks permission-mode spelling against the installed CLI.
 #[tokio::test]
 async fn schema_checks_the_permission_mode_spelling_against_the_cli_help() {
     let f = Fixture::new();
@@ -792,4 +789,38 @@ async fn schema_checks_the_permission_mode_spelling_against_the_cli_help() {
 
     let quiet = checks(&cfg, &f.paths, false, false).await;
     assert!(!quiet.iter().any(|c| c.name == "protocol/permission_mode"));
+}
+
+/// A newer swamp may reshape `run_started`; its schema is still read and reported as newer.
+#[tokio::test]
+async fn schema_reports_a_newer_journal_this_swamp_cannot_parse() {
+    use swamp::journal::record::SCHEMA_VERSION;
+    let f = Fixture::new();
+    let run = swamp::ids::RunId::new();
+    let dir = f.paths.dot_swamp.join("runs").join(run.to_string());
+    std::fs::create_dir_all(&dir).expect("run dir");
+    let line = serde_json::json!({
+        "seq": 0,
+        "at": "2026-01-01T00:00:00Z",
+        "run": run.to_string(),
+        "ev": "run_started",
+        "swamp_version": "9.0.0",
+        "schema": SCHEMA_VERSION + 1,
+        "argv": "swamp run",
+        "workspace": {"required": true},
+    });
+    std::fs::write(dir.join("journal.jsonl"), format!("{line}\n")).expect("journal");
+    let out = checks(&healthy(&f), &f.paths, false, true).await;
+    let c = out
+        .iter()
+        .find(|c| c.name == "protocol/journal")
+        .expect("a journal line");
+    assert_eq!(c.level, Level::Warn, "{}", c.detail);
+    assert!(c.detail.contains("newer than"), "{}", c.detail);
+    assert!(
+        c.detail
+            .contains(&format!("schema {} (swamp 9.0.0)", SCHEMA_VERSION + 1)),
+        "{}",
+        c.detail
+    );
 }

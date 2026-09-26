@@ -391,7 +391,7 @@ pub struct DoctorArgs {
     pub probe: bool,
     #[arg(long)]
     pub fix: bool,
-    /// Report the pattern-fallback and unparsed-line rates across recent runs
+    /// Adapter drift, each recent run's journal schema, and the claude permission-mode spelling against `claude --help`
     #[arg(long)]
     pub schema: bool,
     /// Remove stale worktrees, sockets and pidfiles

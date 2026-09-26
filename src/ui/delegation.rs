@@ -58,8 +58,7 @@ pub fn line(w: &BrainSelfWork, budget: u32) -> String {
     out
 }
 
-/// `brain 3/8 (12%)` for the board header, the share left out when `share` is off; red and
-/// marked `over` past the budget.
+/// `brain 3/8 (12%)` for the board header, red and marked `over` past the budget.
 pub fn cell(w: &BrainSelfWork, budget: u32, share: bool) -> Cell {
     let over = w.over(budget);
     let mut text = format!("brain {}/{budget}", w.calls);

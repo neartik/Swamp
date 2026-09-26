@@ -1,6 +1,4 @@
-//! `docs/BOARD.md` §7: the three layout tiers through a `TestBackend`, all offline,
-//! `Theme::plain()` for stable bytes. One fixture, `tests_support::p4_journal`, the one chat
-//! renders too: two dispatches, a retry, a blocked task and a rejection.
+//! `docs/BOARD.md` §7: the three layout tiers through a `TestBackend`, on the shared P4 journal.
 
 use crate::dispatch::account::Health;
 use crate::dispatch::policy::{Scoring, SelectionPolicy};
@@ -727,9 +725,6 @@ fn with_brain_reads(n: usize) -> Vec<JournalLine> {
     lines
 }
 
-/// Within the budget the delegation cell is the first header cell to go; past it, it outlasts
-/// the queued count and the cost. Only the 60-column row, where freshness and the stuck count
-/// leave no room, goes without it.
 #[test]
 fn the_delegation_cell_warns_once_the_budget_is_spent() {
     let mut b = board_of(vec![pane(fx::run_id(), &with_brain_reads(11))]);
@@ -758,8 +753,7 @@ fn the_delegation_cell_warns_once_the_budget_is_spent() {
     );
 }
 
-/// An account that never reported a window has one `-` per window, not an empty bar and a
-/// reset countdown to nothing.
+/// An account that never reported a window has one `-` per window, not an empty bar.
 #[test]
 fn an_account_without_quota_leaves_its_bars_blank() {
     let mut b = board();

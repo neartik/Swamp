@@ -61,10 +61,10 @@ when `RunView::finished` is false **and** it has at least one non-terminal node 
 tailed; the newest finished run is kept in `recent` only.
 
 **Cross-repo.** `~/.swamp/sock/*.sock` names every live run on the machine but not its repo, so it
-cannot be mapped back to a journal. WP7 adds `~/.swamp/runs.json`, an fs4-locked index written at
-`swamp run` / `swamp chat` startup and on exit: `{ "<run-short>": { run, repo, dir, pid,
-started_at } }`, merged last-writer-wins exactly like `accounts.json`. With it, `swamp board --all`
-shows every repo. Until WP7 lands, `--all` prints what it cannot see and falls back to this repo.
+cannot be mapped back to a journal. `~/.swamp/runs.json` is an fs4-locked index written at
+`swamp run` / `swamp chat` startup and removed on exit: `{ "<run-short>": { run, repo, dir, pid,
+started_at } }`, merged last-writer-wins exactly like `accounts.json`. `swamp board --all` reads it
+and shows every repo; entries whose journal is gone are pruned.
 
 **Flags.** `--run <id|last|-N>` pins one run (`Paths::resolve_run`, same grammar as `watch`).
 `--all` is cross-repo. `--interval <ms>` overrides the poll period. `--once` prints one frame and

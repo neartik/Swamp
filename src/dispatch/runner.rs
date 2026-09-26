@@ -10,8 +10,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
-/// The production runner: real worktrees, real detached processes. Shared by the dispatcher
-/// and by `swamp run --no-brain`, which has no dispatcher.
+/// Real worktrees and detached processes, shared by the dispatcher and run --no-brain.
 pub struct DirectRunner {
     exec: Arc<Executor>,
     workspace: Arc<WorkspaceManager>,

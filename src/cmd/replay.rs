@@ -21,6 +21,7 @@ pub async fn run(ctx: &Ctx, args: &ReplayArgs) -> anyhow::Result<i32> {
             &TraceOpts {
                 events: true,
                 json: ctx.json,
+                read_budget: Some(ctx.cfg.brain_read_budget()),
                 ..TraceOpts::default()
             },
         ));

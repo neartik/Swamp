@@ -177,8 +177,7 @@ pub fn plan(view: &RunView, paths: &RunPaths) -> Vec<Recovery> {
         if node.state.is_terminal() || node.kind == NodeKind::Brain {
             continue;
         }
-        let pidfile = paths.pidfile(*id);
-        let alive = crate::worker::liveness::is_ours(&pidfile);
+        let alive = paths.is_live(*id);
         let pid = match &node.state {
             NodeState::Running { pid, .. } | NodeState::Orphaned { pid, .. } => *pid,
             _ => 0,

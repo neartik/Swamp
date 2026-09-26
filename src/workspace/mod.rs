@@ -415,13 +415,15 @@ impl WorkspaceManager {
     }
 }
 
-/// `<root>/<repo-name>-<hash8>`, with `~` expanded; `~/.swamp/worktrees` without a root.
-/// Outside the repo on purpose.
+/// `<root>/<repo-name>-<hash8>`, `~/.swamp/worktrees` without a root; never inside the repo.
 pub fn worktree_root(paths: &Paths, cfg: &Config) -> Utf8PathBuf {
     match &cfg.workspace.root {
         Some(root) => Utf8PathBuf::from(shellexpand::tilde(root.as_str()).into_owned())
             .join(repo_slug(&paths.repo)),
-        None => paths.worktree_root(),
+        None => paths
+            .home_swamp
+            .join("worktrees")
+            .join(repo_slug(&paths.repo)),
     }
 }
 

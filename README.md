@@ -114,8 +114,8 @@ no diff at all, while `acceptEdits` (like `plan`, `manual` and `dontAsk`) writes
 every Bash call, so the worker cannot run the tests it was sent to run and comes back with a
 confident summary of work it never verified. The pair that works is `permission_mode =
 "acceptEdits"` plus `Bash` in `allow_tools`, for anthropic workers and for `[brain]`. The
-built-in defaults ship that pair for `[brain]`, so a fresh `swamp config init` inherits it;
-workers get it from your own `providers.<p>.worker` block. The trade-off is real: an allowed Bash runs commands in the worktree without asking, which is the
+built-in defaults ship that pair for `[brain]` and for anthropic workers
+(`providers.anthropic.worker`), so a fresh `swamp config init` inherits it. The trade-off is real: an allowed Bash runs commands in the worktree without asking, which is the
 same trust you extend to a CLI agent in your own shell, and a worktree is a directory, not a
 sandbox. The brain also keeps `deny_tools = ["Edit", "Write", "MultiEdit", "NotebookEdit"]` by
 default, so it still cannot edit files, and `swamp doctor` warns when a worker or the brain runs in a

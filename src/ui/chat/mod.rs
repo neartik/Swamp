@@ -314,6 +314,7 @@ async fn interactive(
                             node,
                             dispatch,
                             events: true,
+                            read_budget: Some(app.read_budget),
                             ..TraceOpts::default()
                         },
                     );

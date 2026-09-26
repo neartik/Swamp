@@ -13,7 +13,9 @@ config keys only ever change additively; anything else that would break a user i
 - The delegation is measured. `RunView::brain_self_work` counts the brain's own tool calls before
   its first dispatch, in its stream order, and its share of the run's cost. `swamp trace`,
   `swamp dispatches`, `/status` and `/dispatches` print a `brain` line, the board header a
-  `brain 3/8 (12%)` cell, and every `--json` form a `brain` object; each warns past the budget.
+  `brain 3/8 (12%)` cell, and `swamp dispatches --json`, `swamp trace --json` (without
+  `--dispatch` or `--node`) and each run of `swamp board --json` carry a `brain` object; each
+  warns past the budget.
 
 ### Dispatch lineage, journal schema 2 (P2)
 

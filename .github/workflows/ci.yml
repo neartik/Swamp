@@ -19,8 +19,7 @@ env:
   RUST_BACKTRACE: 1
   # Write a .snap.new beside any snapshot that no longer matches, so it can be uploaded.
   INSTA_UPDATE: new
-  # The end-to-end harness gives swamp a throwaway HOME, so worktree commits need an
-  # identity that does not come from ~/.gitconfig.
+  # The e2e harness uses a throwaway HOME, so git needs an identity here.
   GIT_AUTHOR_NAME: swamp ci
   GIT_AUTHOR_EMAIL: ci@swamp.invalid
   GIT_COMMITTER_NAME: swamp ci

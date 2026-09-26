@@ -27,7 +27,7 @@ pub async fn reap(paths: &Paths) -> anyhow::Result<Reaped> {
         }
         for node in view.nodes.keys() {
             let pidfile = rp.pidfile(*node);
-            if pidfile.is_file() && !crate::worker::liveness::is_ours(&pidfile) {
+            if pidfile.is_file() && !rp.is_live(*node) {
                 std::fs::remove_file(&pidfile).ok();
                 removed += 1;
             }

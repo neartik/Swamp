@@ -104,8 +104,7 @@ fn allowed_in_args(args: &[String]) -> bool {
         .any(|t| is_bash(t))
 }
 
-/// `--schema`: the configured claude permission modes against the `--permission-mode`
-/// choices the installed CLI lists. claude rejects a misspelt mode only once a worker starts.
+/// `--schema`: configured claude permission modes against the choices `claude --help` lists.
 pub(super) async fn mode_spelling(cfg: &Config) -> Check {
     const NAME: &str = "protocol/permission_mode";
     let modes = claude_modes(cfg);
@@ -208,7 +207,9 @@ pub(crate) fn permission_mode_choices(help: &str) -> Option<Vec<String>> {
 
 async fn help_text(exec: &str, env: &std::collections::BTreeMap<String, String>) -> Option<String> {
     let mut cmd = tokio::process::Command::new(exec);
-    cmd.arg("--help").stdin(std::process::Stdio::null());
+    cmd.arg("--help")
+        .stdin(std::process::Stdio::null())
+        .kill_on_drop(true);
     for (k, v) in env {
         cmd.env(k, shellexpand::tilde(v).into_owned());
     }

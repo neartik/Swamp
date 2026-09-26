@@ -75,20 +75,15 @@ pub async fn checks(cfg: &Config, paths: &Paths, probe: bool, schema: bool) -> V
     out
 }
 
-/// `--schema`: the journal schema each recent run was written with. An older one still folds;
-/// a newer one was written by a newer swamp and this one may misread it.
+/// `--schema`: the journal schema each recent run was written with.
 fn journal_schemas(paths: &Paths) -> Vec<Check> {
     let runs = paths.list_runs().unwrap_or_default();
     let mut out: Vec<Check> = runs
         .into_iter()
         .take(RECENT_RUNS)
         .map(|run| {
-            let (level, detail) = match first_line(&paths.run_paths(run).journal()) {
-                Some(JournalEvent::RunStarted {
-                    schema,
-                    swamp_version,
-                    ..
-                }) => match schema.cmp(&SCHEMA_VERSION) {
+            let (level, detail) = match run_schema(&paths.run_paths(run).journal()) {
+                Some((schema, swamp_version)) => match schema.cmp(&u64::from(SCHEMA_VERSION)) {
                     Ordering::Equal => (
                         Level::Ok,
                         format!("schema {schema} (swamp {swamp_version})"),
@@ -108,7 +103,7 @@ fn journal_schemas(paths: &Paths) -> Vec<Check> {
                         ),
                     ),
                 },
-                _ => (
+                None => (
                     Level::Warn,
                     "no run_started line: the journal is empty or damaged".to_owned(),
                 ),
@@ -130,13 +125,21 @@ fn journal_schemas(paths: &Paths) -> Vec<Check> {
     out
 }
 
-fn first_line(journal: &camino::Utf8Path) -> Option<JournalEvent> {
+/// Read loosely, so a newer swamp's `run_started` still names its schema.
+fn run_schema(journal: &camino::Utf8Path) -> Option<(u64, String)> {
     use std::io::BufRead;
     let file = std::fs::File::open(journal).ok()?;
     let line = std::io::BufReader::new(file).lines().next()?.ok()?;
-    serde_json::from_str::<JournalLine>(&line)
-        .ok()
-        .map(|l| l.event)
+    let v: serde_json::Value = serde_json::from_str(&line).ok()?;
+    if v.get("ev")?.as_str()? != "run_started" {
+        return None;
+    }
+    let version = v
+        .get("swamp_version")
+        .and_then(|s| s.as_str())
+        .unwrap_or("?")
+        .to_owned();
+    Some((v.get("schema")?.as_u64()?, version))
 }
 
 /// `--schema`: how often the classifier fell back to regexes, and how many raw lines the

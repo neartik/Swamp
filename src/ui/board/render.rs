@@ -204,9 +204,7 @@ pub fn frame(
     compose(b, &rows, &rows, &c, bottom, None, &mut 0)
 }
 
-/// Header, body, accounts strip, detail and bottom line. `shown` is `rows` with the viewer's
-/// folds applied; with a `height` the body scrolls to keep the selection in view and the
-/// regions under it stay put.
+/// Header, body, accounts strip, detail and bottom line; `shown` is `rows` with folds applied.
 pub fn compose(
     b: &Board,
     shown: &Rows,

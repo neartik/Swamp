@@ -61,29 +61,40 @@ pub struct RunView {
     seen: bool,
 }
 
-/// The brain's stream is read concurrently with the MCP call it makes, so its tool calls can
-/// land in the journal after the `DispatchIssued` they preceded. Its own `swamp_dispatch`
-/// call, in stream order, is the cut; the journal's first dispatch is the fallback for a
-/// stream that never names one (schema 1, or a CLI that hides MCP calls).
-#[derive(Debug, Default, Clone, Copy)]
+/// Stream order decides the cut; the journal decides whether and at which call it happened.
+#[derive(Debug, Default, Clone)]
 struct SelfWorkFold {
-    /// The brain's own tool calls up to its first `swamp_dispatch` call, swamp's tools aside.
+    /// The brain's own tool calls so far, swamp's tools aside.
     calls: u32,
-    /// The brain's stream has shown its first `swamp_dispatch` call.
-    stream_cut: bool,
+    /// Ids counted in this brain process: codex repeats a call on each item update.
+    seen: BTreeSet<String>,
+    /// `calls` at each `swamp_dispatch` call in the brain's stream.
+    at_stream_dispatch: Vec<u32>,
+    /// Journaled `swamp_dispatch` calls that failed before the first real dispatch.
+    failed: u32,
     /// `calls` when the journal first showed a dispatch.
     at_journal_cut: Option<u32>,
 }
 
 impl SelfWorkFold {
-    fn tool_call(&mut self, name: &str) {
-        if self.stream_cut {
+    fn tool_call(&mut self, id: &str, name: &str) {
+        if !id.is_empty() && !self.seen.insert(id.to_owned()) {
             return;
         }
         match crate::mcp::server::swamp_tool(name) {
-            Some("swamp_dispatch") => self.stream_cut = true,
+            Some("swamp_dispatch") => self.at_stream_dispatch.push(self.calls),
             Some(_) => {}
             None => self.calls += 1,
+        }
+    }
+
+    fn session_started(&mut self) {
+        self.seen.clear();
+    }
+
+    fn failed_dispatch(&mut self) {
+        if self.at_journal_cut.is_none() {
+            self.failed += 1;
         }
     }
 
@@ -92,14 +103,18 @@ impl SelfWorkFold {
     }
 
     fn calls(&self) -> u32 {
-        match (self.stream_cut, self.at_journal_cut) {
-            (false, Some(n)) => n,
-            _ => self.calls,
+        match self.at_journal_cut {
+            None => self.calls,
+            Some(n) => self
+                .at_stream_dispatch
+                .get(self.failed as usize)
+                .copied()
+                .unwrap_or(n),
         }
     }
 
     fn dispatched(&self) -> bool {
-        self.stream_cut || self.at_journal_cut.is_some()
+        self.at_journal_cut.is_some()
     }
 }
 
@@ -297,10 +312,14 @@ impl RunView {
                 if let Some(n) = self.node_mut(l) {
                     n.stream_offset = n.stream_offset.max(*offset);
                 }
-                if let WorkerEvent::ToolCall { name, .. } = event
-                    && self.node_mut(l).is_some_and(|n| n.kind == NodeKind::Brain)
-                {
-                    self.self_work.tool_call(name);
+                if self.node_mut(l).is_some_and(|n| n.kind == NodeKind::Brain) {
+                    match event {
+                        WorkerEvent::ToolCall { id, name, .. } => {
+                            self.self_work.tool_call(id, name)
+                        }
+                        WorkerEvent::SessionStarted { .. } => self.self_work.session_started(),
+                        _ => {}
+                    }
                 }
                 if with_events && let Some(id) = node {
                     self.events.entry(id).or_default().push(event.clone());
@@ -437,10 +456,20 @@ impl RunView {
                     s.quota_source = *source;
                 }
             }
-            JournalEvent::BrainToolCall { tool, call_seq, .. } => {
+            JournalEvent::BrainToolCall {
+                tool,
+                call_seq,
+                dispatch,
+                ..
+            } => {
                 // Schema 1 journaled no DispatchIssued: the call itself marks the dispatch.
+                let schema_1 = self.header.as_ref().is_some_and(|h| h.schema < 2);
                 if tool == "swamp_dispatch" {
-                    self.self_work.journal_cut();
+                    if dispatch.is_some() || schema_1 {
+                        self.self_work.journal_cut();
+                    } else {
+                        self.self_work.failed_dispatch();
+                    }
                 }
                 self.saw_call(*call_seq);
             }
@@ -685,8 +714,7 @@ impl RunView {
         }
     }
 
-    /// The brain's own tool calls before its first dispatch and its share of the cost. None
-    /// for a run without a brain.
+    /// The brain's own calls before its first dispatch and its cost share; None without a brain.
     pub fn brain_self_work(&self) -> Option<BrainSelfWork> {
         let brains: Vec<&NodeRecord> = self
             .nodes

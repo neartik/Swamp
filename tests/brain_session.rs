@@ -483,8 +483,7 @@ fn the_prompt_sets_a_read_budget_and_starts_at_low_tier() {
         let prompt = system_prompt(&cfg, mode);
         assert!(prompt.contains("## Delegate early"), "{prompt}");
         assert!(
-            prompt
-                .contains("at most 8 file reads, greps or globs before your first swamp_dispatch"),
+            prompt.contains("at most 8 tool calls of your own (reads, greps, globs, Bash; swamp_*"),
             "{prompt}"
         );
         assert!(
@@ -503,7 +502,10 @@ fn the_prompt_sets_a_read_budget_and_starts_at_low_tier() {
 
     cfg.limits.brain_read_budget = Some(3);
     let prompt = system_prompt(&cfg, swamp::brain::BrainMode::Interactive);
-    assert!(prompt.contains("at most 3 file reads"), "{prompt}");
+    assert!(
+        prompt.contains("at most 3 tool calls of your own"),
+        "{prompt}"
+    );
 }
 
 /// `swamp run` has no second turn: a brain that ends with "say the word and I'll merge" leaves

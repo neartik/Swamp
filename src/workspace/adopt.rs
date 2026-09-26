@@ -205,8 +205,7 @@ fn apply_conflicts(stderr: &str) -> Vec<Utf8PathBuf> {
     paths
 }
 
-/// `merge-tree` exits 1 on a conflict; anything else past 0 is git refusing the command, such
-/// as a git older than 2.40 that has no `--merge-base`, and is never reported as a conflict.
+/// `merge-tree` exits 1 on a conflict; any other nonzero exit is git refusing the command.
 fn merge_tree_verdict(out: &GitOutput) -> AdoptResult {
     match out.code {
         Some(0) => AdoptResult::Clean { commit: None },

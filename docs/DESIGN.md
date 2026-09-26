@@ -1943,8 +1943,8 @@ Every `ev` above, with its line node, is listed in `docs/DISPATCH.md` ("Journal 
 recent run.
 Schema 2 is additive: a schema-1 journal folds to the identical tree, with its nodes in the
 `DispatchId::LEGACY` bucket. Once users have traces, `JournalEvent`
-cannot break: every new field gets `#[serde(default)]`, every enum gets `#[serde(other)]` on the read
-path, and changes are additive only. Renaming a variant is a breaking change and is treated as one.
+cannot break: every new field gets `#[serde(default)]`; a line whose `ev` this binary does not know
+is skipped by the reader as unparsable (counted in the replay warning), so changes stay additive. Renaming a variant is a breaking change and is treated as one.
 
 ### 7.3 Writer
 

@@ -28,8 +28,7 @@ pub struct Scenario {
     pub dispatch: Vec<BrainTask>,
     /// How many identical `swamp_dispatch` calls the brain makes; 0 means one.
     pub dispatch_calls: u32,
-    /// Brain mode: tools the brain calls itself, one `Read` of this file each, before it
-    /// dispatches.
+    /// Brain mode: files the brain `Read`s itself before it dispatches.
     pub brain_reads: Vec<String>,
 }
 

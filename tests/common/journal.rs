@@ -415,19 +415,18 @@ pub fn schema_2() -> Vec<JournalLine> {
 }
 
 /// A tool call as the brain CLI's own stream reports it.
-pub fn brain_call(name: &str) -> JournalEvent {
+pub fn brain_call(id: usize, name: &str) -> JournalEvent {
     JournalEvent::NodeEvent {
         offset: 0,
         event: WorkerEvent::ToolCall {
-            id: format!("toolu_{name}"),
+            id: format!("toolu_{id}"),
             name: name.to_owned(),
             summary: String::new(),
         },
     }
 }
 
-/// `schema_2` with `reads` brain reads before its first dispatch, swamp's own dispatch call
-/// among them as the CLI names it, and two more reads after the dispatch.
+/// `schema_2` with `reads` brain reads, its dispatch call, then two reads after the first dispatch.
 pub fn schema_2_with_reads(reads: usize) -> Vec<JournalLine> {
     let brain = nid(0);
     let lines = schema_2();
@@ -439,14 +438,14 @@ pub fn schema_2_with_reads(reads: usize) -> Vec<JournalLine> {
         .map(|i| {
             (
                 Some(brain),
-                brain_call(if i % 2 == 0 { "Read" } else { "Grep" }),
+                brain_call(i, if i % 2 == 0 { "Read" } else { "Grep" }),
             )
         })
         .collect();
-    before.push((Some(brain), brain_call("mcp__swamp__swamp_dispatch")));
-    let after = [
-        (Some(brain), brain_call("Read")),
-        (Some(brain), brain_call("Bash")),
+    before.push((Some(brain), brain_call(reads, "mcp__swamp__swamp_dispatch")));
+    let mut after = vec![
+        (Some(brain), brain_call(reads + 1, "Read")),
+        (Some(brain), brain_call(reads + 2, "Bash")),
     ];
     let mut events: Vec<(Option<NodeId>, JournalEvent)> = Vec::new();
     for (i, l) in lines.into_iter().enumerate() {
@@ -455,8 +454,8 @@ pub fn schema_2_with_reads(reads: usize) -> Vec<JournalLine> {
         }
         let issued = matches!(l.event, JournalEvent::DispatchIssued { .. });
         events.push((l.node, l.event));
-        if issued && !after.is_empty() {
-            events.extend(after.iter().cloned());
+        if issued {
+            events.append(&mut after);
         }
     }
     events
