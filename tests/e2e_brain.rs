@@ -465,3 +465,47 @@ fn replay_leaves_the_run_view_unchanged() {
         assert_eq!(after.state_of(*t), Some(NodeState::Succeeded), "{t}");
     }
 }
+
+/// P5: the delegation metric end to end. The brain's own reads before its dispatch are what
+/// `trace`, `dispatches` and the board count against `limits.brain_read_budget`; the dispatch
+/// call itself is not one of them.
+#[test]
+fn the_brain_reads_before_its_dispatch_are_counted_against_the_budget() {
+    let h = Harness::new().scenario(
+        "main",
+        Scenario::claude()
+            .reads_first(&["src/lib.rs", "src/main.rs", "Cargo.toml"])
+            .dispatches("lex", "write the lexer"),
+    );
+    // The repo layer, over the harness's user layer that already has a [limits] table.
+    let dot_swamp = h.paths().dot_swamp;
+    std::fs::create_dir_all(&dot_swamp).expect(".swamp");
+    std::fs::write(
+        dot_swamp.join("config.toml"),
+        "[limits]\nbrain_read_budget = 2\n",
+    )
+    .expect("repo config");
+    h.swamp(&["run", TASK]).assert().success();
+
+    let view = h.last_view();
+    let work = view.brain_self_work().expect("a brain run");
+    assert_eq!(work.calls, 3, "{work:?}");
+    assert!(work.dispatched && work.over(2));
+
+    let stdout = |args: &[&str]| {
+        let out = h.swamp(args).assert().success();
+        String::from_utf8_lossy(&out.get_output().stdout).into_owned()
+    };
+    let over = "brain  3/2 calls before the first dispatch";
+    let trace = stdout(&["trace"]);
+    assert!(trace.contains(over), "{trace}");
+    assert!(trace.contains("over limits.brain_read_budget"), "{trace}");
+    let dispatches = stdout(&["dispatches"]);
+    assert!(dispatches.contains(over), "{dispatches}");
+    let json: serde_json::Value =
+        serde_json::from_str(&stdout(&["dispatches", "--json"])).expect("json");
+    assert_eq!(json["brain"]["calls"], 3);
+    assert_eq!(json["brain"]["over_budget"], true);
+    let board = stdout(&["board", "--once", "--run", "last"]);
+    assert!(board.contains("brain 3/2 over"), "{board}");
+}

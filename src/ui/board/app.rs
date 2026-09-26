@@ -861,6 +861,7 @@ pub fn json(b: &Board) -> Value {
             "dir": p.paths.dir,
             "stale": p.stale.is_some(),
             "finished": p.view.finished,
+            "brain": crate::ui::delegation::json(&p.view, b.read_budget),
             "dispatches": inspect::list(&p.view, b.now).dispatches,
         })).collect::<Vec<_>>(),
         "in_flight": in_flight,

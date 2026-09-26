@@ -9,6 +9,7 @@ pub async fn list(ctx: &Ctx, args: &DispatchesArgs) -> anyhow::Result<i32> {
     let opts = ListOpts {
         failed: args.failed,
         json: args.json || ctx.json,
+        read_budget: Some(ctx.cfg.brain_read_budget()),
     };
     if args.follow {
         follow(&paths, opts).await?;

@@ -57,6 +57,30 @@ fn brain_turn(dir: &std::path::Path, name: &str, argv: &[String], s: &Scenario) 
     scenario::say(&scenario::recorded_rate_limit_line());
 
     let turn = read_turn(dir, name);
+    for (i, file) in s.brain_reads.iter().enumerate() {
+        let id = format!("toolu_read_{i}");
+        scenario::say(
+            &serde_json::json!({
+                "type": "assistant",
+                "message": { "role": "assistant", "type": "message", "model": model,
+                             "content": [{ "type": "tool_use", "id": id, "name": "Read",
+                                           "input": { "file_path": file } }],
+                             "usage": { "input_tokens": 12, "output_tokens": 3 } },
+                "session_id": session
+            })
+            .to_string(),
+        );
+        scenario::say(
+            &serde_json::json!({
+                "type": "user",
+                "message": { "role": "user",
+                             "content": [{ "type": "tool_result", "tool_use_id": id,
+                                           "is_error": false, "content": "fn main() {}" }] },
+                "session_id": session
+            })
+            .to_string(),
+        );
+    }
     let tasks: Vec<serde_json::Value> = s
         .dispatch
         .iter()

@@ -19,3 +19,4 @@ run 9g5f00  /projects/api  base 9f3c1ad  started 22:13:20  4m12s  ~$1.64  555k t
 
 usage  in 530k  out 19.7k  cache-read 1.1M  cache-write 5k
 cost   ~$1.64   (1 node reported no cost data)
+brain  0/8 calls before the first dispatch, 43% of the cost

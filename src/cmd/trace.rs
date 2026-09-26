@@ -33,6 +33,7 @@ pub async fn run(ctx: &Ctx, args: &TraceArgs) -> anyhow::Result<i32> {
         json: ctx.json,
         dispatch,
         by_dispatch,
+        read_budget: Some(ctx.cfg.brain_read_budget()),
     };
 
     if args.follow {

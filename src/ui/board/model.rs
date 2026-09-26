@@ -2,7 +2,7 @@
 
 use crate::dispatch::policy::{Ineligible, Scoring, SelectionPolicy};
 use crate::ids::{CallSeq, DispatchId, NodeId, RunId};
-use crate::journal::fold::{DispatchView, Projection, RunView, Scope};
+use crate::journal::fold::{BrainSelfWork, DispatchView, Projection, RunView, Scope};
 use crate::journal::inspect::{self, AttemptDetail, Rollup};
 use crate::journal::paths::RunPaths;
 use crate::journal::record::{JournalEvent, JournalLine};
@@ -730,6 +730,8 @@ pub struct Summary {
     pub accounts: usize,
     pub cost_usd: f64,
     pub cost_complete: bool,
+    /// The tailed run whose brain did the most itself before delegating.
+    pub brain: Option<BrainSelfWork>,
 }
 
 // ---------------------------------------------------------------- board
@@ -812,6 +814,8 @@ pub struct Board {
     pub hidden_runs: usize,
     /// `tab`: draw only this run. `None` merges every tailed run.
     pub focus: Option<RunId>,
+    /// `limits.brain_read_budget`, for the header's delegation cell.
+    pub read_budget: u32,
 }
 
 impl Board {
@@ -826,6 +830,7 @@ impl Board {
             accounts_at: None,
             hidden_runs: 0,
             focus: None,
+            read_budget: crate::brain::prompt::DEFAULT_READ_BUDGET,
         }
     }
 
@@ -964,6 +969,11 @@ impl Board {
             accounts: self.accounts.len(),
             cost_usd,
             cost_complete,
+            brain: self
+                .runs
+                .iter()
+                .filter_map(|p| p.view.brain_self_work())
+                .max_by_key(|w| w.calls),
         }
     }
 }

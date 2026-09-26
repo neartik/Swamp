@@ -16,7 +16,7 @@ use crate::ui::chat::workers::short_model;
 use crate::ui::keys::{self, KeyAction, Surface};
 use crate::ui::order::{self, Cell, Drop, SEP};
 use crate::ui::usage::{self, AccountRow};
-use crate::ui::{dispatches, fmt, trace, watch};
+use crate::ui::{delegation, dispatches, fmt, trace, watch};
 use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
 use std::time::Duration as StdDuration;
@@ -283,9 +283,25 @@ pub fn bottom(text: &str, role: Role, bold: bool, c: &Ctx) -> Line<'static> {
 /// Narrow; the optional cells drop, in order, when they do not fit.
 pub fn header(b: &Board, rows: &Rows, c: &Ctx) -> Vec<Line<'static>> {
     let s = b.summary(rows);
-    let cells = header_cells(&s);
+    let cells = header_cells(&s, b.read_budget, c.l.band != Band::Narrow);
     let fresh = freshness(b, c);
-    let drops = [Drop::Key("queued"), Drop::Key("runs"), Drop::Key("cost")];
+    // Within budget the delegation cell is the first to go; past it, it outlasts the cost.
+    let over = s.brain.is_some_and(|w| w.over(b.read_budget));
+    let drops = if over {
+        [
+            Drop::Key("queued"),
+            Drop::Key("runs"),
+            Drop::Key("cost"),
+            Drop::Key("brain"),
+        ]
+    } else {
+        [
+            Drop::Key("brain"),
+            Drop::Key("queued"),
+            Drop::Key("runs"),
+            Drop::Key("cost"),
+        ]
+    };
     let mut first = Row::default();
     first.add(c.theme, TITLE, Role::Name);
     if c.l.header_rows == 2 {
@@ -313,7 +329,7 @@ pub fn header(b: &Board, rows: &Rows, c: &Ctx) -> Vec<Line<'static>> {
     vec![first.line(c.w())]
 }
 
-fn header_cells(s: &Summary) -> Vec<Cell> {
+fn header_cells(s: &Summary, budget: u32, share: bool) -> Vec<Cell> {
     let mut cells = Vec::new();
     if s.runs > 1 || s.hidden_runs > 0 {
         let text = if s.hidden_runs > 0 {
@@ -331,6 +347,9 @@ fn header_cells(s: &Summary) -> Vec<Cell> {
         ));
     }
     cells.extend(s.tally.summary_cells(s.cost_usd, s.cost_complete));
+    if let Some(w) = &s.brain {
+        cells.push(delegation::cell(w, budget, share));
+    }
     cells
 }
 

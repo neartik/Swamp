@@ -27,3 +27,4 @@ dispatch 9g5f1a  settled  caller task 9g5f01  1 task  ~$0.05
 
 usage  in 400  out 40  cache-read 0  cache-write 0
 cost   ~$1.90
+brain  0/8 calls before the first dispatch, 53% of the cost

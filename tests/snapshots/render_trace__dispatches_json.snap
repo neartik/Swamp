@@ -126,5 +126,14 @@ expression: text
         "rejected": 0
       }
     }
-  ]
+  ],
+  "brain": {
+    "calls": 0,
+    "budget": 8,
+    "over_budget": false,
+    "dispatched": true,
+    "brain_usd": 1.0,
+    "total_usd": 1.9,
+    "cost_share": 0.5263
+  }
 }

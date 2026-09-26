@@ -6,8 +6,8 @@ use crate::journal::inspect::{self, DispatchSummary, TaskDetail};
 use crate::journal::paths::RunPaths;
 use crate::journal::reader::Tailer;
 use crate::model::dispatch::DispatchState;
-use crate::ui::fmt;
 use crate::ui::trace::{attempt_cells, failure_detail};
+use crate::ui::{delegation, fmt};
 use std::collections::BTreeMap;
 use std::io::Write;
 use std::time::Duration;
@@ -22,13 +22,24 @@ pub struct ListOpts {
     /// Only dispatches with a failed or rejected task.
     pub failed: bool,
     pub json: bool,
+    /// `limits.brain_read_budget`; the built-in default when unset.
+    pub read_budget: Option<u32>,
+}
+
+impl ListOpts {
+    fn budget(&self) -> u32 {
+        self.read_budget
+            .unwrap_or(crate::brain::prompt::DEFAULT_READ_BUDGET)
+    }
 }
 
 pub fn render_list(view: &RunView, o: ListOpts, now: OffsetDateTime) -> String {
     let mut list = inspect::list(view, now);
     list.dispatches.retain(|d| keep(d, o));
     if o.json {
-        return format!("{}\n", pretty(&list));
+        let mut v = serde_json::to_value(&list).unwrap_or_default();
+        v["brain"] = serde_json::json!(delegation::json(view, o.budget()));
+        return format!("{}\n", pretty(&v));
     }
     let run = view.run_short();
     let n = list.dispatches.len();
@@ -37,13 +48,21 @@ pub fn render_list(view: &RunView, o: ListOpts, now: OffsetDateTime) -> String {
     let mut out = format!("run {run}  {n}{failed} {noun}\n\n");
     if list.dispatches.is_empty() {
         out.push_str(empty_line(o));
-        return out;
+    } else {
+        out.push_str(&heading());
+        for d in &list.dispatches {
+            out.push_str(&row(d));
+        }
     }
-    out.push_str(&heading());
-    for d in &list.dispatches {
-        out.push_str(&row(d));
-    }
+    out.push_str(&footer(view, o));
     out
+}
+
+/// The delegation metric under the rows, for a run with a brain.
+fn footer(view: &RunView, o: ListOpts) -> String {
+    view.brain_self_work()
+        .map(|w| format!("\n{}", delegation::line(&w, o.budget())))
+        .unwrap_or_default()
 }
 
 fn empty_line(o: ListOpts) -> &'static str {
@@ -318,8 +337,11 @@ pub async fn follow(paths: &RunPaths, opts: ListOpts) -> anyhow::Result<()> {
             out.flush()?;
         }
         if follower.finished() {
-            if !opts.json && follower.nothing_printed() {
-                print!("{}", empty_line(opts));
+            if !opts.json {
+                if follower.nothing_printed() {
+                    print!("{}", empty_line(opts));
+                }
+                print!("{}", footer(&follower.view, opts));
             }
             return Ok(());
         }

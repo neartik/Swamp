@@ -602,11 +602,15 @@ fn dispatches_list_one_row_per_dispatch() {
         &schema_2(),
         ListOpts {
             failed: true,
-            json: false,
+            ..ListOpts::default()
         },
         at(900),
     );
-    let rows: Vec<&str> = failed.lines().skip(3).collect();
+    let rows: Vec<&str> = failed
+        .lines()
+        .skip(3)
+        .take_while(|l| !l.is_empty())
+        .collect();
     assert_eq!(
         rows.len(),
         1,
@@ -624,8 +628,8 @@ fn dispatches_json_carries_the_schema_and_every_count() {
     let text = render_list(
         &schema_2(),
         ListOpts {
-            failed: false,
             json: true,
+            ..ListOpts::default()
         },
         at(900),
     );
@@ -640,7 +644,7 @@ fn a_schema_1_run_lists_its_nodes_in_the_legacy_bucket() {
     use swamp::ui::dispatches::{ListOpts, render_list};
     let view = schema_1();
     let text = render_list(&view, ListOpts::default(), at(900));
-    let rows: Vec<&str> = text.lines().skip(3).collect();
+    let rows: Vec<&str> = text.lines().skip(3).take_while(|l| !l.is_empty()).collect();
     assert_eq!(rows.len(), 1, "{text}");
     assert!(rows[0].starts_with("legacy"), "{text}");
     assert!(rows[0].trim_end().ends_with('-'), "no caller: {text}");

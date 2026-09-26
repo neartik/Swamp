@@ -698,3 +698,62 @@ fn every_glyph_is_one_column() {
         assert_eq!(g.width(), 1, "{g:?} is not one column");
     }
 }
+
+/// The P4 journal with `n` reads by the brain before its first dispatch.
+fn with_brain_reads(n: usize) -> Vec<JournalLine> {
+    use crate::model::event::WorkerEvent;
+    let mut lines = fx::p4_journal();
+    let first = lines
+        .iter()
+        .position(|l| matches!(l.event, JournalEvent::DispatchIssued { .. }))
+        .expect("the fixture dispatches");
+    let template = lines[first].clone();
+    let reads = (0..n).map(|i| JournalLine {
+        node: Some(fx::id(0)),
+        event: JournalEvent::NodeEvent {
+            offset: 0,
+            event: WorkerEvent::ToolCall {
+                id: format!("toolu_{i}"),
+                name: "Read".into(),
+                summary: String::new(),
+            },
+        },
+        ..template.clone()
+    });
+    lines.splice(first..first, reads.collect::<Vec<_>>());
+    for (i, l) in lines.iter_mut().enumerate() {
+        l.seq = i as u64;
+    }
+    lines
+}
+
+/// Within the budget the delegation cell is the first header cell to go; past it, it outlasts
+/// the queued count and the cost. Only the 60-column row, where freshness and the stuck count
+/// leave no room, goes without it.
+#[test]
+fn the_delegation_cell_warns_once_the_budget_is_spent() {
+    let mut b = board_of(vec![pane(fx::run_id(), &with_brain_reads(11))]);
+    let header = |b: &Board, width: u16| {
+        draw(b, width)
+            .lines()
+            .take(2)
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    for width in [40u16, 52, 60, 85, 100, 140] {
+        fits(&draw(&b, width), width as usize);
+        assert!(header(&b, width).contains("1 stuck"), "{width}");
+        let warned = header(&b, width).contains("brain 11/8 over");
+        assert_eq!(warned, width != 60, "{width}: {}", header(&b, width));
+    }
+    assert!(header(&b, 140).contains("brain 11/8 over (21%)"));
+    assert!(!header(&b, 40).contains("~$"), "{}", header(&b, 40));
+
+    b.read_budget = 16;
+    assert!(!header(&b, 60).contains("brain"), "{}", header(&b, 60));
+    assert!(
+        header(&b, 140).contains("brain 11/16 ("),
+        "{}",
+        header(&b, 140)
+    );
+}

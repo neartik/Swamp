@@ -2,7 +2,7 @@ use crate::config::Config;
 
 const DEFAULT_NODES: u32 = 32;
 const DEFAULT_DEPTH: u32 = 2;
-const DEFAULT_READ_BUDGET: u32 = 8;
+pub const DEFAULT_READ_BUDGET: u32 = 8;
 
 /// How the session was launched. `swamp run` gets exactly one turn; `swamp chat` gets a human.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -16,7 +16,7 @@ pub enum BrainMode {
 pub fn system_prompt(cfg: &Config, mode: BrainMode) -> String {
     let nodes = cfg.limits.max_nodes_per_run.unwrap_or(DEFAULT_NODES);
     let depth = cfg.limits.max_depth.unwrap_or(DEFAULT_DEPTH);
-    let reads = cfg.limits.brain_read_budget.unwrap_or(DEFAULT_READ_BUDGET);
+    let reads = cfg.brain_read_budget();
     let one_shot = match mode {
         BrainMode::Interactive => "",
         BrainMode::OneShot => ONE_SHOT,

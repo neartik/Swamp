@@ -2,7 +2,7 @@
 source: src/ui/board/screens.rs
 expression: wide
 ---
-swamp board                                2 running · 1 stuck · 1 queued · ~$0.43 · observed 4s ago
+swamp board              2 running · 1 stuck · 1 queued · ~$0.43 · brain 0/8 (21%) · observed 4s ago
 ────────────────────────────────────────────────────────────────────────────────────────────────────
   ◆ brain             orchestrating                    main       opus-4-1    4m12s  ↓ 214k   ~$0.09
 

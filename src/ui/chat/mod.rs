@@ -155,6 +155,7 @@ async fn plain_slash(command: &str, disp: &Arc<Dispatcher>, ctx: &Ctx) -> anyhow
                         node,
                         dispatch,
                         events: true,
+                        read_budget: Some(app.read_budget),
                         ..TraceOpts::default()
                     },
                 );

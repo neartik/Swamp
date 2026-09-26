@@ -20,6 +20,7 @@ use swamp::model::core::{
     AccountId, ChangeKind, Cost, CostBasis, EvidenceSource, FileChange, NodeState, Usage,
 };
 use swamp::model::dispatch::{DispatchCounts, DispatchState, NodeTransition, Phase};
+use swamp::model::event::WorkerEvent;
 use swamp::model::failure::{Detector, Failure};
 
 fn note(text: &str) -> JournalEvent {
@@ -1402,4 +1403,123 @@ fn the_first_terminal_task_state_wins() {
         v.state_of(task)
     );
     assert_eq!(v.transitions[&task].len(), 3);
+}
+
+/// The delegation metric: the brain's own tool calls before its first dispatch, never swamp's
+/// dispatch call itself and never what it read after, and its share of the run's cost.
+#[test]
+fn brain_self_work_counts_the_brain_calls_before_its_first_dispatch() {
+    let view = fold(&schema_2_with_reads(3));
+    let w = view.brain_self_work().expect("a run with a brain");
+    assert_eq!(w.calls, 3, "{w:?}");
+    assert!(w.dispatched);
+    assert_eq!(w.brain_usd, Some(1.0));
+    // The brain's 1.00 plus a1 0.10, e1 0.05, a2 0.50 and b1 0.25.
+    assert!((w.total_usd - 1.9).abs() < 1e-9, "{w:?}");
+    let share = w.cost_share().expect("a share");
+    assert!((share - 1.0 / 1.9).abs() < 1e-9, "{share}");
+    assert!(!w.over(3) && w.over(2));
+}
+
+#[test]
+fn brain_self_work_counts_every_call_while_nothing_was_dispatched() {
+    let lines = schema_2_with_reads(5);
+    let first = lines
+        .iter()
+        .position(|l| {
+            matches!(&l.event, JournalEvent::NodeEvent { event: WorkerEvent::ToolCall { name, .. }, .. }
+                if name.starts_with("mcp__swamp__"))
+        })
+        .expect("the brain's dispatch call");
+    let w = fold(&lines[..first])
+        .brain_self_work()
+        .expect("a run with a brain");
+    assert_eq!(
+        w.calls, 5,
+        "swamp's own tool is not the brain's work: {w:?}"
+    );
+    assert!(!w.dispatched);
+}
+
+/// The brain's stdout is read while its MCP call is served, so reads it made before the call
+/// can reach the journal after the `DispatchIssued` the call wrote. Stream order decides.
+#[test]
+fn reads_journaled_after_the_dispatch_they_preceded_still_count() {
+    let mut lines = schema_2_with_reads(3);
+    let issued = lines
+        .iter()
+        .position(|l| matches!(l.event, JournalEvent::DispatchIssued { .. }))
+        .expect("a dispatch");
+    let brain_stream: Vec<JournalLine> = lines
+        .iter()
+        .take(issued)
+        .filter(|l| matches!(l.event, JournalEvent::NodeEvent { .. }))
+        .cloned()
+        .collect();
+    lines.retain(|l| !(l.seq < issued as u64 && matches!(l.event, JournalEvent::NodeEvent { .. })));
+    let at = lines
+        .iter()
+        .position(|l| matches!(l.event, JournalEvent::DispatchIssued { .. }))
+        .expect("a dispatch")
+        + 1;
+    lines.splice(at..at, brain_stream);
+    for (i, l) in lines.iter_mut().enumerate() {
+        l.seq = i as u64;
+    }
+    let w = fold(&lines).brain_self_work().expect("a brain");
+    assert_eq!(w.calls, 3, "{w:?}");
+    assert!(w.dispatched);
+}
+
+#[test]
+fn brain_self_work_is_the_same_however_the_journal_is_replayed() {
+    let lines = schema_2_with_reads(4);
+    let mut twice = RunView::default();
+    for l in lines.iter().chain(lines.iter()) {
+        twice.apply(l);
+    }
+    assert_eq!(twice.brain_self_work(), fold(&lines).brain_self_work());
+}
+
+#[test]
+fn a_run_without_a_brain_has_no_self_work() {
+    let (worker, d) = (nid(7), did(40));
+    let mut rec = record(worker, worker, Some(nid(0)), 1);
+    rec.dispatch = Some(d);
+    let lines = vec![
+        line(
+            0,
+            Some(worker),
+            JournalEvent::NodeSpawned {
+                node: Box::new(rec),
+            },
+        ),
+        line(1, Some(worker), brain_call("Read")),
+    ];
+    assert_eq!(fold(&lines).brain_self_work(), None);
+}
+
+/// Schema 1 journaled no `DispatchIssued`: its `swamp_dispatch` call is the first dispatch.
+#[test]
+fn brain_self_work_reads_a_schema_1_journal() {
+    let view = RunView::load(&fixture_path("journal-schema1.jsonl"), false).expect("load");
+    let w = view.brain_self_work().expect("the fixture has a brain");
+    assert_eq!(w.calls, 0);
+    assert!(w.dispatched);
+    assert_eq!(w.brain_usd, Some(2.0));
+    let share = w.cost_share().expect("a share");
+    assert!((share - 2.0 / view.cost_usd).abs() < 1e-9, "{share}");
+}
+
+/// A brain that reported no cost has no share rather than a zero one.
+#[test]
+fn a_brain_with_no_reported_cost_has_no_share() {
+    let lines: Vec<JournalLine> = schema_2_with_reads(1)
+        .into_iter()
+        .filter(|l| !matches!(l.event, JournalEvent::NodeUsage { .. }))
+        .collect();
+    let w = fold(&lines).brain_self_work().expect("a brain");
+    assert_eq!(w.brain_usd, None);
+    assert_eq!(w.cost_share(), None);
+    assert_eq!(w.calls, 1);
 }

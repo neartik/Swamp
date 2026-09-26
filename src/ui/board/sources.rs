@@ -171,6 +171,7 @@ impl Sources {
             self.cfg.dispatch.policy.unwrap_or_default(),
             OffsetDateTime::now_utc(),
         );
+        board.read_budget = self.cfg.brain_read_budget();
         self.sync_runs(&mut board, at)?;
         self.sync_accounts(&mut board, at)?;
         self.refresh_liveness(&mut board);

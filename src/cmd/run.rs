@@ -293,6 +293,7 @@ async fn with_brain(
         &view,
         &TraceOpts {
             json: ctx.json,
+            read_budget: Some(cfg.brain_read_budget()),
             ..TraceOpts::default()
         },
     ));

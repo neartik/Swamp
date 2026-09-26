@@ -9,6 +9,7 @@ use swamp::model::core::{
     AccountId, Cost, CostBasis, NodeKind, NodeState, Provider, Tier, Usage, WorkspaceRef,
 };
 use swamp::model::dispatch::{DispatchCounts, DispatchRecord, Phase, TaskRef};
+use swamp::model::event::WorkerEvent;
 use swamp::model::failure::{Detector, Failure};
 use swamp::model::node::NodeRecord;
 use time::OffsetDateTime;
@@ -406,6 +407,58 @@ pub fn schema_2() -> Vec<JournalLine> {
         ),
         (Some(d), queued(d, d2, "bench", 1)),
     ];
+    events
+        .into_iter()
+        .enumerate()
+        .map(|(i, (node, event))| line(i as u64, node, event))
+        .collect()
+}
+
+/// A tool call as the brain CLI's own stream reports it.
+pub fn brain_call(name: &str) -> JournalEvent {
+    JournalEvent::NodeEvent {
+        offset: 0,
+        event: WorkerEvent::ToolCall {
+            id: format!("toolu_{name}"),
+            name: name.to_owned(),
+            summary: String::new(),
+        },
+    }
+}
+
+/// `schema_2` with `reads` brain reads before its first dispatch, swamp's own dispatch call
+/// among them as the CLI names it, and two more reads after the dispatch.
+pub fn schema_2_with_reads(reads: usize) -> Vec<JournalLine> {
+    let brain = nid(0);
+    let lines = schema_2();
+    let first = lines
+        .iter()
+        .position(|l| matches!(l.event, JournalEvent::BrainToolCall { .. }))
+        .expect("schema_2 dispatches");
+    let mut before: Vec<(Option<NodeId>, JournalEvent)> = (0..reads)
+        .map(|i| {
+            (
+                Some(brain),
+                brain_call(if i % 2 == 0 { "Read" } else { "Grep" }),
+            )
+        })
+        .collect();
+    before.push((Some(brain), brain_call("mcp__swamp__swamp_dispatch")));
+    let after = [
+        (Some(brain), brain_call("Read")),
+        (Some(brain), brain_call("Bash")),
+    ];
+    let mut events: Vec<(Option<NodeId>, JournalEvent)> = Vec::new();
+    for (i, l) in lines.into_iter().enumerate() {
+        if i == first {
+            events.append(&mut before);
+        }
+        let issued = matches!(l.event, JournalEvent::DispatchIssued { .. });
+        events.push((l.node, l.event));
+        if issued && !after.is_empty() {
+            events.extend(after.iter().cloned());
+        }
+    }
     events
         .into_iter()
         .enumerate()

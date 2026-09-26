@@ -3,7 +3,7 @@ source: src/ui/board/screens.rs
 expression: "draw(&b, 52)"
 ---
 swamp board                          observed 4s ago
-2 running · 1 stuck · 1 queued · ~$0.43
+2 running · 1 stuck · 1 queued · ~$0.43 · brain 0/8
 ────────────────────────────────────────────────────
   ◆ brain      orchestrating                   4m12s
 

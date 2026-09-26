@@ -80,6 +80,8 @@ pub struct App {
     /// Accounts `accounts.json` remembers that this repo's config no longer names.
     stale_accounts: Vec<(AccountId, AccountState)>,
     quota_max_age: Duration,
+    /// `limits.brain_read_budget`, for the delegation line under `/status` and `/dispatches`.
+    pub read_budget: u32,
     /// `providers.openai.quota_source`: "none" and "rollout" forbid the app-server probe.
     probe_openai: bool,
     pub blocks: Vec<Block>,
@@ -132,6 +134,7 @@ impl App {
             account_cfg: cfg.accounts.clone(),
             stale_accounts: Vec::new(),
             quota_max_age: cfg.quota_max_age(),
+            read_budget: cfg.brain_read_budget(),
             probe_openai: cfg.probes_app_server(Provider::Openai),
             blocks: Vec::new(),
             editor: Editor::default(),
@@ -953,7 +956,11 @@ impl App {
         match name.as_str() {
             "help" | "?" => vec![self.output("commands", slash::help_body(self.width))],
             "status" => {
-                let body = trace::render(&self.view, &trace::TraceOpts::default());
+                let opts = trace::TraceOpts {
+                    read_budget: Some(self.read_budget),
+                    ..trace::TraceOpts::default()
+                };
+                let body = trace::render(&self.view, &opts);
                 vec![self.output("", lines_of(&body))]
             }
             "trace" => self.trace(arg.as_deref()),
@@ -961,6 +968,7 @@ impl App {
                 let opts = dispatches::ListOpts {
                     failed: arg.as_deref() == Some("--failed"),
                     json: false,
+                    read_budget: Some(self.read_budget),
                 };
                 let body = dispatches::render_list(&self.view, opts, self.now);
                 vec![self.output("", lines_of(&body))]

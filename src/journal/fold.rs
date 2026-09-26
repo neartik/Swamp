@@ -46,6 +46,8 @@ pub struct RunView {
     pub transitions: BTreeMap<NodeId, Vec<NodeTransition>>,
     pub exited: BTreeSet<NodeId>,
     pub call_seq: Option<CallSeq>,
+    /// Delegation bookkeeping behind `brain_self_work`.
+    self_work: SelfWorkFold,
     /// Only when `with_events`.
     pub events: BTreeMap<NodeId, Vec<WorkerEvent>>,
     pub totals: Usage,
@@ -57,6 +59,73 @@ pub struct RunView {
     /// Set by `load`; without it `NodeEvent` payloads are folded but not retained.
     pub with_events: bool,
     seen: bool,
+}
+
+/// The brain's stream is read concurrently with the MCP call it makes, so its tool calls can
+/// land in the journal after the `DispatchIssued` they preceded. Its own `swamp_dispatch`
+/// call, in stream order, is the cut; the journal's first dispatch is the fallback for a
+/// stream that never names one (schema 1, or a CLI that hides MCP calls).
+#[derive(Debug, Default, Clone, Copy)]
+struct SelfWorkFold {
+    /// The brain's own tool calls up to its first `swamp_dispatch` call, swamp's tools aside.
+    calls: u32,
+    /// The brain's stream has shown its first `swamp_dispatch` call.
+    stream_cut: bool,
+    /// `calls` when the journal first showed a dispatch.
+    at_journal_cut: Option<u32>,
+}
+
+impl SelfWorkFold {
+    fn tool_call(&mut self, name: &str) {
+        if self.stream_cut {
+            return;
+        }
+        match crate::mcp::server::swamp_tool(name) {
+            Some("swamp_dispatch") => self.stream_cut = true,
+            Some(_) => {}
+            None => self.calls += 1,
+        }
+    }
+
+    fn journal_cut(&mut self) {
+        self.at_journal_cut.get_or_insert(self.calls);
+    }
+
+    fn calls(&self) -> u32 {
+        match (self.stream_cut, self.at_journal_cut) {
+            (false, Some(n)) => n,
+            _ => self.calls,
+        }
+    }
+
+    fn dispatched(&self) -> bool {
+        self.stream_cut || self.at_journal_cut.is_some()
+    }
+}
+
+/// How much the brain did itself instead of delegating: `RunView::brain_self_work`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BrainSelfWork {
+    /// Tool calls before the first dispatch, or so far when nothing was dispatched yet.
+    pub calls: u32,
+    pub dispatched: bool,
+    /// None while no brain node has reported a cost.
+    pub brain_usd: Option<f64>,
+    pub total_usd: f64,
+    /// False when some node, the brain included, reported no cost.
+    pub cost_complete: bool,
+}
+
+impl BrainSelfWork {
+    /// The brain's share of the run's cost, none before anything reported a cost.
+    pub fn cost_share(&self) -> Option<f64> {
+        let brain = self.brain_usd?;
+        (self.total_usd > 0.0).then(|| (brain / self.total_usd).clamp(0.0, 1.0))
+    }
+
+    pub fn over(&self, budget: u32) -> bool {
+        self.calls > budget
+    }
 }
 
 /// One collapsed row: a logical node plus every attempt that served it.
@@ -183,6 +252,10 @@ impl RunView {
                 });
             }
             JournalEvent::NodeSpawned { node } => {
+                // A worker exists only because something dispatched it, whatever the schema.
+                if node.kind == NodeKind::Worker {
+                    self.self_work.journal_cut();
+                }
                 self.link_task(node);
                 self.spawn((**node).clone());
             }
@@ -223,6 +296,11 @@ impl RunView {
                 let node = l.node;
                 if let Some(n) = self.node_mut(l) {
                     n.stream_offset = n.stream_offset.max(*offset);
+                }
+                if let WorkerEvent::ToolCall { name, .. } = event
+                    && self.node_mut(l).is_some_and(|n| n.kind == NodeKind::Brain)
+                {
+                    self.self_work.tool_call(name);
                 }
                 if with_events && let Some(id) = node {
                     self.events.entry(id).or_default().push(event.clone());
@@ -359,8 +437,15 @@ impl RunView {
                     s.quota_source = *source;
                 }
             }
-            JournalEvent::BrainToolCall { call_seq, .. } => self.saw_call(*call_seq),
+            JournalEvent::BrainToolCall { tool, call_seq, .. } => {
+                // Schema 1 journaled no DispatchIssued: the call itself marks the dispatch.
+                if tool == "swamp_dispatch" {
+                    self.self_work.journal_cut();
+                }
+                self.saw_call(*call_seq);
+            }
             JournalEvent::DispatchIssued { record } => {
+                self.self_work.journal_cut();
                 self.saw_call(record.call_seq);
                 for t in &record.tasks {
                     self.tasks.entry(t.logical).or_insert_with(|| TaskView {
@@ -598,6 +683,30 @@ impl RunView {
                 };
             }
         }
+    }
+
+    /// The brain's own tool calls before its first dispatch and its share of the cost. None
+    /// for a run without a brain.
+    pub fn brain_self_work(&self) -> Option<BrainSelfWork> {
+        let brains: Vec<&NodeRecord> = self
+            .nodes
+            .values()
+            .filter(|n| n.kind == NodeKind::Brain)
+            .collect();
+        if brains.is_empty() {
+            return None;
+        }
+        Some(BrainSelfWork {
+            calls: self.self_work.calls(),
+            dispatched: self.self_work.dispatched(),
+            brain_usd: brains
+                .iter()
+                .filter_map(|n| n.cost)
+                .map(|c| c.usd)
+                .reduce(|a, b| a + b),
+            total_usd: self.cost_usd,
+            cost_complete: self.cost_complete,
+        })
     }
 
     /// `mark_orphans` against the run's own pidfiles.
