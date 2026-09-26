@@ -19,9 +19,7 @@ struct Target {
     whole: bool,
 }
 
-/// Cancel a run, a node or a dispatch. Detached workers do not care that the supervisor is
-/// gone, so killing their process groups is the only way to stop them; every task is also
-/// journaled as cancelled, so a live supervisor does not retry it.
+/// Cancel a run, a node or a dispatch: kill its process groups and journal each task cancelled.
 pub async fn run(ctx: &Ctx, args: &CancelArgs) -> anyhow::Result<i32> {
     let grace = match args.signal {
         SignalArg::Term => ctx
@@ -72,6 +70,15 @@ pub async fn run(ctx: &Ctx, args: &CancelArgs) -> anyhow::Result<i32> {
                         t.paths.run
                     );
                 }
+                Outcome::Killed { phase, pgid } => {
+                    cancelled += 1;
+                    println!(
+                        "stopped node {} (pgid {pgid}), already {}, in run {}",
+                        logical.short(),
+                        fmt::phase_word(phase),
+                        t.paths.run
+                    );
+                }
                 Outcome::Ended(phase) if !t.whole => {
                     println!(
                         "node {} already {}",
@@ -100,8 +107,7 @@ fn whole_run(paths: RunPaths, view: RunView) -> Target {
     }
 }
 
-/// A run spec first, then nodes and dispatches together: a prefix that names one of each is
-/// ambiguous, exactly as two nodes would be.
+/// A run first, then nodes and dispatches together: a prefix naming one of each is ambiguous.
 fn resolve(ctx: &Ctx, spec: &str) -> anyhow::Result<Target> {
     let spec = spec.trim();
     let prefixed = spec.starts_with("dsp_") || spec.starts_with("nd_");
@@ -175,13 +181,30 @@ fn unstarted(ctx: &Ctx, spec: &str) -> anyhow::Result<Option<(RunPaths, NodeId)>
             continue;
         };
         for id in inspect::match_tasks(&view, spec) {
-            hits.push((paths.clone(), id));
+            let title = view
+                .tasks
+                .get(&id)
+                .map(|t| t.title.clone())
+                .unwrap_or_default();
+            hits.push((paths.clone(), id, title));
         }
     }
     match hits.len() {
         0 => Ok(None),
-        1 => Ok(hits.pop()),
-        _ => anyhow::bail!("node `{spec}` is ambiguous"),
+        1 => Ok(hits.pop().map(|(paths, id, _)| (paths, id))),
+        _ => anyhow::bail!(
+            "node `{spec}` is ambiguous: {}",
+            hits.iter()
+                .take(8)
+                .map(|(rp, id, title)| format!(
+                    "{} (run {}, {})",
+                    id.short(),
+                    rp.run.short(),
+                    fmt::truncate(title, 40)
+                ))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
     }
 }
 

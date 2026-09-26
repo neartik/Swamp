@@ -35,6 +35,8 @@ pub enum Outcome {
     Cancelled { from: Phase, pgid: Option<i32> },
     /// Already terminal: nothing is journaled and nothing is killed.
     Ended(Phase),
+    /// Already terminal, but an attempt was still running and its process group was killed.
+    Killed { phase: Phase, pgid: i32 },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -42,9 +44,7 @@ struct Marker {
     by: CancelSource,
 }
 
-/// Cancels one logical task the same way from every surface: a marker the owning process
-/// honours instead of retrying, one durable `NodeStateChanged -> Cancelled` on the task, then
-/// the stop itself.
+/// Marks, journals `Cancelled` durably, then stops the attempt, the same way from every surface.
 pub async fn cancel_node(
     paths: &RunPaths,
     view: &RunView,
@@ -58,6 +58,13 @@ pub async fn cancel_node(
         .ok_or_else(|| anyhow::anyhow!("no task {logical} in run {}", paths.run))?;
     let from = Phase::from(&state);
     if state.is_terminal() {
+        // A worker can outlive its task's terminal line when its supervisor died first.
+        if let Stop::Kill { grace } = stop
+            && let Some(pgid) = live_pgid(paths, view, logical)
+        {
+            terminate(pgid, grace, Reaper::Here).await?;
+            return Ok(Outcome::Killed { phase: from, pgid });
+        }
         return Ok(Outcome::Ended(from));
     }
     mark(paths, logical, by)?;

@@ -977,6 +977,24 @@ async fn result_answers_for_a_node_dispatched_by_a_previous_process() {
         assert_eq!(summary.matches("</worker-output>").count(), 1, "{summary}");
     }
 
+    let r = tools::call(&later, "swamp_result", json!({ "node": id.short() }))
+        .await
+        .expect("result");
+    let attempt: NodeId = r["attempt"]
+        .as_str()
+        .expect("attempt")
+        .parse()
+        .expect("an attempt id");
+    let patch = h.paths.patch(attempt);
+    std::fs::create_dir_all(patch.parent().expect("attempt dir")).expect("attempt dir");
+    std::fs::write(&patch, "diff --git a/f b/f\n+from the attempt\n").expect("patch");
+    let diff = tools::call(&later, "swamp_worker_diff", json!({ "node": id.short() }))
+        .await
+        .expect("a journal-backed diff");
+    assert_eq!(diff["patch_path"], json!(patch), "{diff}");
+    let text = diff["diff"].as_str().expect("diff");
+    assert!(text.contains("+from the attempt"), "{text}");
+
     let status = tools::call(&later, "swamp_status", json!({ "dispatch": dispatch }))
         .await
         .expect("status of one dispatch");
@@ -994,6 +1012,99 @@ async fn result_answers_for_a_node_dispatched_by_a_previous_process() {
 
     let unknown = tools::call(&later, "swamp_result", json!({ "node": "zzzzzz" })).await;
     assert_eq!(unknown.expect_err("no such node").code, -32602);
+
+    h.server.abort();
+}
+
+/// `swamp_cancel` only reaches what the brain dispatched: a worker's own dispatch is refused.
+#[tokio::test]
+async fn cancel_refuses_a_dispatch_the_brain_did_not_issue() {
+    let h = harness(Duration::ZERO).await;
+    let out = tools::call(
+        &h.disp,
+        "swamp_dispatch",
+        json!({"tasks":[{"title":"parent","prompt":"go"}]}),
+    )
+    .await
+    .expect("dispatch");
+    let worker: NodeId = out["nodes"][0]["node"]
+        .as_str()
+        .expect("id")
+        .parse()
+        .expect("a node id");
+
+    let nested = DispatchId::new();
+    let logical = NodeId::new();
+    let record = swamp::model::DispatchRecord {
+        id: nested,
+        run: h.paths.run,
+        caller: worker,
+        call_seq: None,
+        wait: true,
+        max_wait_s: None,
+        tasks: vec![swamp::model::TaskRef {
+            logical,
+            title: "child".into(),
+            tier: Tier::Mid,
+            provider: swamp::model::core::Provider::Anthropic,
+        }],
+        at: time::OffsetDateTime::now_utc(),
+    };
+    h.journal
+        .emit_durable(
+            Some(worker),
+            swamp::JournalEvent::DispatchIssued {
+                record: Box::new(record),
+            },
+        )
+        .await
+        .expect("issued");
+    h.journal
+        .emit_durable(
+            Some(logical),
+            swamp::JournalEvent::TaskQueued {
+                logical,
+                dispatch: nested,
+                title: "child".into(),
+                tier: Tier::Mid,
+                depth: 2,
+            },
+        )
+        .await
+        .expect("queued");
+
+    let reply = tools::call(
+        &h.disp,
+        "swamp_cancel",
+        json!({ "dispatch": nested.to_string(), "nodes": [logical.to_string()] }),
+    )
+    .await
+    .expect("cancel");
+    assert_eq!(reply["cancelled"], json!([]), "{reply}");
+    let refused = reply["refused"].as_array().expect("refused");
+    assert!(
+        refused
+            .iter()
+            .any(|r| r["dispatch"] == json!(nested.to_string())),
+        "{reply}"
+    );
+    assert!(
+        refused
+            .iter()
+            .any(|r| r["node"] == json!(logical.to_string())),
+        "{reply}"
+    );
+
+    let journal = std::fs::read_to_string(h.journal.paths().journal()).expect("journal");
+    let cancelled = journal
+        .lines()
+        .map(|l| serde_json::from_str::<Value>(l).expect("journal line"))
+        .filter(|l| {
+            l["ev"] == json!("node_state_changed") && l["to"]["state"] == json!("cancelled")
+        })
+        .count();
+    assert_eq!(cancelled, 0, "{journal}");
+    assert!(!h.paths.cancel_marker(logical).exists());
 
     h.server.abort();
 }

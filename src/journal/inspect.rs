@@ -1,5 +1,4 @@
-//! The dispatch surface as data: one shape for `swamp dispatches --json`,
-//! `swamp dispatch --json` and the brain's `swamp_inspect`. docs/DISPATCH.md documents it.
+//! The dispatch surface as data, the JSON shape docs/DISPATCH.md documents.
 
 use crate::dispatch::policy::Ineligible;
 use crate::ids::{CallSeq, DispatchId, NodeId};
@@ -48,7 +47,6 @@ pub struct Caller {
     pub node: NodeId,
     /// `brain`, or `task` for a worker that dispatched work of its own.
     pub kind: &'static str,
-    /// The caller's task, when it is one.
     #[serde(serialize_with = "prefixed_opt")]
     pub task: Option<NodeId>,
 }
@@ -94,7 +92,6 @@ impl PhaseCounts {
 #[derive(Debug, Clone, Copy, Serialize)]
 pub struct Rollup {
     pub usd: f64,
-    /// False when any attempt reported no cost.
     pub complete: bool,
     pub usage: Usage,
     pub nodes: u32,
@@ -134,10 +131,8 @@ pub struct TaskDetail {
     pub parent: Option<NodeId>,
     pub depth: Option<u32>,
     pub state: Phase,
-    /// The full state, payload included.
     pub detail: NodeState,
     pub elapsed_ms: Option<u64>,
-    /// Of the latest attempt.
     pub account: Option<AccountId>,
     pub model: Option<String>,
     pub provider: Option<Provider>,
@@ -150,7 +145,6 @@ pub struct TaskDetail {
     pub rejected: Option<Failure>,
     pub failure: Option<Failure>,
     pub transitions: Vec<Transition>,
-    /// Dispatches this task's attempts issued.
     pub dispatches: Vec<String>,
 }
 

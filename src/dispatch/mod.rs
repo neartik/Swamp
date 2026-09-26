@@ -301,8 +301,7 @@ impl Dispatcher {
         self.cancel_as(id, CancelSource::User).await.map(|_| ())
     }
 
-    /// Cancels the task `id` names (its logical id or any attempt's) through the same helper
-    /// `swamp cancel` uses, so both journal the same transition.
+    /// Cancels the task `id` names (logical or any attempt) exactly as `swamp cancel` does.
     pub async fn cancel_as(&self, id: NodeId, by: CancelSource) -> anyhow::Result<Outcome> {
         let dir = self.journal.paths().dir.clone();
         let view = tokio::task::spawn_blocking(move || RunView::load(&dir, false)).await??;

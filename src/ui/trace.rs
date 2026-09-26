@@ -61,8 +61,7 @@ fn blocks(view: &RunView, rows: &[TreeRow], o: &TraceOpts) -> String {
     out
 }
 
-/// `--group-by dispatch`: rows outside any dispatch first, then one section per dispatch with
-/// its tasks one level down, a nested dispatch getting a section of its own.
+/// Rows outside any dispatch first, then one section per dispatch with its tasks one level down.
 fn grouped(view: &RunView, rows: Vec<TreeRow>, o: &TraceOpts) -> String {
     let of = |logical: NodeId| view.tasks.get(&logical).map(|t| t.dispatch);
     let loose: Vec<TreeRow> = rows
@@ -511,7 +510,7 @@ fn render_json(view: &RunView, o: &TraceOpts) -> String {
             .unwrap_or(Value::Null);
         return format!("{}\n", pretty(&value));
     }
-    format!("{}\n", pretty(&full_json(view)))
+    format!("{}\n", pretty(&full_json(view, o.dispatch)))
 }
 
 fn pretty(v: &Value) -> String {
@@ -519,16 +518,20 @@ fn pretty(v: &Value) -> String {
 }
 
 /// One source of truth: the text tree and `--json` are the same fold.
-fn full_json(view: &RunView) -> Value {
+fn full_json(view: &RunView, dispatch: Option<DispatchId>) -> Value {
+    let rows = match dispatch {
+        Some(d) => under_dispatch(view, view.tree(), d),
+        None => view.tree(),
+    };
+    let shown = |id: &NodeId| dispatch.is_none() || rows.iter().any(|r| r.attempts.contains(id));
     let mut nodes = Map::new();
-    for (id, rec) in &view.nodes {
+    for (id, rec) in view.nodes.iter().filter(|(id, _)| shown(id)) {
         nodes.insert(
             id.to_string(),
             serde_json::to_value(rec).unwrap_or(Value::Null),
         );
     }
-    let tree: Vec<Value> = view
-        .tree()
+    let tree: Vec<Value> = rows
         .iter()
         .map(|r| {
             json!({
@@ -541,7 +544,7 @@ fn full_json(view: &RunView) -> Value {
         })
         .collect();
     let mut events = Map::new();
-    for (id, evs) in &view.events {
+    for (id, evs) in view.events.iter().filter(|(id, _)| shown(id)) {
         events.insert(
             id.to_string(),
             serde_json::to_value(evs).unwrap_or(Value::Null),
@@ -562,19 +565,30 @@ fn full_json(view: &RunView) -> Value {
                 .format(&time::format_description::well_known::Rfc3339).unwrap_or_default(),
         })
     });
-    json!({
-        "run": header,
-        "finished": view.finished,
-        "last_seq": view.last_seq,
-        "totals": {
+    let totals = match dispatch {
+        Some(d) => {
+            let t = view.rollup(crate::journal::fold::Scope::Dispatch(d));
+            json!({ "usage": t.usage, "cost_usd": t.cost_usd, "cost_complete": t.cost_complete })
+        }
+        None => json!({
             "usage": view.totals,
             "cost_usd": view.cost_usd,
             "cost_complete": view.cost_complete,
-        },
+        }),
+    };
+    let mut out = json!({
+        "run": header,
+        "finished": view.finished,
+        "last_seq": view.last_seq,
+        "totals": totals,
         "tree": tree,
         "nodes": Value::Object(nodes),
         "events": Value::Object(events),
-    })
+    });
+    if let Some(d) = dispatch {
+        out["dispatch"] = json!(crate::journal::inspect::label(d));
+    }
+    out
 }
 
 // ---------------------------------------------------------------- follow

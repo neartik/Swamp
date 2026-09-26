@@ -511,8 +511,7 @@ async fn pager(patch: &camino::Utf8Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// `k` cancels one node, never the run: the TUI is an observer, so it cancels the way
-/// `swamp cancel` does from outside the supervising process.
+/// `k` cancels one node, never the run, the way `swamp cancel` does from outside.
 async fn cancel_node(app: &App, node: NodeId) {
     let Some(paths) = app.paths.as_ref() else {
         return;

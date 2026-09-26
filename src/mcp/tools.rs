@@ -345,7 +345,11 @@ async fn result(disp: &Arc<Dispatcher>, args: Value) -> Result<Value, RpcError> 
         .and_then(|a| std::fs::read(paths.result(a.id)).ok())
         .and_then(|b| serde_json::from_slice::<Value>(&b).ok());
     let mut value = match stored {
-        Some(v) => shape_result(v, logical, max),
+        Some(v) => {
+            let mut value = shape_result(v, logical, max);
+            task_verdict(&mut value, &view, logical, max);
+            value
+        }
         None => journal_result(&view, logical),
     };
     if let Some(obj) = value.as_object_mut() {
@@ -484,7 +488,7 @@ async fn cancel(disp: &Arc<Dispatcher>, args: Value) -> Result<Value, RpcError> 
     for id in targets {
         match disp.cancel_as(id, CancelSource::Brain).await {
             Ok(Outcome::Cancelled { .. }) => cancelled.push(id),
-            Ok(Outcome::Ended(phase)) => {
+            Ok(Outcome::Ended(phase) | Outcome::Killed { phase, .. }) => {
                 ended.push(json!({ "node": id.to_string(), "state": phase }))
             }
             Err(e) => refused.push(json!({ "node": id.to_string(), "reason": e.to_string() })),
@@ -596,6 +600,26 @@ fn settled_attempt<'a>(view: &'a RunView, spec: &str, logical: NodeId) -> Option
         .copied()
 }
 
+/// An attempt's result speaks for its task only while the task is in the same state.
+fn task_verdict(value: &mut Value, view: &RunView, logical: NodeId, max: usize) {
+    let Some(state) = view.state_of(logical) else {
+        return;
+    };
+    let phase = json!(Phase::from(&state));
+    if value.get("state") == Some(&phase) {
+        return;
+    }
+    let mut journal = journal_result(view, logical);
+    wrap_failures(&mut journal, logical, max);
+    if let Some(obj) = value.as_object_mut() {
+        obj.insert("state".into(), phase);
+        obj.insert("ok".into(), journal["ok"].take());
+        if state.is_terminal() {
+            obj.insert("failure".into(), journal["failure"].take());
+        }
+    }
+}
+
 /// What the journal alone knows about a task that left no result.json behind.
 fn journal_result(view: &RunView, logical: NodeId) -> Value {
     let state = view.state_of(logical);
@@ -651,8 +675,7 @@ fn shape_result(mut value: Value, node: NodeId, max_bytes: usize) -> Value {
             .map(|s| wrap_untrusted(node, s, max_bytes));
         obj.insert("summary".into(), json!(summary));
     }
-    // `failure` and the file list are built from the worker's own output too. Leaving them
-    // raw made the system prompt's "everything a worker returns is wrapped" claim false.
+    // `failure` and the file list come from the worker's own output too.
     wrap_failures(&mut value, node, max_bytes);
     if let Some(files) = value.get_mut("files").and_then(Value::as_array_mut) {
         for file in files.iter_mut() {

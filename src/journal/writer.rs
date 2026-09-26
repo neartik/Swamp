@@ -63,6 +63,7 @@ pub struct Writer {
     /// Set when a writer task drains the queue, so durable lines queue behind it.
     pub(crate) durable: Option<DurableTx>,
     file: tokio::fs::File,
+    lock: Arc<std::fs::File>,
     /// Bytes this writer knows are in the file; more means another process appended.
     len: u64,
     redact: Option<Arc<Redactor>>,
@@ -82,7 +83,9 @@ impl Writer {
             .append(true)
             .open(path)
             .await?;
+        let lock = Arc::new(std::fs::File::open(path)?);
 
+        let guard = Guard::acquire(&lock, path).await?;
         let mut bytes = Vec::new();
         file.read_to_end(&mut bytes).await?;
         let (valid, seq) = repair_point(&bytes);
@@ -94,6 +97,7 @@ impl Writer {
             file.set_len(valid).await?;
             file.sync_data().await?;
         }
+        drop(guard);
 
         Ok(Writer {
             path: path.to_path_buf(),
@@ -101,6 +105,7 @@ impl Writer {
             seq,
             durable: None,
             file,
+            lock,
             len: valid,
             redact: None,
             pending: 0,
@@ -117,6 +122,7 @@ impl Writer {
     }
 
     pub async fn append(&mut self, line: &JournalLine) -> anyhow::Result<u64> {
+        let guard = Guard::acquire(&self.lock, &self.path).await?;
         let seq = self.catch_up().await?.max(line.seq);
         let mut text = if seq == line.seq {
             self.encode(line)?
@@ -128,6 +134,8 @@ impl Writer {
         };
         text.push('\n');
         self.file.write_all(text.as_bytes()).await?;
+        self.file.flush().await?;
+        drop(guard);
         self.len += text.len() as u64;
         self.seq = seq + 1;
         self.pending += 1;
@@ -204,9 +212,37 @@ impl Writer {
 
 const SHARED_TORN_RETRIES: u32 = 40;
 const SHARED_TORN_WAIT: Duration = Duration::from_millis(25);
+const LOCK_TIMEOUT: Duration = Duration::from_secs(10);
+const LOCK_POLL: Duration = Duration::from_millis(1);
 
-/// Appends one line from a process that does not own the run's writer, such as `swamp cancel`
-/// against a live run. The owner's writer continues the sequence past it on its next append.
+/// An exclusive flock on the journal, so every appender computes and writes its seq atomically.
+struct Guard(Arc<std::fs::File>);
+
+impl Guard {
+    async fn acquire(file: &Arc<std::fs::File>, path: &Utf8Path) -> anyhow::Result<Self> {
+        let deadline = Instant::now() + LOCK_TIMEOUT;
+        loop {
+            match file.try_lock() {
+                Ok(()) => return Ok(Guard(file.clone())),
+                Err(std::fs::TryLockError::WouldBlock) if Instant::now() < deadline => {
+                    tokio::time::sleep(LOCK_POLL).await;
+                }
+                Err(std::fs::TryLockError::WouldBlock) => {
+                    anyhow::bail!("timed out waiting for the journal lock on {path}")
+                }
+                Err(std::fs::TryLockError::Error(e)) => return Err(e.into()),
+            }
+        }
+    }
+}
+
+impl Drop for Guard {
+    fn drop(&mut self) {
+        let _ = self.0.unlock();
+    }
+}
+
+/// Appends one line from a process that does not own the run's writer, such as `swamp cancel`.
 pub async fn append_shared(
     path: &Utf8Path,
     run: crate::ids::RunId,
@@ -218,12 +254,14 @@ pub async fn append_shared(
         .append(true)
         .open(path)
         .await?;
+    let lock = Arc::new(std::fs::File::open(path)?);
     for _ in 0..SHARED_TORN_RETRIES {
+        let guard = Guard::acquire(&lock, path).await?;
         let mut bytes = Vec::new();
         file.seek(std::io::SeekFrom::Start(0)).await?;
         file.read_to_end(&mut bytes).await?;
         if !bytes.is_empty() && !bytes.ends_with(b"\n") {
-            // The owner is mid-line; its write lands whole in a moment.
+            drop(guard);
             tokio::time::sleep(SHARED_TORN_WAIT).await;
             continue;
         }
@@ -239,6 +277,7 @@ pub async fn append_shared(
         text.push('\n');
         file.write_all(text.as_bytes()).await?;
         file.flush().await?;
+        drop(guard);
         file.sync_data().await?;
         return Ok(seq);
     }

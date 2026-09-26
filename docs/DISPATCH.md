@@ -9,14 +9,16 @@ because everything below is folded from the run's journal (schema 2, DESIGN §7.
 
 | who | list | one dispatch or node | cancel |
 |---|---|---|---|
-| user | `swamp dispatches [RUN\|last] [--failed] [--follow] [--json]` | `swamp dispatch <ID> [--json]`, `swamp trace --dispatch <ID>`, `swamp trace --group-by dispatch` | `swamp cancel <dispatch\|node\|run>` |
+| user | `swamp dispatches [RUN\|last] [--failed] [--follow] [--json]` | `swamp dispatch <ID> [--run RUN] [--json]`, `swamp trace --dispatch <ID>`, `swamp trace --group-by dispatch` | `swamp cancel <dispatch\|node\|run>` |
 | chat | `/dispatches [--failed]` | `/trace <node\|dispatch>` | `/cancel <node\|all>` |
 | brain | `swamp_status { dispatch? }` | `swamp_inspect { dispatch }`, `swamp_inspect { node }` | `swamp_cancel { dispatch?, nodes? }` |
 
 A dispatch id resolves like a node id: in full (`dsp_01K…`), without its prefix, by the short id
 the list prints (its last six characters), or by any unique prefix, searched across every run
-newest first. A prefix two dispatches share names neither, and the error lists both. `swamp cancel`
-resolves runs first, then nodes and dispatches together; `nd_` and `dsp_` prefixes pick one kind.
+newest first. A prefix two dispatches share names neither, and the error lists both. `--run` on
+`swamp dispatch` (or the RUN argument of `swamp trace`) limits the search to one run, which is how
+`legacy` is named once several schema-1 runs exist. `swamp cancel` resolves runs first, then nodes
+and dispatches together; `nd_` and `dsp_` prefixes pick one kind.
 
 A schema-1 run has no dispatch events. Its nodes are listed in one bucket named `legacy`, with no
 call seq and no caller; the bucket settles when the run finishes.
@@ -28,11 +30,13 @@ the same whoever asked:
 
 1. `cancel/<logical_id>` is written in the run directory with who asked (`user` or `brain`).
 2. One durable `NodeStateChanged { to: Cancelled { by } }` is journaled on the task's logical id.
-   A task that already ended is left alone: nothing is journaled out of a terminal state.
+   A task that already ended is left alone: nothing is journaled out of a terminal state, and the
+   first terminal state journaled for a task is the one every reader folds.
 3. The live attempt is stopped. In the supervising process its cancellation token fires and the
    executor kills the process group; from any other process the group named by the attempt's
    pidfile is killed (SIGTERM, then SIGKILL after `limits.grace_period`; `--signal kill` skips
-   the grace period).
+   the grace period). `swamp cancel` also kills an attempt still running under our pidfile when
+   its task already ended, such as a worker whose supervisor died before stopping it.
 
 The supervising run watches for the marker, so a task cancelled from another terminal is never
 retried and its dispatch settles with the task counted as cancelled. `swamp_cancel` only stops
@@ -41,7 +45,8 @@ cancelled at least one node, 1 when there was nothing left to cancel.
 
 ## JSON
 
-Every document carries `"schema": 2`, the journal schema it is folded from. Node ids are strings
+The `swamp dispatches`, `swamp dispatch` and `swamp_inspect` documents carry `"schema": 2`, the
+journal schema they are folded from; the `swamp_cancel` and `swamp_result` replies do not. Node ids are strings
 with their `nd_` prefix and dispatch ids with `dsp_` (or `legacy`); times are RFC 3339 UTC;
 durations are `_s` (seconds) or `_ms` (milliseconds). Fields are only ever added.
 
@@ -69,7 +74,7 @@ cost change.
 | `caller` | object \| null | `{ node, kind: "brain" \| "task", task }`: who dispatched; `task` is the caller's logical id when a worker dispatched |
 | `at` | time \| null | when the dispatch was issued (the run start for `legacy`) |
 | `age_s` | int \| null | seconds since `at` |
-| `wait`, `max_wait_s` | bool, int \| null | how the call was made |
+| `wait`, `max_wait_s` | bool \| null, int \| null | how the call was made; `wait` is null for `legacy` |
 | `tasks` | int | number of tasks |
 | `counts` | object | every task under its current phase: `queued`, `blocked`, `leased`, `running`, `succeeded`, `failed`, `cancelled`, `rejected` |
 | `cost` | `<rollup>` | the tasks and all their attempts |
@@ -134,16 +139,28 @@ envelope, like every other worker-derived string.
 {
   "cancelled": ["nd_…"],
   "ended": [{ "node": "nd_…", "state": "succeeded" }],
-  "refused": [{ "node": "nd_…", "reason": "not dispatched by you" }],
+  "refused": [{ "node": "nd_…", "reason": "not dispatched by you" },
+              { "dispatch": "dsp_…", "reason": "not dispatched by you" }],
   "nodes": [ <NodeResult>, ... ]
 }
 ```
 
-`nodes` are the cancelled tasks' results once they settle, the same shape `swamp_await` returns.
+A `refused` entry names either a `node` or a whole `dispatch`; its `reason` is free text, such as
+`not dispatched by you` or the error the cancel hit. `nodes` are the cancelled tasks' results once
+they settle, the same shape `swamp_await` returns.
 
 ### `swamp_result` for a node this process did not dispatch
 
 After a resume, or for any node the live results map does not hold, `swamp_result` reads the
 latest finished attempt's `nodes/<attempt>/result.json` (or, without one, what the journal alone
-knows) and marks it `"source": "journal"` with the `attempt` it came from. `swamp_worker_diff`
-falls back to that attempt's `patch.diff` the same way.
+knows) and marks it `"source": "journal"` with the `attempt` it came from. When the task's
+journaled state differs from that attempt's (cancelled while queued for a retry, or still
+retrying), `state` and `ok` follow the task, and so does `failure` once the task has ended.
+`swamp_worker_diff` falls back to that attempt's `patch.diff` the same way.
+
+### `swamp trace --json`
+
+With `--dispatch <ID>`, `tree`, `nodes` and `events` hold only that dispatch's tasks and what they
+dispatched in turn, `totals` is the dispatch's rollup, and a `dispatch` field names it.
+`--group-by dispatch` has no JSON form (use `swamp dispatches --json`) and does not combine with
+`--follow`; `--dispatch` does not combine with `--node`.

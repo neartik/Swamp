@@ -123,8 +123,7 @@ impl Ctx {
         Ok(hits)
     }
 
-    /// A full dispatch id, a unique prefix or its short id, searched across every run newest
-    /// first. A prefix two dispatches share names neither, exactly like a node.
+    /// A full dispatch id, a unique prefix or its short id, searched across every run.
     pub fn find_dispatch(&self, spec: &str) -> anyhow::Result<(RunPaths, DispatchId)> {
         let mut hits = self.dispatch_hits(spec)?;
         match hits.len() {
@@ -132,6 +131,33 @@ impl Ctx {
             0 => anyhow::bail!("no dispatch matches `{spec}`"),
             _ => anyhow::bail!(
                 "dispatch `{spec}` is ambiguous: {}",
+                self.dispatch_candidates(&hits)
+            ),
+        }
+    }
+
+    /// Within the named run, or across every run when none is named.
+    pub fn dispatch_in(
+        &self,
+        run: Option<&str>,
+        spec: &str,
+    ) -> anyhow::Result<(RunPaths, DispatchId)> {
+        let Some(run) = run else {
+            return self.find_dispatch(spec);
+        };
+        let paths = self.run_paths(Some(run))?;
+        let view = self.view(&paths, false)?;
+        let mut hits: Vec<(RunPaths, DispatchId)> =
+            crate::journal::inspect::match_dispatches(&view, spec.trim())
+                .into_iter()
+                .map(|id| (paths.clone(), id))
+                .collect();
+        match hits.len() {
+            1 => Ok(hits.remove(0)),
+            0 => anyhow::bail!("no dispatch matches `{spec}` in run {}", paths.run.short()),
+            _ => anyhow::bail!(
+                "dispatch `{spec}` is ambiguous in run {}: {}",
+                paths.run.short(),
                 self.dispatch_candidates(&hits)
             ),
         }

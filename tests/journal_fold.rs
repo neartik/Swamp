@@ -1361,3 +1361,40 @@ fn inspect_carries_the_blocked_verdict_and_the_rejection() {
     assert_eq!(a.attempts.len(), 2);
     assert_eq!(a.dispatches, vec![did(42).to_string()]);
 }
+
+/// A transition journaled after a task ended, such as a racing retry, never revives it.
+#[test]
+fn the_first_terminal_task_state_wins() {
+    let (caller, task, d) = (nid(0), nid(2), did(1));
+    let v = fold(&[
+        line(0, Some(caller), issued(caller, d, Some(1), &[(task, "t")])),
+        line(1, Some(task), queued(task, d, "t", 1)),
+        line(
+            2,
+            Some(task),
+            changed(
+                Phase::Queued,
+                NodeState::Cancelled {
+                    by: swamp::model::core::CancelSource::User,
+                },
+                "cancelled by user",
+            ),
+        ),
+        line(
+            3,
+            Some(task),
+            changed(Phase::Queued, leased("main"), "retry"),
+        ),
+        line(
+            4,
+            Some(task),
+            changed(Phase::Leased, NodeState::Succeeded, "succeeded"),
+        ),
+    ]);
+    assert!(
+        matches!(v.state_of(task), Some(NodeState::Cancelled { .. })),
+        "{:?}",
+        v.state_of(task)
+    );
+    assert_eq!(v.transitions[&task].len(), 3);
+}

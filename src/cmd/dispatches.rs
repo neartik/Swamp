@@ -22,7 +22,7 @@ pub async fn list(ctx: &Ctx, args: &DispatchesArgs) -> anyhow::Result<i32> {
 
 /// `swamp dispatch <ID>`: the task tree of one dispatch, from whichever run holds it.
 pub async fn show(ctx: &Ctx, args: &DispatchArgs) -> anyhow::Result<i32> {
-    let (paths, id) = ctx.find_dispatch(&args.id)?;
+    let (paths, id) = ctx.dispatch_in(args.run.as_deref(), &args.id)?;
     let mut view = ctx.view(&paths, false)?;
     view.mark_orphans(&|id| crate::worker::liveness::is_ours(&paths.pidfile(id)));
     let json = args.json || ctx.json;

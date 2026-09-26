@@ -229,3 +229,56 @@ fn a_dispatch_resolves_by_short_id_or_prefix_and_a_shared_prefix_is_ambiguous() 
         .code(1)
         .stdout(predicates::str::contains("already ok"));
 }
+
+/// Every schema-1 run has a `legacy` bucket, so naming the run is what makes it resolvable.
+#[test]
+fn legacy_resolves_within_the_named_run_once_two_schema_1_runs_exist() {
+    let h = Harness::new();
+    let fixture = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/journal-schema1.jsonl"),
+    )
+    .expect("the schema-1 fixture");
+    let runs = [swamp::ids::RunId::new(), swamp::ids::RunId::new()];
+    for run in runs {
+        let paths = h.paths().run_paths(run);
+        std::fs::create_dir_all(&paths.dir).expect("run dir");
+        let text = fixture.replace("01HZZZZZZZZZZZZZZZZZZZZRRR", &run.0.to_string());
+        std::fs::write(paths.journal(), text).expect("journal");
+    }
+
+    h.swamp(&["dispatch", "legacy"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("ambiguous"));
+    for run in runs {
+        h.swamp(&["dispatch", "legacy", "--run", &run.short()])
+            .assert()
+            .success()
+            .stdout(predicates::str::contains(format!(
+                "dispatch legacy  run {}",
+                run.short()
+            )));
+    }
+    h.swamp(&[
+        "trace",
+        &runs[0].short(),
+        "--dispatch",
+        "legacy",
+        "--node",
+        "x",
+    ])
+    .assert()
+    .failure()
+    .stderr(predicates::str::contains("cannot be used with"));
+    h.swamp(&[
+        "trace",
+        &runs[0].short(),
+        "--group-by",
+        "dispatch",
+        "--follow",
+    ])
+    .assert()
+    .failure()
+    .stderr(predicates::str::contains("cannot be used with"));
+}

@@ -440,10 +440,10 @@ impl RunView {
                         to: to.clone(),
                         why: why.clone(),
                     });
-                // An attempt's state comes from its payload events; a task's from this. A
-                // schema-1 task only takes the terminal state a later cancel journals for it.
+                // The first terminal task state wins; schema-1 tasks only take a terminal one.
                 if !self.nodes.contains_key(&id)
                     && let Some(t) = self.tasks.get_mut(&id)
+                    && !t.state.as_ref().is_some_and(NodeState::is_terminal)
                     && (t.state.is_some() || to.is_terminal())
                 {
                     t.state = Some(to.clone());
@@ -838,7 +838,7 @@ impl LlmDigest {
         let (t, scope) = match dispatch {
             Some(d) => (
                 view.rollup(Scope::Dispatch(d)),
-                format!(" dispatch {}", d.short()),
+                format!(" dispatch {}", crate::journal::inspect::short(d)),
             ),
             None => (view.totals(), String::new()),
         };

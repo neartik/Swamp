@@ -1,5 +1,4 @@
-//! `swamp dispatches` and `swamp dispatch <ID>`: the dispatch surface of a run, as text or as
-//! the JSON shape `journal::inspect` defines.
+//! `swamp dispatches` and `swamp dispatch <ID>`, as text or as `journal::inspect` JSON.
 
 use crate::ids::DispatchId;
 use crate::journal::fold::RunView;
@@ -36,9 +35,16 @@ pub fn render_list(view: &RunView, o: ListOpts, now: OffsetDateTime) -> String {
         .header
         .as_ref()
         .map_or_else(|| "?".to_owned(), |h| h.run.short());
-    let mut out = format!("run {run}  {} dispatches\n\n", list.dispatches.len());
+    let n = list.dispatches.len();
+    let noun = if n == 1 { "dispatch" } else { "dispatches" };
+    let failed = if o.failed { " failed" } else { "" };
+    let mut out = format!("run {run}  {n}{failed} {noun}\n\n");
     if list.dispatches.is_empty() {
-        out.push_str("no dispatches recorded\n");
+        out.push_str(if o.failed {
+            "no failed dispatches\n"
+        } else {
+            "no dispatches recorded\n"
+        });
         return out;
     }
     out.push_str(&heading());
@@ -244,8 +250,7 @@ fn pretty<T: serde::Serialize>(v: &T) -> String {
     serde_json::to_string_pretty(v).unwrap_or_default()
 }
 
-/// `--follow`: a row is printed when it first appears and again whenever it changes, until
-/// the run finishes.
+/// `--follow`: a row is printed when it first appears and again whenever it changes.
 pub struct Follower {
     pub view: RunView,
     opts: ListOpts,

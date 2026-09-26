@@ -159,9 +159,9 @@ pub struct TraceArgs {
     #[arg(long, value_name = "DUR")]
     pub since: Option<String>,
     /// Only one dispatch's tasks: a full id, a unique prefix or its short id
-    #[arg(long, value_name = "ID")]
+    #[arg(long, value_name = "ID", conflicts_with = "node")]
     pub dispatch: Option<String>,
-    #[arg(long, value_name = "KEY")]
+    #[arg(long, value_name = "KEY", conflicts_with = "follow")]
     pub group_by: Option<GroupBy>,
 }
 
@@ -192,6 +192,9 @@ pub struct DispatchArgs {
     /// A full dispatch id, a unique prefix or its short id, searched across every run
     #[arg(value_name = "ID")]
     pub id: String,
+    /// Only look in this run: a full id, a unique prefix, `last`, or `-2`
+    #[arg(long, value_name = "RUN")]
+    pub run: Option<String>,
     /// Machine-readable output; same as the global --json
     #[arg(long)]
     pub json: bool,
