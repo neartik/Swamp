@@ -415,14 +415,22 @@ impl WorkspaceManager {
     }
 }
 
-/// `<root>/<repo-name>-<hash8>`, with `~` expanded. Outside the repo on purpose.
-fn worktree_root(paths: &Paths, cfg: &Config) -> Utf8PathBuf {
-    let base = match &cfg.workspace.root {
-        Some(root) => Utf8PathBuf::from(shellexpand::tilde(root.as_str()).into_owned()),
-        None => paths.home_swamp.join("worktrees"),
-    };
-    let name = paths.repo.file_name().unwrap_or("repo");
-    base.join(format!("{name}-{}", hash8(paths.repo.as_str())))
+/// `<root>/<repo-name>-<hash8>`, `~/.swamp/worktrees` without a root; never inside the repo.
+pub fn worktree_root(paths: &Paths, cfg: &Config) -> Utf8PathBuf {
+    match &cfg.workspace.root {
+        Some(root) => Utf8PathBuf::from(shellexpand::tilde(root.as_str()).into_owned())
+            .join(repo_slug(&paths.repo)),
+        None => paths
+            .home_swamp
+            .join("worktrees")
+            .join(repo_slug(&paths.repo)),
+    }
+}
+
+/// `<repo-name>-<hash8>`: one directory per checkout, however many share a name.
+pub fn repo_slug(repo: &Utf8Path) -> String {
+    let name = repo.file_name().unwrap_or("repo");
+    format!("{name}-{}", hash8(repo.as_str()))
 }
 
 fn hash8(s: &str) -> String {

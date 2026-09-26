@@ -61,14 +61,16 @@ when `RunView::finished` is false **and** it has at least one non-terminal node 
 tailed; the newest finished run is kept in `recent` only.
 
 **Cross-repo.** `~/.swamp/sock/*.sock` names every live run on the machine but not its repo, so it
-cannot be mapped back to a journal. WP7 adds `~/.swamp/runs.json`, an fs4-locked index written at
-`swamp run` / `swamp chat` startup and on exit: `{ "<run-short>": { run, repo, dir, pid,
-started_at } }`, merged last-writer-wins exactly like `accounts.json`. With it, `swamp board --all`
-shows every repo. Until WP7 lands, `--all` prints what it cannot see and falls back to this repo.
+cannot be mapped back to a journal. `~/.swamp/runs.json` is an fs4-locked index written at
+`swamp run` / `swamp chat` startup and removed on exit: `{ "<run-short>": { run, repo, dir, pid,
+started_at } }`, merged last-writer-wins exactly like `accounts.json`. `swamp board --all` reads it
+and shows every repo; entries whose journal is gone are pruned.
 
 **Flags.** `--run <id|last|-N>` pins one run (`Paths::resolve_run`, same grammar as `watch`).
 `--all` is cross-repo. `--interval <ms>` overrides the poll period. `--once` prints one frame and
-exits, for scripts. `--json` dumps the same model as JSON and exits.
+exits, for scripts, at `$COLUMNS` when it is set, else the terminal's width, else 100 (so
+`COLUMNS=40 swamp board --once` draws the Narrow tier from a pipe). `--json` dumps the same model
+as JSON and exits, a `brain` delegation object on each run.
 
 ---
 
@@ -196,11 +198,17 @@ decision. Within a tier only the title width and the header and hint cells that 
 The cost cell is 8 wide, room for `~$12.34+`; the title takes what the tier's fixed cells leave,
 never less than `title_min`.
 
-The header reads the same at every width: `N running · N stuck · N queued · ~$X · observed Xs
-ago`, with `N runs` first when more than one run is tailed and `N stale` in `err`. When the cells
-do not fit, `queued`, then `runs`, then the cost drop; `running`, `stuck`, `stale` and the
-freshness never do; if they still overflow the counts are cut with `…` before the freshness is.
-Freshness is `err` once older than `quota_max_age`.
+The header reads the same at every width: `N running · N stuck · N queued · ~$X · brain 3/8
+(12%) · observed Xs ago`, with `N runs` first when more than one run is tailed and `N stale` in
+`err`. The `brain` cell is the delegation metric (`docs/DISPATCH.md`, "Delegation"): the brain's
+own tool calls before its first dispatch against `limits.brain_read_budget`, and its share of the
+cost, which Narrow leaves out; with several runs tailed it is the run whose brain made the most
+calls, and it is absent when no tailed run has a brain. When the cells do not fit, the `brain`
+cell, then `queued`, then `runs`, then the cost drop. Past the budget the cell turns `err`, reads
+`brain 11/8 over`, and moves behind the cost in that order, so a narrow pane gives up the cost
+before the warning. `running`, `stuck`, `stale` and the freshness never drop; if they still
+overflow the counts are cut with `…` before the freshness is. Freshness is `err` once older than
+`quota_max_age`.
 
 A dispatch header is `▾`/`▸`, the label (`#N`, the short id without a call number, or `legacy`),
 `by <caller>` on a nested one, `N tasks`, the count phrase in rank order, and, on a `recent` row,
@@ -279,7 +287,7 @@ swamp board   2 running · 1 stuck · ~$0.43 · observed 4s ago
 **140 columns (Wide):**
 
 ```
-swamp board                                                                        2 running · 1 stuck · 1 queued · ~$0.43 · observed 4s ago
+swamp board                                                      2 running · 1 stuck · 1 queued · ~$0.43 · brain 0/8 (21%) · observed 4s ago
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
   ◆ brain             orchestrating                                                            main       opus-4-1    4m12s  ↓ 214k   ~$0.09
 
@@ -422,13 +430,13 @@ is attached:
 ```
 
 `swamp chat --board`, inside tmux, runs
-`tmux split-window -h -l 46 -d swamp board --run <id>` once at startup and carries on; outside tmux
-it prints one line naming the command to run in another terminal and does not fail. A `--board-width`
-config key (`ui.board_width`, default 46) sizes the split.
+`tmux split-window -h -l <ui.board_width> -d swamp board --run <id>` once at startup and carries
+on; outside tmux it prints one line naming the command to run in another terminal and does not fail.
+The `ui.board_width` config key (default 46) sizes the split.
 
 **How they find each other: they do not need to.** Both read the same files; there is no IPC, no
 socket, no shared memory. The only coordination is the hint: the board writes `~/.swamp/board.pid`
-(pid plus the tty it owns) at startup and removes it on exit, and chat suppresses the hint when that
+(pid plus the process start time, the same format `worker::liveness::is_ours` checks) at startup and removes it on exit, and chat suppresses the hint when that
 file names a live process. A stale pid file is harmless - chat checks liveness the same way
 `is_ours` does, and the worst case is one extra hint line.
 
@@ -474,7 +482,10 @@ chat.
 7. **`vt100`** round trip through `src/ui/board/tests.rs`: enter the alternate screen, three
    frames, a resize from 100 to 40 and back, exactly one board and no torn row.
 8. **Control characters.** A title carrying `\u{1b}[2J` must not repaint the pane.
-9. **tmux smoke script** (`scripts/board-tmux.sh`, manual, not CI).
+9. **Delegation**: within budget the `brain` header cell is the first to drop; past it the cell
+   reads `over` at every tier from 40 columns up and outlasts the queued count and the cost; on a
+   single-row header too narrow for it, the share and the word `observed` go first.
+10. **tmux smoke script** (`scripts/board-tmux.sh`, manual, not CI).
 
 ---
 

@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use swamp::config::{load, resolve, validate};
 use swamp::dispatch::{AccountPool, Dispatcher, NodeRunner};
-use swamp::journal::paths::{Paths, RunPaths};
+use swamp::journal::paths::RunPaths;
 use swamp::journal::writer::FsyncPolicy;
 use swamp::journal::{Journal, JournalHandle};
 use swamp::mcp::{McpServer, jsonrpc, tools};
@@ -16,7 +16,7 @@ use swamp::model::core::Tier;
 use swamp::model::node::WorkResultRef;
 use swamp::worker::RunOutcome;
 use swamp::worker::adapter::LaunchSpec;
-use swamp::workspace::{Git, NodeWorktree, WorkspaceManager};
+use swamp::workspace::NodeWorktree;
 use swamp::{DispatchId, NodeId, RunId};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
@@ -197,23 +197,7 @@ async fn dispatcher(
         journal.clone(),
     )
     .expect("pool");
-    let exec = Arc::new(swamp::worker::Executor::new(
-        journal.clone(),
-        Arc::clone(&cfg),
-    ));
-    let ws = WorkspaceManager::new(
-        Git { root: root.clone() },
-        Arc::new(Paths {
-            repo: root.clone(),
-            dot_swamp: root.join(".swamp"),
-            home_swamp: root.join("home"),
-        }),
-        Arc::clone(&cfg),
-        journal.clone(),
-    )
-    .await
-    .expect("workspace manager");
-    let disp = Dispatcher::with_runner(cfg, pool, exec, ws, journal.clone(), runner);
+    let disp = Dispatcher::with_runner(cfg, pool, journal.clone(), runner);
     if let Ok(view) = swamp::RunView::load(&paths.dir, false) {
         disp.seed(&view);
     }

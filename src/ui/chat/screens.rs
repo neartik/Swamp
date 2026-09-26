@@ -220,9 +220,9 @@ fn a_finished_board_commits_with_its_detail_lines() {
     );
 }
 
-/// The P4 fixture up to dispatch #2, and from there on.
-fn p4_split() -> (Vec<JournalLine>, Vec<JournalLine>) {
-    let lines = fx::p4_journal();
+/// The board fixture up to dispatch #2, and from there on.
+fn board_split() -> (Vec<JournalLine>, Vec<JournalLine>) {
+    let lines = fx::board_journal();
     let at = lines
         .iter()
         .position(|l| {
@@ -234,7 +234,7 @@ fn p4_split() -> (Vec<JournalLine>, Vec<JournalLine>) {
 }
 
 /// Dispatch #1 bound to its call, four minutes into the turn.
-fn p4_live(width: u16) -> App {
+fn board_live(width: u16) -> App {
     let mut app = fx::app(width);
     app.take_welcome();
     app.reduce(Msg::Brain(BrainEvent::ToolCall {
@@ -242,7 +242,7 @@ fn p4_live(width: u16) -> App {
         name: "mcp__swamp__swamp_dispatch".into(),
         preview: r#"{"tasks":[{},{},{},{},{}]}"#.into(),
     }));
-    app.reduce(Msg::Journal(p4_split().0));
+    app.reduce(Msg::Journal(board_split().0));
     app.phase = Phase::Working {
         since: app.now - time::Duration::seconds(252),
     };
@@ -251,7 +251,7 @@ fn p4_live(width: u16) -> App {
 
 #[test]
 fn a_bound_dispatch_block_renders_from_the_dispatch() {
-    let mut app = p4_live(100);
+    let mut app = board_live(100);
     let wide = live(&mut app, 100);
     insta::assert_snapshot!("dispatch_live_100", wide);
     insta::assert_snapshot!("dispatch_live_62", live(&mut app, 62));
@@ -269,14 +269,14 @@ fn a_bound_dispatch_block_renders_from_the_dispatch() {
 
 #[test]
 fn a_rejected_dispatch_commits_with_its_reason() {
-    let mut app = p4_live(100);
+    let mut app = board_live(100);
     app.reduce(Msg::Brain(BrainEvent::ToolCall {
         id: "d2".into(),
         name: "swamp_dispatch".into(),
         preview: r#"{"tasks":[{}]}"#.into(),
     }));
     assert!(
-        app.reduce(Msg::Journal(p4_split().1)).is_empty(),
+        app.reduce(Msg::Journal(board_split().1)).is_empty(),
         "the call is still out"
     );
     let out = app.reduce(Msg::Brain(BrainEvent::ToolDone {
@@ -304,7 +304,7 @@ fn the_status_line_counts_open_work() {
         app.set_width(width);
         screen(vec![app.status_line()], width)
     };
-    let mut app = p4_live(100);
+    let mut app = board_live(100);
     insta::assert_snapshot!("status_100", status(&mut app, 100));
     insta::assert_snapshot!("status_62", status(&mut app, 62));
     insta::assert_snapshot!("status_40", status(&mut app, 40));
@@ -653,8 +653,7 @@ fn two_dispatches_never_steal_each_others_nodes() {
     assert_eq!(workers::MAX_ROWS, 8);
 }
 
-/// `ToolDone` comes over the brain channel before the tail poll brings the dispatch: the call
-/// still binds, and nothing is left behind as a loose `workers` block.
+/// A `ToolDone` that beats its dispatch to the tail poll still binds, leaving no loose block.
 #[test]
 fn a_call_that_returned_before_its_dispatch_was_read_still_binds() {
     let mut app = fx::app(100);
@@ -670,7 +669,7 @@ fn a_call_that_returned_before_its_dispatch_was_read_still_binds() {
         ok: true,
         detail: None,
     }));
-    app.reduce(Msg::Journal(p4_split().0));
+    app.reduce(Msg::Journal(board_split().0));
     let bound: Vec<(bool, Option<crate::ids::DispatchId>)> = app
         .blocks
         .iter()
@@ -692,7 +691,7 @@ fn a_call_that_returned_before_its_dispatch_was_read_still_binds() {
         ok: true,
         detail: None,
     }));
-    let text = committed(app.reduce(Msg::Journal(p4_split().1)), 100);
+    let text = committed(app.reduce(Msg::Journal(board_split().1)), 100);
     assert!(text.contains("swamp_dispatch("), "{text}");
     assert!(!text.contains("workers"), "{text}");
     assert!(text.contains("(swamp dispatch 9g5f1c)"), "{text}");
@@ -728,7 +727,7 @@ fn a_failed_dispatch_call_neither_lingers_nor_steals() {
         name: "swamp_dispatch".into(),
         preview: r#"{"tasks":[{},{},{},{},{}]}"#.into(),
     }));
-    app.reduce(Msg::Journal(p4_split().0));
+    app.reduce(Msg::Journal(board_split().0));
     let tools: Vec<String> = app
         .blocks
         .iter()
@@ -745,7 +744,7 @@ fn a_failed_dispatch_call_neither_lingers_nor_steals() {
 /// The zones never touch: at least two spaces between them, whatever the width.
 #[test]
 fn the_status_zones_keep_their_gap() {
-    let mut app = p4_live(100);
+    let mut app = board_live(100);
     app.pending_send = Some("and the docs".into());
     for w in 30u16..=100 {
         app.set_width(w);

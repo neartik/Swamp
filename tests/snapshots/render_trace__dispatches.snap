@@ -8,3 +8,5 @@ DISPATCH   SEQ      AGE  STATE    TASKS  WAIT  RUN   OK  FAIL  CANC  REJ      CO
 9g5f18       1   15m00s  settled      2     0    0    2     0     0    0    ~$0.85  brain
 9g5f19       2   15m00s  open         2     1    0    0     0     0    1         -  brain
 9g5f1a       -   15m00s  settled      1     0    0    1     0     0    0    ~$0.05  task 9g5f01
+
+brain  0/8 calls before the first dispatch, 53% of the cost

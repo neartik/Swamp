@@ -184,14 +184,22 @@ Swamp/
   Cargo.toml
   rust-toolchain.toml
   swamp.example.toml
-  docs/{DESIGN.md,PLAN.md,ref/}
+  CHANGELOG.md
+  .github/workflows/ci.yml   fmt, clippy -D warnings and test on ubuntu and macos
+  docs/{DESIGN.md,DISPATCH.md,UI.md,BOARD.md,USAGE.md,PLAN.md,BUGS.md,ref/}
   src/
     main.rs             tokio::main, tracing init, config load, clap dispatch to cmd::*
     lib.rs              module declarations + pub use of the cross-package surface
     cli.rs              clap derive: Cli, Command, every flag. Nothing else.
     error.rs            SwampError (thiserror); exit-code mapping
     ids.rs              RunId/NodeId (ULID newtypes), NodeIds (ULID + session UUID pair)
-    doctor.rs           health checks, shared by cmd::doctor and startup warnings
+    doctor/             health checks, shared by cmd::doctor and startup warnings
+      mod.rs            Check, Level, checks(); --schema drift and journal schemas
+      env.rs            git, repo, .swamp and ~/.swamp, the swamp executable, config sources
+      accounts.rs       wrappers, the collision check, quota source, tiers, --probe
+      permissions.rs    unsafe args, Bash-denying modes, permission-mode spelling
+      workspace.rs      heavy unlinked build directories
+      reap.rs           --reap: stale pidfiles, sockets, worktrees
 
     model/
       mod.rs            re-exports
@@ -199,6 +207,7 @@ Swamp/
       failure.rs        Failure taxonomy, Detector, rotates_account/retries_same_account/is_terminal
       node.rs           NodeRecord: the one record type the whole tool agrees on
       event.rs          WorkerEvent: provider-neutral normalized event
+      dispatch.rs       DispatchRecord, TaskRef, DispatchCounts, Phase, NodeTransition
       result.rs         NodeResult / TaskRequest: the brain-facing contract
 
     config/
@@ -213,7 +222,8 @@ Swamp/
       record.rs         JournalLine { seq, at, run, node, event } + JournalEvent
       writer.rs         owns the fd; torn-tail repair; barrier fsync policy
       reader.rs         streaming line reader, byte offsets, tolerant of a torn last line
-      fold.rs           RunView: fold(JournalLine) -> tree; Projection trait
+      fold.rs           RunView: fold(JournalLine) -> tree, dispatches, tasks, brain self-work
+      inspect.rs        the dispatch surface as data: the JSON docs/DISPATCH.md documents
       raw.rs            RawSink: verbatim per-node stream + stderr + noise sinks
       paths.rs          .swamp and ~/.swamp layout, run discovery, `last` symlink
 
@@ -236,6 +246,8 @@ Swamp/
       cooldown.rs       cooldown math, clamping, circuit breaker
       persist.rs        ~/.swamp/accounts.json, fs4 lock + atomic rename
       retry.rs          run_node(): the attempt loop; where failover policy lives
+      runner.rs         DirectRunner: the production NodeRunner, real worktrees and processes
+      cancel.rs         cancel_node(): the one cancel path every surface takes
 
     workspace/
       mod.rs            WorkspaceManager: create/finalize/gc, global git gate
@@ -260,15 +272,22 @@ Swamp/
     ui/
       mod.rs            re-exports
       fmt.rs            durations, token counts, cost, status glyphs, truncation
-      trace.rs          static tree renderer; --events, --raw, --json, --follow
+      trace.rs          static tree renderer; --events, --raw, --json, --follow, --group-by
+      dispatches.rs     `swamp dispatches` and `swamp dispatch`, text and JSON
+      delegation.rs     the brain self-work line, board cell and JSON
+      order.rs          task ranking, per-state tallies, header cell fitting
+      keys.rs           the one keymap every surface's hints and overlays read
+      actions.rs        cancel from a UI, shared by the board and watch
       watch.rs          ratatui live TUI: tree pane / node pane / account footer
+      board/            `swamp board`: model, three layout tiers, sources, app loop
       chat/             inline ratatui viewport rendering BrainEvent plus worker progress
       usage.rs          the `/usage` and `swamp usage` table and its JSON shape
 
     cmd/
       mod.rs            one module per subcommand, each a thin `async fn run(cfg, args)`
-      run.rs chat.rs trace.rs watch.rs runs.rs accounts.rs doctor.rs usage.rs
-      resume.rs cancel.rs worktrees.rs diff.rs adopt.rs gc.rs replay.rs config.rs mcp_bridge.rs
+      run.rs chat.rs trace.rs dispatches.rs watch.rs board.rs runs.rs accounts.rs doctor.rs
+      usage.rs resume.rs cancel.rs worktrees.rs diff.rs adopt.rs gc.rs replay.rs config.rs
+      mcp_bridge.rs
 
   tests/
     parse_claude.rs     golden test against docs/ref/claude-stream-sample.jsonl
@@ -276,6 +295,9 @@ Swamp/
     journal_fold.rs     fold determinism, torn tail, retry chains
     dispatch_failover.rs fake adapter returning RateLimited; asserts rotation + cooldown
     e2e_smoke.rs        fake CLI on PATH; full `swamp run --no-brain` path
+    e2e_brain.rs        a fake brain dispatching through the real MCP bridge
+    render_trace.rs     trace, dispatches and dispatch renders, snapshot-tested
+    docs_drift.rs       JournalEvent against docs/DISPATCH.md and §7.2, commands against README
 ```
 
 Dependency direction is strictly downward:
@@ -1602,7 +1624,11 @@ pub async fn run_node(cx: &NodeCtx, mut spec: LaunchSpec, task: &TaskRequest) ->
     let mut provider = providers.next().expect("at least one provider");
     let mut backoff = Duration::from_secs(2);
     let mut prev: Option<NodeId> = None;
-    let logical = NodeId::new();
+    let logical = cx.logical;                       // minted when the dispatch was issued
+
+    // Durable, so a waiting task is visible before attempt 1 exists. Every phase change below
+    // (Blocked, Leased, back to Queued on a rotation, terminal) is a NodeStateChanged on `logical`.
+    cx.journal.emit_durable(Some(logical), JournalEvent::TaskQueued { /* dispatch, depth */ }).await;
 
     for attempt in 1..=cx.max_attempts {
         // Cross-provider failover happens only here, and only if opted in: the decision is
@@ -1635,7 +1661,7 @@ pub async fn run_node(cx: &NodeCtx, mut spec: LaunchSpec, task: &TaskRequest) ->
         // tree; retrying on top of partial edits is how you produce plausible-looking corruption
         // that no test catches. A new worktree is simpler and safer than resetting the old one,
         // and the failed attempt's tree is retained for inspection when keep_on_failure is set.
-        let wt = match cx.workspace.create(logical, attempt).await {
+        let wt = match cx.runner.workspace(logical, attempt).await {
             Ok(w) => w, Err(e) => return NodeOutcome::failed(Failure::NoCapacity { detail: e.to_string() }),
         };
         spec.cwd = wt.path.clone();
@@ -1645,7 +1671,7 @@ pub async fn run_node(cx: &NodeCtx, mut spec: LaunchSpec, task: &TaskRequest) ->
         // provenance and a resume handle.
         cx.journal.emit_durable(JournalEvent::NodeSpawned { /* full NodeRecord */ }).await;
 
-        let out = cx.exec.run(&spec, &wt).await;    // detached spawn + follow to terminal event
+        let out = cx.runner.run(&spec, timeout, cx.cancel.clone()).await;  // detached spawn + follow
         cx.pool.report(&lease.account, out.failure.as_ref(), out.cost);
 
         match &out.failure {
@@ -1690,6 +1716,10 @@ that destroys a user's quota in ten minutes:
    account is never offered: switching to it would die with `NoCapacity::Exhausted` instead of
    waiting for the window to roll.
 
+`NodeRunner` is the seam between that policy and the machine: `dispatch::runner::DirectRunner`
+(real worktrees, real detached processes) backs both the dispatcher and `swamp run --no-brain`,
+and the dispatch tests script it instead.
+
 ### 6.7 `swamp accounts`
 
 ```
@@ -1723,6 +1753,50 @@ it at NODES 0 / $0 would also leave the history tie-break blind to the single mo
 repo may still own them. They are listed under a `not in config` note and dropped only when asked,
 with `swamp accounts reset <id>`. Nothing deletes them silently.
 
+### 6.8 Dispatch lineage
+
+Every task carries where it came from, so any surface can answer who asked for it, in which
+call, what it cost, and what it asked for in turn. The lineage is journaled (schema 2, §7.2),
+never inferred from timing:
+
+```
+run root  (the brain node, whose id is the run id; the run root itself for --no-brain)
+  dispatch dsp_…  caller: brain  call_seq: 3            dispatch_issued     durable
+    task nd_…  (logical id)                             task_queued         durable
+      node_state_changed  queued -> blocked -> leased -> queued (rotation) -> leased -> terminal
+      attempt 1  nd_…  (node id)                        node_spawned … node_finished
+      attempt 2  nd_…
+        dispatch dsp_…  caller: task nd_…  depth 2      a worker's own dispatch
+    task nd_…                                           dispatch_rejected   never queued
+  dispatch_settled  counts, cost                        durable, by the caller
+```
+
+1. **Ids before work.** The dispatch id and every task's logical id are minted before anything
+   runs and written in one durable `DispatchIssued`, so a crash between the tool call and the
+   first spawn still leaves every task visible as queued. `call_seq` ties the dispatch to the
+   brain's tool call, and that call's `BrainToolCall.dispatch` names it back.
+2. **The caller is who asked.** The brain for `swamp_dispatch`, the run root for `swamp run
+   --no-brain`, a task when a worker dispatches work of its own (`inspect::Caller` kind `task`).
+   Each attempt's `NodeRecord` carries its `dispatch` and `depth`; `limits.max_depth` refuses a
+   task one level too deep with `DispatchRejected` instead of queueing it.
+3. **Two state machines.** A task's phase is journaled on its logical id (queued, blocked, leased,
+   back to queued on a rotation, terminal) and an attempt's on its own id (leased, running,
+   terminal). Nothing is journaled out of a terminal state, and the first terminal task state
+   journaled is the one every reader folds, which is what lets `swamp cancel` from another
+   process win over the supervisor's own retry.
+4. **Settling.** The caller journals `DispatchSettled` once every task has ended. Nodes from a
+   schema-1 journal, which has no dispatch events, sit in the `DispatchId::LEGACY` bucket, which
+   settles with the run.
+5. **Rollups follow the lineage.** `RunView::rollup` sums every attempt of every task of a
+   dispatch, a task or a subtree, and a task's cost includes everything it dispatched in turn.
+6. **Delegation is measured on it.** `RunView::brain_self_work` counts the brain's own tool calls
+   before its first dispatch and its share of the cost, against `limits.brain_read_budget`; the
+   cut rule and every surface that prints it are in `docs/DISPATCH.md`.
+
+`swamp dispatches`, `swamp dispatch <ID>`, `swamp trace --group-by dispatch`, the board and the
+brain's `swamp_inspect` / `swamp_status { dispatch }` are all renderings of this one fold; their
+JSON shapes are in `docs/DISPATCH.md`.
+
 ---
 
 ## 7. Journal and run tree
@@ -1750,6 +1824,9 @@ with `swamp accounts reset <id>`. Nothing deletes them silently.
 
 ~/.swamp/
   accounts.json                           # cross-run, cross-repo quota state (fs4-locked)
+  runs.json                               # cross-repo index of live runs, read by swamp board --all (fs4-locked)
+  board.pid                               # the running swamp board, for chat's tmux hint
+  sock/<run_short>.sock                   # MCP control socket, 0600 in a 0700 directory
   worktrees/<repo-name>-<hash8>/<run_short>/<node_short>-<attempt>/   # LOGICAL node short id
 ```
 
@@ -1780,8 +1857,9 @@ pub enum JournalEvent {
     RunStarted { swamp_version: String, schema: u32, argv: Vec<String>,
                  cwd: Utf8PathBuf, repo: Option<Utf8PathBuf>, base: Option<String>,
                  config_sha256: String, task: Option<String> },
-    /// Full snapshot at creation. Everything after is a delta.
-    NodeSpawned { node: Box<NodeRecord> },
+    /// Full snapshot at creation. Everything after is a delta. Serialized as `record`: `node`
+    /// is already the line-level node id.
+    NodeSpawned { #[serde(rename = "record")] node: Box<NodeRecord> },
     AccountSelected { account: AccountId, exec: String, policy: SelectionPolicy,
                       reason: String, excluded: Vec<AccountId> },
     ModelResolved { tier: Tier, model: String, extra: BTreeMap<String, String> },
@@ -1860,11 +1938,16 @@ pub enum Phase { Queued, Blocked, Leased, Running, Succeeded, Failed, Cancelled,
 pub struct NodeTransition { pub from: Phase, pub to: NodeState, pub why: String }
 ```
 
-`schema: u32` in `RunStarted` is the compatibility marker; it is 2 since the dispatch events.
+Every `ev` above, with its line node, is listed in `docs/DISPATCH.md` ("Journal events"), and
+`tests/docs_drift.rs` fails when that list, this enum and `JournalEvent` disagree.
+
+`schema: u32` in `RunStarted` is the compatibility marker; it is 2 since the dispatch events
+(`journal::record::SCHEMA_VERSION`), and `swamp doctor --schema` prints the schema of every
+recent run.
 Schema 2 is additive: a schema-1 journal folds to the identical tree, with its nodes in the
 `DispatchId::LEGACY` bucket. Once users have traces, `JournalEvent`
-cannot break: every new field gets `#[serde(default)]`, every enum gets `#[serde(other)]` on the read
-path, and changes are additive only. Renaming a variant is a breaking change and is treated as one.
+cannot break: every new field gets `#[serde(default)]`; a line whose `ev` this binary does not know
+is skipped by the reader as unparsable (counted in the replay warning), so changes stay additive. Renaming a variant is a breaking change and is treated as one.
 
 ### 7.3 Writer
 
@@ -1888,9 +1971,10 @@ impl JournalHandle {
 }
 
 pub enum FsyncPolicy { Always, Barrier, Interval(Duration), Never }
-// Barrier is the default: RunStarted / NodeSpawned / ProcessStarted / WorktreeCreated /
-// NodeFinished / Adopted / RunFinished sync immediately; high-frequency text batches at
-// 64 records or 250ms.
+// Barrier is the default: RunStarted / NodeSpawned / ProcessStarted / ProcessExited /
+// WorktreeCreated / NodeFinished / Adopted / DispatchIssued / TaskQueued / DispatchRejected /
+// DispatchSettled / RunFinished sync immediately; high-frequency text batches at 64 records
+// or 250ms.
 ```
 
 Startup repairs a torn tail: a crash mid-write leaves a partial last line, so `open` seeks back to
@@ -1926,12 +2010,14 @@ pub struct RunView {
     pub transitions: BTreeMap<NodeId, Vec<NodeTransition>>,
     pub exited: BTreeSet<NodeId>,                    // ProcessExited seen
     pub call_seq: Option<CallSeq>,                   // highest tool call seen
+    self_work: SelfWorkFold,                         // the brain's calls before its first dispatch
     pub events: BTreeMap<NodeId, Vec<WorkerEvent>>,  // only when with_events
     pub totals: Usage,
     pub cost_usd: f64,
     pub cost_complete: bool,     // false if any node's cost is unknown
     pub last_seq: u64,
     pub finished: bool,
+    pub with_events: bool,
 }
 
 impl RunView {
@@ -1940,12 +2026,16 @@ impl RunView {
     pub fn load(dir: &Utf8Path, with_events: bool) -> anyhow::Result<Self>;
     /// Running nodes with no ProcessExited, no NodeFinished and a dead pid become Orphaned.
     pub fn mark_orphans(&mut self, alive: &dyn Fn(NodeId) -> bool);
+    /// The same against the run's own pidfiles (`RunPaths::is_live`).
+    pub fn mark_orphans_in(&mut self, paths: &RunPaths);
     pub fn tree(&self) -> Vec<TreeRow>;
     /// The latest attempt's state while it is live, else the task's journaled one.
     pub fn state_of(&self, logical_or_attempt: NodeId) -> Option<NodeState>;
     pub fn attempts(&self, logical_or_attempt: NodeId) -> Vec<&NodeRecord>;
     /// Nodes, failures, rejections, tokens and cost of a dispatch, a task or a subtree.
     pub fn rollup(&self, scope: Scope) -> Totals;
+    /// The brain's own tool calls before its first dispatch and its share of the cost (§6.8).
+    pub fn brain_self_work(&self) -> Option<BrainSelfWork>;
 }
 
 pub enum Scope { Dispatch(DispatchId), Task(NodeId), Subtree(NodeId) }
@@ -1978,14 +2068,14 @@ pub enum Recovery {
 pub fn plan(view: &RunView, paths: &RunPaths) -> Vec<Recovery>;
 ```
 
-`swamp` on startup scans for runs with no `RunFinished`, prints them, and offers `swamp resume`.
-Nothing auto-resumes, because relaunching workers spends quota.
+Interrupted runs (no `RunFinished`) are listed by `swamp runs --interrupted`; nothing auto-resumes,
+because relaunching workers spends quota.
 
 ### 7.6 `swamp trace`
 
 ```
 $ swamp trace last
-run_01JZQ8  ~/projects/api  base 9f3c1ad  started 14:02:11  4m12s  ~$1.84  1.2M tok
+run q69g5f  ~/projects/api  base 9f3c1ad  started 14:02:11  4m12s  ~$1.84  1.2M tok
 
 * a13f70  brain            anthropic/main  opus     4m12s  214k  ~$0.71  ok
   |
@@ -2003,6 +2093,7 @@ run_01JZQ8  ~/projects/api  base 9f3c1ad  started 14:02:11  4m12s  ~$1.84  1.2M 
 
 usage  in 1.2M  out 84.1k  cache-read 9.4M  cache-write 220k
 cost   ~$1.84   (1 node reported no cost data)
+brain  3/8 calls before the first dispatch, 39% of the known cost
 ```
 
 The leading column is the ATTEMPT node id: it names `nodes/<node_short>/` and is what `swamp
@@ -2015,7 +2106,11 @@ to the node's last finished attempt. Glyphs and columns are in `ui/fmt.rs`. `-` 
 never `$0.00`. `~` means list-price or estimated, never money billed.
 
 Flags: `--node <id>`, `--events`, `--raw` (verbatim `stream.jsonl`), `--stderr`, `--follow`,
-`--json` (the folded `RunView`), `--depth <n>`, `--failed`, `--since <dur>`.
+`--json` (the folded `RunView`), `--depth <n>`, `--failed`, `--since <dur>`, `--dispatch <id>`
+(one dispatch and what hangs below it), `--group-by dispatch` (one section per dispatch).
+
+The `brain` line is the delegation metric of §6.8; it turns into a warning past
+`limits.brain_read_budget` and is absent for a run without a brain.
 
 ### 7.7 `swamp watch`
 
@@ -2024,8 +2119,9 @@ broadcast channel when it happens to be the same process. It never requires the 
 alive, so an interrupted run is inspectable with the same tool, and `swamp watch` from a second
 terminal works against a run started elsewhere.
 
-- Left 40%: the run tree, spinner and elapsed timer and live token counter on running nodes.
-- Right 60%: the selected node's normalized event log; `r` toggles the raw JSONL view.
+- Left: the run tree, `ui.tree_width` columns (default 46), spinner and elapsed timer and live
+  token counter on running nodes.
+- Right: the rest, the selected node's normalized event log; `r` toggles the raw JSONL view.
 - Footer: per-account utilization gauges coloured by `Health`, with cooldown countdowns.
 
 Keys: up/down select, `r` raw toggle, `d` open the node diff in `$PAGER`, `k` cancel node (asks
@@ -2083,6 +2179,17 @@ swamp trace [RUN|last]                      RUN accepts a full id, a unique pref
       --node <ID> --events --raw --stderr --follow --json --depth <N> --failed --since <DUR>
                                             With no RUN, --node searches every run, so a node of
                                             an older run renders that run
+      --dispatch <ID>                       One dispatch's tasks and what they dispatched
+      --group-by dispatch                   One section per dispatch; no --json, no --follow
+
+swamp dispatches [RUN|last]                 One row per dispatch: seq, age, tasks, counts, cost,
+                                            caller, and the brain's delegation line
+      --failed --follow --json
+swamp dispatch <ID> [--run RUN] [--json]    One dispatch's task tree, searched across every run
+
+swamp board                                 Dispatch board over every live run; k cancels after
+                                            a y / n while ui.board_actions is true
+      --run <RUN> --all --interval <MS> --once --json
 
 swamp watch [RUN|last]                      Live TUI, attachable from another terminal; k cancels
                                             after a y / n
@@ -2120,7 +2227,7 @@ swamp adopt <NODE>...                       Land a worker's work in the user's t
       --into <BRANCH> --dry-run --force     Refuses on a dirty tree unless --force
 
 swamp worktrees [ls|prune|open <NODE>]
-swamp cancel <RUN|NODE>... [--all] [--signal term|kill]
+swamp cancel <RUN|NODE|DISPATCH>... [--all] [--signal term|kill]
 swamp gc [--older-than <DUR>] [--keep <N>] [--dry-run] [--force]
 swamp replay <RUN> [--reparse]              --reparse re-derives the journal from the retained raw
                                             streams with the CURRENT adapters. This is the real
@@ -2144,55 +2251,43 @@ node. A run that exists is a run that spent something.
 ## 9. `swamp doctor`
 
 ```
-$ swamp doctor
+$ swamp doctor --schema
 swamp 0.1.0 - macos aarch64
 
 environment
-  ok    git 2.47.1                    worktree support present
-  ok    repo ~/projects/api           HEAD a3f91c2, clean
-  ok    .swamp/ writable              listed in .git/info/exclude
-  ok    ~/.swamp state dir            free 412 GiB
-  ok    swamp resolvable              /usr/local/bin/swamp (needed for the MCP bridge)
-  ok    not inside a worker           SWAMP_DEPTH unset
-
-providers.anthropic (claude-cli)
-  ok    claude-main -> ~/bin/claude-main   wrapper -> claude 2.x
-          auth: subscription (apiKeySource=none)   CLAUDE_CONFIG_DIR=~/.claude
-          tiers: high=opus  mid=sonnet  low=haiku   probe 1.4s
-  ok    claude-alt  -> ~/bin/claude-alt    CLAUDE_CONFIG_DIR=~/.claude-alt
-  ok    claude-work -> ~/bin/claude-alt     CLAUDE_CONFIG_DIR=~/.claude-alt
-  ERROR accounts/collision
-          accounts claude-alt and claude-work resolve to the same binary with the same
-          effective config dir (~/bin/claude-alt env CLAUDE_CONFIG_DIR=~/.claude-alt):
-          they are ONE subscription, so dispatch would double-spend one quota and
-          failover between them is a silent no-op. Give each account a wrapper that
-          sets its own config dir.
-
-providers.openai (codex-cli)
-  ok    codex-main  -> ~/bin/codex-main    wrapper -> codex-cli 0.15.x
-          auth: ChatGPT subscription   CODEX_HOME=~/.codex-main
-
-quota (one line per account, from the last persisted snapshot; no network)
-  ok    providers/claude-main/quota   quota telemetry live  5h 13%  7d 5%  observed 57s ago
-  WARN  providers/claude-alt/quota    no quota source; tokens only, utilization is estimated
-  note  providers/codex-main/quota    quota via app-server  7d 32%  observed 57s ago
-
-protocol
-  ok    claude stream-json fixtures parse   (5/5 golden lines)
-  ok    codex  --json fixtures parse        (5/5, 1 known non-JSON preamble)
-  ok    mcp round trip                      brain spawned with --mcp-config called swamp_ping
-
+  ok    environment/git              git version 2.47.1
+  ok    environment/repo             /Users/me/projects/api HEAD a3f91c2, clean
+  ok    environment/.swamp           /Users/me/projects/api/.swamp writable, listed in .git/info/exclude
+  ok    environment/state            /Users/me/.swamp writable
+  ok    environment/swamp            /usr/local/bin/swamp (the MCP bridge is spawned by absolute path)
+  ok    environment/depth            not inside a worker
+accounts
+  ok    accounts/claude-main         claude-main -> /Users/me/bin/claude-main (anthropic) env CLAUDE_CONFIG_DIR
+  ok    accounts/claude-alt          claude-alt -> /Users/me/bin/claude-alt (anthropic) env CLAUDE_CONFIG_DIR
+  ok    accounts/claude-work         claude-alt -> /Users/me/bin/claude-alt (anthropic) env CLAUDE_CONFIG_DIR
+  ok    accounts/codex-main          codex-main -> /Users/me/bin/codex-main (openai) env CODEX_HOME
+  ERROR accounts/collision           accounts claude-alt and claude-work resolve to the same binary with the same effective config dir (/Users/me/bin/claude-alt env CLAUDE_CONFIG_DIR=/Users/me/.claude-alt): they are ONE subscription, so dispatch would double-spend one quota and failover between them is a silent no-op. Give each account a wrapper that sets its own config dir.
+providers
+  ok    providers/claude-main/quota  quota telemetry live  5h 13%  7d 5%  observed 57s ago
+  WARN  providers/claude-alt/quota   no quota source; tokens only, utilization is estimated
+  WARN  providers/claude-work/quota  no quota source; tokens only, utilization is estimated
+  note  providers/codex-main/quota   quota via app-server  7d 32%  observed 57s ago
+  ok    providers/anthropic          tiers: high=opus  mid=sonnet  low=haiku
+  ok    providers/openai             tiers: high=gpt-6-astra  mid=gpt-5.6-sol  low=gpt-5.6-terra
+  WARN  providers/anthropic/permission_mode providers.anthropic.worker.permission_mode = "acceptEdits" denies every Bash call under --permission-prompts none and Bash is not allowed, so it cannot run tests, a build or git; add "Bash" to providers.anthropic.worker.allow_tools
+brain
+  WARN  brain/permission_mode        brain.permission_mode = "acceptEdits" denies every Bash call under --permission-prompts none and Bash is not allowed, so it cannot run tests, a build or git; add "Bash" to brain.allow_tools
+workspace
+  WARN  workspace/link               [workspace] link is empty but ./target is 3.1 GiB; fresh worktrees will rebuild from scratch. Consider link = ["target"]
 config
-  ok    ~/.config/swamp/config.toml         valid
-  WARN  [workspace] link is empty but ./target is 3.1 GiB
-          fresh worktrees will rebuild from scratch; consider link = ["target"]
-  WARN  providers.anthropic.worker.permission_mode = "acceptEdits"
-          denies every Bash call under --permission-prompts none and Bash is not
-          allowed, so workers cannot run tests, a build or git. Add "Bash" to
-          providers.anthropic.worker.allow_tools. ("auto" is not the fix: it denies
-          the file writes instead.) The same check covers [brain].
+  ok    config/sources               /Users/me/.config/swamp/config.toml
+protocol
+  ok    protocol/schema              0 of 812 stream lines unparsed (0.0%), 0 of 3 classifications used the regex fallback (0.0%)
+  ok    protocol/journal             9g5fav schema 2 (swamp 0.1.0)
+  note  protocol/journal             8k2m1q schema 1 (swamp 0.1.0): folds, without the dispatch lineage schema 2 records
+  ok    protocol/permission_mode     acceptEdits accepted by claude-main
 
-3 warnings, 1 error.
+5 warnings, 1 error.
 ```
 
 The most valuable check is `accounts/collision`. Two "accounts" that are one subscription is silent,
@@ -2213,7 +2308,13 @@ arithmetic.
 yields a terminal `Final` the adapter classifies as success. Run it after every CLI upgrade; it is the
 real defence against upstream format drift. `--schema` reports the `Detector::Pattern` fallback rate
 and the unparsed-line ratio across recent runs, which is the early warning that a vendor changed
-wording or shape. `--reap` removes stale worktrees, sockets and pidfiles and runs `git worktree prune`. It then sweeps
+wording or shape. It also prints one `protocol/journal` line per recent run with the journal schema
+it was written with (`ok` for the current one, `note` for an older one that still folds, `WARN`
+for one newer than this binary reads), and checks the configured claude permission modes
+(`providers.anthropic.worker.permission_mode`, `brain.permission_mode`) against the
+`--permission-mode` choices the first claude account's `--help` lists: claude refuses a
+misspelt mode only once a worker starts, so a case slip is an `ERROR` that names the right
+spelling. Without a resolvable executable or a choices list the check is a `note`. `--reap` removes stale worktrees, sockets and pidfiles and runs `git worktree prune`. It then sweeps
 `~/.swamp/sock` on its own, because a session that was killed after its repository was deleted leaves
 a socket no run directory names any more: every `*.sock` there that refuses a connection is removed,
 one that accepts one belongs to a live run and is kept. The two counts are reported separately
@@ -2239,7 +2340,8 @@ version = 1
 [limits]
 max_nodes_per_run     = 32
 max_depth             = 2          # brain -> worker -> refused (also via SWAMP_DEPTH)
-brain_read_budget     = 8          # reads the brain may do before its first dispatch
+brain_read_budget     = 8          # tool calls the brain may make before its first dispatch;
+                                   # trace, dispatches and the board header warn past it
 worker_timeout        = "25m"
 grace_period          = "5s"       # SIGTERM -> SIGKILL window; also how long quitting chat waits
 max_prompt_bytes      = 200000
@@ -2248,7 +2350,7 @@ unsafe_ack            = false      # required before any --dangerously-* flag is
 
 # ---------------------------------------------------------------- brain
 [brain]
-transport = "cli"                  # "cli" (default, subscription-safe) | "api" (feature api-brain)
+transport = "cli"                  # "cli" is the only transport compiled in; anything else is refused
 provider  = "anthropic"
 account   = "main"
 tier      = "high"
@@ -2260,7 +2362,8 @@ reserve_brain_slot = true          # keep this account out of the worker pool
 # works is "acceptEdits" plus "Bash" in allow_tools, here and for the workers below. The
 # trade-off is real: an allowed Bash runs commands without asking, the same trust you extend
 # to a CLI agent in your own shell, and a worktree is a directory, not a sandbox.
-# deny_tools below still keeps the brain from editing files.
+# deny_tools below still keeps the brain from editing files. The spelling is the CLI's own:
+# `swamp doctor --schema` checks it against `claude --help`.
 permission_mode    = "acceptEdits"
 include_partial_messages = true    # smooth chat streaming; workers keep this off
 # Every mcp__swamp__* tool is allowed automatically, from the registry: the brain answers no

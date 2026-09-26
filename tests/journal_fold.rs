@@ -19,7 +19,8 @@ use swamp::journal::{Journal, JournalHandle};
 use swamp::model::core::{
     AccountId, ChangeKind, Cost, CostBasis, EvidenceSource, FileChange, NodeState, Usage,
 };
-use swamp::model::dispatch::{DispatchCounts, DispatchState, NodeTransition, Phase};
+use swamp::model::dispatch::{DispatchCounts, DispatchState, Phase};
+use swamp::model::event::WorkerEvent;
 use swamp::model::failure::{Detector, Failure};
 
 fn note(text: &str) -> JournalEvent {
@@ -210,8 +211,7 @@ async fn emit_durable_is_on_disk_when_it_returns() {
     task.await.expect("writer task");
 }
 
-/// A durable line never overtakes the lines emitted before it, or a settled dispatch can reach
-/// disk ahead of the task transitions it summarises.
+/// A durable line never overtakes the lines emitted before it.
 #[tokio::test]
 async fn a_durable_line_lands_behind_every_earlier_emit() {
     let sb = sandbox();
@@ -738,12 +738,7 @@ fn discover_walks_up_to_the_git_root() {
     assert_eq!(paths.repo, root);
     assert_eq!(paths.dot_swamp, root.join(".swamp"));
     assert!(paths.accounts_state().ends_with("accounts.json"));
-    assert!(
-        paths
-            .worktree_root()
-            .as_str()
-            .contains(root.file_name().unwrap())
-    );
+    assert!(swamp::workspace::repo_slug(&paths.repo).contains(root.file_name().unwrap()));
 }
 
 #[test]
@@ -1013,12 +1008,6 @@ fn seq_of(lines: &[JournalLine], pred: impl Fn(&JournalEvent) -> bool) -> usize 
         .iter()
         .position(|l| pred(&l.event))
         .expect("the fixture has the line")
-}
-
-/// Chained (each `from` is the previous `to`) and never leaving a terminal state.
-fn well_formed(chain: &[NodeTransition]) -> bool {
-    chain.iter().all(|t| !t.from.is_terminal())
-        && chain.windows(2).all(|w| Phase::from(&w[0].to) == w[1].from)
 }
 
 #[test]
@@ -1402,4 +1391,215 @@ fn the_first_terminal_task_state_wins() {
         v.state_of(task)
     );
     assert_eq!(v.transitions[&task].len(), 3);
+}
+
+/// The brain's own calls before its first dispatch, not the dispatch call, and its cost share.
+#[test]
+fn brain_self_work_counts_the_brain_calls_before_its_first_dispatch() {
+    let view = fold(&schema_2_with_reads(3));
+    let w = view.brain_self_work().expect("a run with a brain");
+    assert_eq!(w.calls, 3, "{w:?}");
+    assert!(w.dispatched);
+    assert_eq!(w.brain_usd, Some(1.0));
+    // The brain's 1.00 plus a1 0.10, e1 0.05, a2 0.50 and b1 0.25.
+    assert!((w.total_usd - 1.9).abs() < 1e-9, "{w:?}");
+    let share = w.cost_share().expect("a share");
+    assert!((share - 1.0 / 1.9).abs() < 1e-9, "{share}");
+    assert!(!w.over(3) && w.over(2));
+}
+
+#[test]
+fn brain_self_work_counts_every_call_while_nothing_was_dispatched() {
+    let lines = schema_2_with_reads(5);
+    let first = lines
+        .iter()
+        .position(|l| {
+            matches!(&l.event, JournalEvent::NodeEvent { event: WorkerEvent::ToolCall { name, .. }, .. }
+                if name.starts_with("mcp__swamp__"))
+        })
+        .expect("the brain's dispatch call");
+    let w = fold(&lines[..first])
+        .brain_self_work()
+        .expect("a run with a brain");
+    assert_eq!(
+        w.calls, 5,
+        "swamp's own tool is not the brain's work: {w:?}"
+    );
+    assert!(!w.dispatched);
+}
+
+/// Reads journaled after the `DispatchIssued` they preceded count: stream order decides.
+#[test]
+fn reads_journaled_after_the_dispatch_they_preceded_still_count() {
+    let mut lines = schema_2_with_reads(3);
+    let issued = lines
+        .iter()
+        .position(|l| matches!(l.event, JournalEvent::DispatchIssued { .. }))
+        .expect("a dispatch");
+    let brain_stream: Vec<JournalLine> = lines
+        .iter()
+        .take(issued)
+        .filter(|l| matches!(l.event, JournalEvent::NodeEvent { .. }))
+        .cloned()
+        .collect();
+    lines.retain(|l| !(l.seq < issued as u64 && matches!(l.event, JournalEvent::NodeEvent { .. })));
+    let at = lines
+        .iter()
+        .position(|l| matches!(l.event, JournalEvent::DispatchIssued { .. }))
+        .expect("a dispatch")
+        + 1;
+    lines.splice(at..at, brain_stream);
+    for (i, l) in lines.iter_mut().enumerate() {
+        l.seq = i as u64;
+    }
+    let w = fold(&lines).brain_self_work().expect("a brain");
+    assert_eq!(w.calls, 3, "{w:?}");
+    assert!(w.dispatched);
+}
+
+#[test]
+fn brain_self_work_is_the_same_however_the_journal_is_replayed() {
+    let lines = schema_2_with_reads(4);
+    let mut twice = RunView::default();
+    for l in lines.iter().chain(lines.iter()) {
+        twice.apply(l);
+    }
+    assert_eq!(twice.brain_self_work(), fold(&lines).brain_self_work());
+}
+
+#[test]
+fn a_run_without_a_brain_has_no_self_work() {
+    let (worker, d) = (nid(7), did(40));
+    let mut rec = record(worker, worker, Some(nid(0)), 1);
+    rec.dispatch = Some(d);
+    let lines = vec![
+        line(
+            0,
+            Some(worker),
+            JournalEvent::NodeSpawned {
+                node: Box::new(rec),
+            },
+        ),
+        line(1, Some(worker), brain_call(0, "Read")),
+    ];
+    assert_eq!(fold(&lines).brain_self_work(), None);
+}
+
+/// Schema 1 journaled no `DispatchIssued`: its `swamp_dispatch` call is the first dispatch.
+#[test]
+fn brain_self_work_reads_a_schema_1_journal() {
+    let view = RunView::load(&fixture_path("journal-schema1.jsonl"), false).expect("load");
+    let w = view.brain_self_work().expect("the fixture has a brain");
+    assert_eq!(w.calls, 0);
+    assert!(w.dispatched);
+    assert_eq!(w.brain_usd, Some(2.0));
+    let share = w.cost_share().expect("a share");
+    assert!((share - 2.0 / view.cost_usd).abs() < 1e-9, "{share}");
+}
+
+/// A brain that reported no cost has no share rather than a zero one.
+#[test]
+fn a_brain_with_no_reported_cost_has_no_share() {
+    let lines: Vec<JournalLine> = schema_2_with_reads(1)
+        .into_iter()
+        .filter(|l| !matches!(l.event, JournalEvent::NodeUsage { .. }))
+        .collect();
+    let w = fold(&lines).brain_self_work().expect("a brain");
+    assert_eq!(w.brain_usd, None);
+    assert_eq!(w.cost_share(), None);
+    assert_eq!(w.calls, 1);
+}
+
+/// A rejected `swamp_dispatch` is not the first dispatch: the reads after it still count.
+#[test]
+fn a_failed_dispatch_call_does_not_cut_the_brain_self_work() {
+    let brain = nid(0);
+    let mut lines = schema_2_with_reads(3);
+    let at = lines
+        .iter()
+        .position(|l| {
+            matches!(&l.event, JournalEvent::NodeEvent { event: WorkerEvent::ToolCall { name, .. }, .. }
+                if name.starts_with("mcp__swamp__"))
+        })
+        .expect("the brain's dispatch call");
+    let mut failed = vec![
+        line(
+            0,
+            Some(brain),
+            brain_call(100, "mcp__swamp__swamp_dispatch"),
+        ),
+        line(
+            0,
+            Some(brain),
+            JournalEvent::BrainToolCall {
+                tool: "swamp_dispatch".into(),
+                args_sha256: String::new(),
+                args_path: Utf8PathBuf::from("tools/bad-swamp_dispatch.json"),
+                call_seq: None,
+                dispatch: None,
+            },
+        ),
+    ];
+    failed.extend((101..105).map(|i| line(0, Some(brain), brain_call(i, "Read"))));
+    let rejected_at = at + 2;
+    lines.splice(at..at, failed);
+    for (i, l) in lines.iter_mut().enumerate() {
+        l.seq = i as u64;
+    }
+    let before = fold(&lines[..rejected_at])
+        .brain_self_work()
+        .expect("a brain");
+    assert_eq!(before.calls, 3, "{before:?}");
+    assert!(!before.dispatched, "a rejected call dispatched nothing");
+    let w = fold(&lines).brain_self_work().expect("a brain");
+    assert_eq!(w.calls, 7, "{w:?}");
+    assert!(w.dispatched);
+}
+
+/// codex repeats a call on each item update and restarts its item ids with each process.
+#[test]
+fn a_codex_brain_counts_each_tool_call_once() {
+    use swamp::model::core::Provider;
+    use swamp::worker::{ParseState, adapter_for};
+    let brain = nid(0);
+    let turns = [
+        vec![
+            r#"{"type":"thread.started","thread_id":"t1"}"#,
+            r#"{"type":"item.started","item":{"id":"item_0","type":"command_execution","command":"git log","status":"in_progress"}}"#,
+            r#"{"type":"item.updated","item":{"id":"item_0","type":"command_execution","command":"git log","status":"in_progress"}}"#,
+            r#"{"type":"item.completed","item":{"id":"item_0","type":"command_execution","command":"git log","exit_code":0,"status":"completed"}}"#,
+            r#"{"type":"item.started","item":{"id":"item_1","type":"command_execution","command":"ls","status":"in_progress"}}"#,
+            r#"{"type":"item.completed","item":{"id":"item_1","type":"command_execution","command":"ls","exit_code":0,"status":"completed"}}"#,
+        ],
+        vec![
+            r#"{"type":"thread.started","thread_id":"t1"}"#,
+            r#"{"type":"item.started","item":{"id":"item_0","type":"command_execution","command":"cat a","status":"in_progress"}}"#,
+            r#"{"type":"item.completed","item":{"id":"item_0","type":"command_execution","command":"cat a","exit_code":0,"status":"completed"}}"#,
+            r#"{"type":"item.started","item":{"id":"item_1","type":"mcp_tool_call","server":"swamp","tool":"swamp_dispatch"}}"#,
+            r#"{"type":"item.completed","item":{"id":"item_1","type":"mcp_tool_call","server":"swamp","tool":"swamp_dispatch"}}"#,
+        ],
+    ];
+    let codex = adapter_for(Provider::Openai);
+    let stream: Vec<JournalLine> = turns
+        .iter()
+        .flat_map(|turn| {
+            let mut st = ParseState::default();
+            turn.iter()
+                .flat_map(|l| codex.parse_line(l, &mut st).events)
+                .collect::<Vec<_>>()
+        })
+        .map(|event| line(0, Some(brain), JournalEvent::NodeEvent { offset: 0, event }))
+        .collect();
+    let mut lines = schema_2();
+    let first = lines
+        .iter()
+        .position(|l| matches!(l.event, JournalEvent::BrainToolCall { .. }))
+        .expect("schema_2 dispatches");
+    lines.splice(first..first, stream);
+    for (i, l) in lines.iter_mut().enumerate() {
+        l.seq = i as u64;
+    }
+    let w = fold(&lines).brain_self_work().expect("a brain");
+    assert_eq!(w.calls, 3, "{w:?}");
+    assert!(w.dispatched);
 }

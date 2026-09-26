@@ -155,6 +155,7 @@ async fn plain_slash(command: &str, disp: &Arc<Dispatcher>, ctx: &Ctx) -> anyhow
                         node,
                         dispatch,
                         events: true,
+                        read_budget: Some(app.read_budget),
                         ..TraceOpts::default()
                     },
                 );
@@ -287,7 +288,7 @@ async fn interactive(
         };
         app.now = OffsetDateTime::now_utc();
         let mut effects: std::collections::VecDeque<Effect> = app.reduce(msg).into();
-        app.mark_orphans(&|id| crate::worker::liveness::is_ours(&paths.pidfile(id)));
+        app.mark_orphans(&|id| paths.is_live(id));
         let mut quit = None;
         while let Some(effect) = effects.pop_front() {
             match effect {
@@ -313,6 +314,7 @@ async fn interactive(
                             node,
                             dispatch,
                             events: true,
+                            read_budget: Some(app.read_budget),
                             ..TraceOpts::default()
                         },
                     );

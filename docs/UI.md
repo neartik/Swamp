@@ -365,8 +365,10 @@ Shown only when `TMUX` is set and `~/.swamp/board.pid` names no live process
 (`journal::paths::board_is_alive`, the same start-time check `worker::liveness::is_ours` uses).
 The decision is one pure function, `ui::chat::board_hint(in_tmux, board_alive) -> Option<&str>`,
 so it is unit-tested without a terminal. `swamp chat --board` runs
-`tmux split-window -h -l 46 -d swamp board` when `TMUX` is set, or prints one line naming the
-command otherwise, then always continues into chat - a pane it could not open is never fatal.
+`tmux split-window -h -l <ui.board_width, default 46> -d swamp board --run <run>` when `TMUX` is
+set, pinning the board to the chat's run, or otherwise prints
+``run `swamp board --run <id>` in another pane``, then always continues into chat - a pane it
+could not open is never fatal.
 
 ---
 
@@ -840,10 +842,11 @@ pub const COMMANDS: &[Cmd] = &[ /* … */ ];
 | Command | Args | Prints |
 |---|---|---|
 | `/help` | | the table below plus the shortcut block from §3.8 |
-| `/status` | | the run tree, `trace::render(&view, &TraceOpts::default())`, committed verbatim in `meta`. Identical bytes to `swamp trace`. |
+| `/status` | | the run tree, `trace::render` with the configured `limits.brain_read_budget`, committed verbatim in `meta`. Identical bytes to `swamp trace`, the `brain` delegation line included (`docs/DISPATCH.md`, "Delegation"). |
 | `/accounts` | | one row per account from `pool().snapshot()`: `provider/id`, `watch::health_word`, `watch::gauge_bar(util)` + `NN%`, inflight, lifetime nodes, `~$spend`, cooldown `until 14:20`. Coloured by `watch::health_color`. |
 | `/usage` | `[--json]` | per-account tokens and quota windows, `ui::usage::render` shared byte-for-byte with `swamp usage`; `--json` commits the `ui::usage::json` shape as a code block instead |
-| `/trace` | `[node]` | `TraceOpts { node, events: true, ..default }`; no arg means the whole run. Collapsed at 3 lines with `ctrl+o`. |
+| `/trace` | `[node\|dispatch]` | `TraceOpts { node, dispatch, events: true, ..default }`; no arg means the whole run, a dispatch id narrows it to that dispatch's tasks. Collapsed at 3 lines with `ctrl+o`. |
+| `/dispatches` | `[--failed]` | `dispatches::render_list`, the same rows and `brain` line as `swamp dispatches`; `--failed` keeps the dispatches with a failed or rejected task |
 | `/cost` | | in / out / cache-read / cache-write tokens and `~$` from `view.totals()`, a per-account and per-tier breakdown, plus `(N nodes reported no cost data)` when `!cost_complete` |
 | `/tier` | `[low\|mid\|high]` | no arg: the current default dispatch tier, one line, `dispatch tier: mid`. With an arg: sets it for subsequent dispatches, echoes `dispatch tier: mid -> low`, updates the status marker. |
 | `/cancel` | `<node\|all>` | `disp.cancel(node)` / `cancel_all()`, echoes `⊘ cancelled N nodes` |

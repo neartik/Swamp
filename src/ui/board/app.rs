@@ -861,6 +861,7 @@ pub fn json(b: &Board) -> Value {
             "dir": p.paths.dir,
             "stale": p.stale.is_some(),
             "finished": p.view.finished,
+            "brain": crate::ui::delegation::json(&p.view, b.read_budget),
             "dispatches": inspect::list(&p.view, b.now).dispatches,
         })).collect::<Vec<_>>(),
         "in_flight": in_flight,
@@ -976,7 +977,7 @@ pub async fn run_tui(
 
     let mut board = sources.board(Instant::now())?;
     let mut app = App::new(cfg.ui.board_actions.unwrap_or(true));
-    let grace = cfg.limits.grace_period.unwrap_or(StdDuration::from_secs(5));
+    let grace = cfg.grace_period();
     let (tx, mut done) = tokio::sync::mpsc::unbounded_channel::<CancelDone>();
     let _pid = BoardPid::write(&sources.paths.board_pid());
 

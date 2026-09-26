@@ -374,10 +374,10 @@ pub fn text_of(lines: &[Line<'_>]) -> Vec<String> {
 pub mod tool_args {
     use crate::ui::fmt;
 
-    const MCP_PREFIX: &str = "mcp__swamp__";
-
     pub fn short_name(name: &str) -> String {
-        name.strip_prefix(MCP_PREFIX).unwrap_or(name).to_owned()
+        crate::mcp::server::swamp_tool(name)
+            .unwrap_or(name)
+            .to_owned()
     }
 
     /// Per-tool rules where the arguments are structured, a collapsed one-liner otherwise.

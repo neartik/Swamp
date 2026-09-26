@@ -171,6 +171,18 @@ impl Config {
         })
     }
 
+    /// Tool calls the brain may make before its first `swamp_dispatch`.
+    pub fn brain_read_budget(&self) -> u32 {
+        self.limits
+            .brain_read_budget
+            .unwrap_or(crate::brain::prompt::DEFAULT_READ_BUDGET)
+    }
+
+    /// The SIGTERM to SIGKILL window.
+    pub fn grace_period(&self) -> Duration {
+        self.limits.grace_period.unwrap_or(Duration::from_secs(5))
+    }
+
     pub fn node_timeout(&self, t: Tier) -> Duration {
         self.tiers
             .get(&t)

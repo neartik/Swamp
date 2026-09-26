@@ -9,13 +9,14 @@ pub async fn list(ctx: &Ctx, args: &DispatchesArgs) -> anyhow::Result<i32> {
     let opts = ListOpts {
         failed: args.failed,
         json: args.json || ctx.json,
+        read_budget: Some(ctx.cfg.brain_read_budget()),
     };
     if args.follow {
         follow(&paths, opts).await?;
         return Ok(0);
     }
     let mut view = ctx.view(&paths, false)?;
-    view.mark_orphans(&|id| crate::worker::liveness::is_ours(&paths.pidfile(id)));
+    view.mark_orphans_in(&paths);
     ctx.out(&render_list(&view, opts, OffsetDateTime::now_utc()));
     Ok(0)
 }
@@ -24,7 +25,7 @@ pub async fn list(ctx: &Ctx, args: &DispatchesArgs) -> anyhow::Result<i32> {
 pub async fn show(ctx: &Ctx, args: &DispatchArgs) -> anyhow::Result<i32> {
     let (paths, id) = ctx.dispatch_in(args.run.as_deref(), &args.id)?;
     let mut view = ctx.view(&paths, false)?;
-    view.mark_orphans(&|id| crate::worker::liveness::is_ours(&paths.pidfile(id)));
+    view.mark_orphans_in(&paths);
     let json = args.json || ctx.json;
     ctx.out(&render_detail(&view, id, json, OffsetDateTime::now_utc()));
     Ok(0)

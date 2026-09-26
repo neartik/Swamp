@@ -307,7 +307,11 @@ models = {{ high = "{HIGH}", mid = "{MID}", low = "{LOW}" }}
 
     /// `<home>/.swamp/worktrees/<repo-name>-<hash8>`, the default layout.
     pub fn worktree_root(&self) -> Utf8PathBuf {
-        self.paths().worktree_root()
+        let paths = self.paths();
+        paths
+            .home_swamp
+            .join("worktrees")
+            .join(swamp::workspace::repo_slug(&paths.repo))
     }
 
     pub fn accounts_state(&self) -> swamp::dispatch::persist::StateMap {

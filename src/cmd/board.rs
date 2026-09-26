@@ -6,8 +6,7 @@ use crate::ui::chat::blocks::text_of;
 use crate::ui::chat::theme::Theme;
 use std::time::{Duration, Instant};
 
-/// The dispatch board of `docs/BOARD.md`. It tails journals and reads `accounts.json`; it
-/// never talks to a supervisor, and the one thing it changes is a confirmed cancel.
+/// The dispatch board of `docs/BOARD.md`; its only write is a confirmed cancel.
 pub async fn run(ctx: &Ctx, args: &BoardArgs) -> anyhow::Result<i32> {
     let scope = match (&args.run, args.all) {
         (Some(spec), _) => Scope::Pinned(ctx.paths.resolve_run(spec)?),
@@ -54,6 +53,31 @@ pub async fn from_watch(ctx: &Ctx, args: &WatchArgs) -> anyhow::Result<i32> {
     .await
 }
 
+/// `$COLUMNS` first, so a script can pick the tier it wants; then the terminal; then Wide.
 fn terminal_width() -> u16 {
-    crossterm::terminal::size().map(|(w, _)| w).unwrap_or(100)
+    width_from(
+        std::env::var("COLUMNS").ok().as_deref(),
+        crossterm::terminal::size().ok().map(|(w, _)| w),
+    )
+}
+
+fn width_from(columns: Option<&str>, terminal: Option<u16>) -> u16 {
+    columns
+        .and_then(|c| c.trim().parse::<u16>().ok())
+        .filter(|w| *w > 0)
+        .or(terminal)
+        .unwrap_or(100)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::width_from;
+
+    #[test]
+    fn columns_wins_over_the_terminal_and_garbage_falls_through() {
+        assert_eq!(width_from(Some("40"), Some(200)), 40);
+        assert_eq!(width_from(Some("wide"), Some(120)), 120);
+        assert_eq!(width_from(Some("0"), None), 100);
+        assert_eq!(width_from(None, None), 100);
+    }
 }

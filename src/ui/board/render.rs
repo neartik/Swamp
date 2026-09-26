@@ -16,7 +16,7 @@ use crate::ui::chat::workers::short_model;
 use crate::ui::keys::{self, KeyAction, Surface};
 use crate::ui::order::{self, Cell, Drop, SEP};
 use crate::ui::usage::{self, AccountRow};
-use crate::ui::{dispatches, fmt, trace, watch};
+use crate::ui::{delegation, dispatches, fmt, trace, watch};
 use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
 use std::time::Duration as StdDuration;
@@ -204,9 +204,7 @@ pub fn frame(
     compose(b, &rows, &rows, &c, bottom, None, &mut 0)
 }
 
-/// Header, body, accounts strip, detail and bottom line. `shown` is `rows` with the viewer's
-/// folds applied; with a `height` the body scrolls to keep the selection in view and the
-/// regions under it stay put.
+/// Header, body, accounts strip, detail and bottom line; `shown` is `rows` with folds applied.
 pub fn compose(
     b: &Board,
     shown: &Rows,
@@ -279,13 +277,28 @@ pub fn bottom(text: &str, role: Role, bold: bool, c: &Ctx) -> Line<'static> {
 
 // ---------------------------------------------------------------- header
 
-/// `swamp board   2 running · 1 stuck · 1 queued · ~$0.43 · observed 4s ago`, on two rows at
-/// Narrow; the optional cells drop, in order, when they do not fit.
+/// `swamp board   2 running · 1 stuck · ~$0.43 · observed 4s ago`; optional cells drop to fit.
 pub fn header(b: &Board, rows: &Rows, c: &Ctx) -> Vec<Line<'static>> {
     let s = b.summary(rows);
-    let cells = header_cells(&s);
-    let fresh = freshness(b, c);
-    let drops = [Drop::Key("queued"), Drop::Key("runs"), Drop::Key("cost")];
+    let cells = header_cells(&s, b.read_budget, c.l.band != Band::Narrow);
+    let fresh = freshness(b, c, false);
+    // Within budget the delegation cell is the first to go; past it, it outlasts the cost.
+    let over = s.brain.is_some_and(|w| w.over(b.read_budget));
+    let drops = if over {
+        [
+            Drop::Key("queued"),
+            Drop::Key("runs"),
+            Drop::Key("cost"),
+            Drop::Key("brain"),
+        ]
+    } else {
+        [
+            Drop::Key("brain"),
+            Drop::Key("queued"),
+            Drop::Key("runs"),
+            Drop::Key("cost"),
+        ]
+    };
     let mut first = Row::default();
     first.add(c.theme, TITLE, Role::Name);
     if c.l.header_rows == 2 {
@@ -297,10 +310,17 @@ pub fn header(b: &Board, rows: &Rows, c: &Ctx) -> Vec<Line<'static>> {
     }
     let gap = TITLE.width() + 2;
     let room = c.w().saturating_sub(gap);
-    // Freshness never drops: the counts before it give way first.
-    let fresh_text = fmt::truncate(&fresh.text, room);
-    let rest_room = room.saturating_sub(fresh_text.width() + SEP.width());
-    let cells = order::fit(cells, rest_room, &drops);
+    // Freshness never drops; past the budget it and the share shorten before the warning goes.
+    let fit = |fresh: &Cell, cells: Vec<Cell>| {
+        let text = fmt::truncate(&fresh.text, room);
+        let rest = room.saturating_sub(text.width() + SEP.width());
+        (text, rest, order::fit(cells, rest, &drops))
+    };
+    let (mut fresh_text, mut rest_room, mut cells) = fit(&fresh, cells);
+    if over && !cells.iter().any(|c| c.key == "brain") {
+        let compact = header_cells(&s, b.read_budget, false);
+        (fresh_text, rest_room, cells) = fit(&freshness(b, c, true), compact);
+    }
     let mut spans = order::spans(&cells, c.theme, rest_room);
     let rest_w: usize = spans.iter().map(|s| s.content.width()).sum();
     if rest_w > 0 {
@@ -313,7 +333,7 @@ pub fn header(b: &Board, rows: &Rows, c: &Ctx) -> Vec<Line<'static>> {
     vec![first.line(c.w())]
 }
 
-fn header_cells(s: &Summary) -> Vec<Cell> {
+fn header_cells(s: &Summary, budget: u32, share: bool) -> Vec<Cell> {
     let mut cells = Vec::new();
     if s.runs > 1 || s.hidden_runs > 0 {
         let text = if s.hidden_runs > 0 {
@@ -331,20 +351,27 @@ fn header_cells(s: &Summary) -> Vec<Cell> {
         ));
     }
     cells.extend(s.tally.summary_cells(s.cost_usd, s.cost_complete));
+    if let Some(w) = &s.brain {
+        cells.push(delegation::cell(w, budget, share));
+    }
     cells
 }
 
-/// How far behind the persisted account snapshot is. Past `quota_max_age` it stops being a
-/// lag and becomes the reason dispatch is wrong, so it changes colour.
-fn freshness(b: &Board, c: &Ctx) -> Cell {
+/// How far behind the account snapshot is, red past `quota_max_age`; `short` drops "observed".
+fn freshness(b: &Board, c: &Ctx, short: bool) -> Cell {
     let Some(at) = b.accounts_at else {
         return Cell::new("fresh", "not observed", Role::Meta);
     };
     let age: StdDuration = (c.now - at).try_into().unwrap_or(StdDuration::ZERO);
-    let text = if age.as_secs() < 60 {
-        format!("observed {}s ago", age.as_secs())
+    let ago = if age.as_secs() < 60 {
+        format!("{}s ago", age.as_secs())
     } else {
-        format!("observed {} ago", fmt::until(age))
+        format!("{} ago", fmt::until(age))
+    };
+    let text = if short {
+        ago
+    } else {
+        format!("observed {ago}")
     };
     let role = if age > c.max_age {
         Role::Err
@@ -888,14 +915,19 @@ fn window(line: &mut Row, label: &str, w: Option<&LimitWindow>, r: &AccountRow, 
     let t = c.theme;
     let role = pct_role(r, w, c);
     line.add(t, &format!("{label} "), Role::Meta);
+    // No window: one `-` where the percentage goes, the bar and the reset left blank.
     let bar = match w {
         Some(w) => gauge(w.utilization, c.l.bar, t),
-        None => fmt::pad("-", c.l.bar),
+        None => " ".repeat(c.l.bar),
     };
     line.add(t, &bar, role);
     line.pad(1);
     line.add(t, &right(&usage::pct_cell(w), 4), role);
     line.pad(1);
+    if w.is_none() {
+        line.pad(reset_mark(t).width() + 1 + 6);
+        return;
+    }
     line.add(t, reset_mark(t), Role::Meta);
     line.pad(1);
     line.add(t, &fmt::pad(&reset_cell(w, c), 6), Role::Meta);

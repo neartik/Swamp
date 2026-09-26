@@ -114,8 +114,8 @@ no diff at all, while `acceptEdits` (like `plan`, `manual` and `dontAsk`) writes
 every Bash call, so the worker cannot run the tests it was sent to run and comes back with a
 confident summary of work it never verified. The pair that works is `permission_mode =
 "acceptEdits"` plus `Bash` in `allow_tools`, for anthropic workers and for `[brain]`. The
-built-in defaults ship that pair for `[brain]`, so a fresh `swamp config init` inherits it;
-workers get it from your own `providers.<p>.worker` block. The trade-off is real: an allowed Bash runs commands in the worktree without asking, which is the
+built-in defaults ship that pair for `[brain]` and for anthropic workers
+(`providers.anthropic.worker`), so a fresh `swamp config init` inherits it. The trade-off is real: an allowed Bash runs commands in the worktree without asking, which is the
 same trust you extend to a CLI agent in your own shell, and a worktree is a directory, not a
 sandbox. The brain also keeps `deny_tools = ["Edit", "Write", "MultiEdit", "NotebookEdit"]` by
 default, so it still cannot edit files, and `swamp doctor` warns when a worker or the brain runs in a
@@ -152,7 +152,10 @@ swamp adopt last                                   # applies the patch to your c
 
 `swamp` with no arguments, or `swamp chat`, starts an interactive session with a brain: a CLI
 agent that plans, reads the repo, and dispatches workers through Swamp's own MCP tools. It never
-edits files itself. `swamp run <TASK>` uses the same brain for exactly one turn: there is nobody
+edits files itself, and it is told to delegate early: at most `limits.brain_read_budget` (default
+8) tool calls of its own before its first dispatch. `swamp trace`, `swamp dispatches` and the
+board header measure how it did (`brain  3/8 calls before the first dispatch, 12% of the cost`)
+and warn past the budget; [docs/DISPATCH.md](docs/DISPATCH.md#delegation) has the rule. `swamp run <TASK>` uses the same brain for exactly one turn: there is nobody
 to answer a follow-up, so it is told to end by naming the nodes worth landing and the
 `swamp adopt <node>` command for each, or to say that nothing is.
 
@@ -228,12 +231,12 @@ exists: `k` cancels on the board and in `swamp watch`, `r` is the raw view, `?` 
 | Command | What it does |
 |---|---|
 | `swamp run <TASK>` | One-shot. `--no-brain` sends the task straight to one worker. `--tier`, `--provider`, `--account`, `--isolation`, `--detach`. |
-| `swamp trace [RUN\|last\|-2]` | Render a run tree: nodes, attempts, accounts, failures, cost. `--events`, `--raw`, `--follow`, `--failed`, `--json`, `--dispatch <ID>` for one dispatch, `--group-by dispatch` for one section per dispatch. |
-| `swamp dispatches [RUN\|last]` | One row per dispatch of a run: call seq, age, tasks, per-state counts, cost, caller. `--failed`, `--follow`, `--json`. |
+| `swamp trace [RUN\|last\|-2]` | Render a run tree: nodes, attempts, accounts, failures, cost, and the brain's delegation line. `--events`, `--raw`, `--follow`, `--failed`, `--json`, `--dispatch <ID>` for one dispatch, `--group-by dispatch` for one section per dispatch. |
+| `swamp dispatches [RUN\|last]` | One row per dispatch of a run: call seq, age, tasks, per-state counts, cost, caller, then the brain's delegation line. `--failed`, `--follow`, `--json`. |
 | `swamp dispatch <ID>` | One dispatch's task tree: attempts, accounts, models, why a task is blocked or was rejected, and what it dispatched in turn. `--json`; the shape is in [docs/DISPATCH.md](docs/DISPATCH.md). |
 | `swamp watch [RUN\|last]` | Live TUI; `k` cancels the selected node after a y / n. Attach from a second terminal while a run is going. |
-| `swamp board` | Dispatch board: every live run's dispatches, their tasks ranked failures first, then running, blocked, queued, done, why a task is blocked and why its account won, and the account strip. Read-only except a confirmed cancel (`k`, then `y`; off with `ui.board_actions = false`). `--run`, `--all`, `--interval`, `--once`, `--json`. Meant to sit in a tmux pane beside `swamp chat`. |
-| `swamp doctor` | Health checks. `--probe` calls each account's CLI, `--schema` reports adapter drift, `--reap` removes stale worktrees and pidfiles, and sweeps `~/.swamp/sock` for sockets no process is listening on, `--fix` creates the directories and the git exclude. Exit 1 on any error, so CI can gate on it. |
+| `swamp board` | Dispatch board: every live run's dispatches, their tasks ranked failures first, then running, blocked, queued, done, why a task is blocked and why its account won, and the account strip; the header carries the brain's delegation cell. Read-only except a confirmed cancel (`k`, then `y`; off with `ui.board_actions = false`); the other keys are in [Keys](#keys). `--run`, `--all`, `--interval`, `--once` (one frame at `$COLUMNS` or the terminal width), `--json`. Meant to sit in a tmux pane beside `swamp chat`. |
+| `swamp doctor` | Health checks. `--probe` calls each account's CLI, `--schema` reports adapter drift, each recent run's journal schema and whether the configured claude permission modes are spelt the way `claude --help` lists them, `--reap` removes stale worktrees and pidfiles, and sweeps `~/.swamp/sock` for sockets no process is listening on, `--fix` creates the directories and the git exclude. Exit 1 on any error, so CI can gate on it. |
 | `swamp chat` | Interactive brain session. |
 | `swamp runs`, `swamp resume`, `swamp cancel` | List runs, recover an interrupted one (`--plan` first, it spends nothing), stop one. `swamp cancel` takes a run, a node or a dispatch id and works from any terminal: every live node it names is killed and journaled as cancelled, and the supervising run does not retry it. |
 | `swamp accounts` | Health, in-flight count, cooldowns, lifetime spend, including the brain's. Entries for ids no longer in the config are listed under `not in config`. Also `cooldown`, `clear`, `enable`, `disable`, `reset [ID]`. |
@@ -256,6 +259,7 @@ Swamp adds `/.swamp/` to `.git/info/exclude`, never to a tracked `.gitignore`.
     run.json                   header: cwd, git HEAD, config hash, version, argv
     journal.jsonl              the run tree, append-only, one JSON object per line
     tools/                     the arguments of every brain tool call
+    cancel/<logical_id>        present once a task is cancelled, by any process
     nodes/<node_short>/
       prompt.md                the exact bytes fed to the worker's stdin
       stream.jsonl             raw provider stdout, verbatim, never rewritten
@@ -269,6 +273,8 @@ Swamp adds `/.swamp/` to `.git/info/exclude`, never to a tracked `.gitignore`.
 
 ~/.swamp/
   accounts.json                cross-run, cross-repo quota and cooldown state (file-locked)
+  runs.json                    cross-repo index of live runs, read by swamp board --all (fs4-locked)
+  board.pid                    the running swamp board, for chat's tmux hint
   sock/<run_short>.sock        MCP control socket, 0600 in a 0700 directory
   worktrees/<repo>-<hash8>/<run_short>/<node_short>-<attempt>/
 ```
@@ -294,10 +300,16 @@ one or the other changes.
 ## Development
 
 ```sh
-cargo build
+cargo fmt --check
 cargo clippy --all-targets -- -D warnings
 cargo test
 ```
+
+CI (`.github/workflows/ci.yml`) runs the same three on `ubuntu-latest` and `macos-latest` with the
+toolchain pinned in `rust-toolchain.toml`, and uploads any pending `insta` `.snap.new` files when
+a run fails. `tests/docs_drift.rs` fails when the `ev` names in `docs/DISPATCH.md` or DESIGN §7.2
+differ from `JournalEvent`, or when a subcommand has no row in the command table above; it does not
+check flags or fields. Changes are summarized in [CHANGELOG.md](CHANGELOG.md).
 
 The end-to-end suite (`tests/e2e_*.rs`) runs the real binary against the fake CLIs in
 `tests/support/`, which are extra `[[bin]]` targets driven by scenario files and replaying the

@@ -21,6 +21,7 @@ pub async fn run(ctx: &Ctx, args: &ReplayArgs) -> anyhow::Result<i32> {
             &TraceOpts {
                 events: true,
                 json: ctx.json,
+                read_budget: Some(ctx.cfg.brain_read_budget()),
                 ..TraceOpts::default()
             },
         ));
@@ -39,7 +40,11 @@ pub async fn run(ctx: &Ctx, args: &ReplayArgs) -> anyhow::Result<i32> {
         paths.run
     );
     let view = ctx.view(&paths, false)?;
-    ctx.out(&render(&view, &TraceOpts::default()));
+    let opts = TraceOpts {
+        read_budget: Some(ctx.cfg.brain_read_budget()),
+        ..TraceOpts::default()
+    };
+    ctx.out(&render(&view, &opts));
     Ok(0)
 }
 

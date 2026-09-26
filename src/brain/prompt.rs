@@ -2,7 +2,7 @@ use crate::config::Config;
 
 const DEFAULT_NODES: u32 = 32;
 const DEFAULT_DEPTH: u32 = 2;
-const DEFAULT_READ_BUDGET: u32 = 8;
+pub const DEFAULT_READ_BUDGET: u32 = 8;
 
 /// How the session was launched. `swamp run` gets exactly one turn; `swamp chat` gets a human.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -16,7 +16,7 @@ pub enum BrainMode {
 pub fn system_prompt(cfg: &Config, mode: BrainMode) -> String {
     let nodes = cfg.limits.max_nodes_per_run.unwrap_or(DEFAULT_NODES);
     let depth = cfg.limits.max_depth.unwrap_or(DEFAULT_DEPTH);
-    let reads = cfg.limits.brain_read_budget.unwrap_or(DEFAULT_READ_BUDGET);
+    let reads = cfg.brain_read_budget();
     let one_shot = match mode {
         BrainMode::Interactive => "",
         BrainMode::OneShot => ONE_SHOT,
@@ -31,8 +31,9 @@ little.
 
 ## Delegate early
 
-- Read budget: at most {reads} file reads, greps or globs before your first swamp_dispatch.
-  Spend them on orientation: the layout, the entry points, the file the user named.
+- Read budget: at most {reads} tool calls of your own (reads, greps, globs, Bash; swamp_* tools
+  do not count) before your first swamp_dispatch. Spend them on orientation: the layout,
+  the entry points, the file the user named.
 - Investigation is work too. When you would need more than the budget to understand the
   problem, dispatch the investigation itself as a low tier task: name the question, the
   places to look, and ask for a written report of findings with file paths and line numbers.

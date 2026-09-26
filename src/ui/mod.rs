@@ -1,6 +1,7 @@
 pub mod actions;
 pub mod board;
 pub mod chat;
+pub mod delegation;
 pub mod dispatches;
 pub mod fmt;
 pub mod keys;

@@ -5,12 +5,14 @@ pub mod persist;
 pub mod policy;
 pub mod pool;
 pub mod retry;
+pub mod runner;
 
 pub use account::{Account, AccountState, Health};
 pub use cancel::{Outcome, Sink, Stop, cancel_node};
 pub use policy::SelectionPolicy;
 pub use pool::{AccountPool, Lease, NoCapacity};
 pub use retry::{NodeCtx, NodeOutcome, NodeRunner, run_node};
+pub use runner::DirectRunner;
 
 use crate::config::Config;
 use crate::ids::{CallSeq, DispatchId, NodeId, NodeIds};
@@ -22,8 +24,8 @@ use crate::model::node::WorkResultRef;
 use crate::model::result::{IsolationMode, NodeResult, TaskRequest};
 use crate::worker::Executor;
 use crate::worker::adapter::{LaunchSpec, SessionPlan};
-use crate::workspace::{NodeWorktree, WorkspaceManager};
-use async_trait::async_trait;
+use crate::workspace::WorkspaceManager;
+use camino::Utf8Path;
 use parking_lot::Mutex;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -35,7 +37,6 @@ use tokio_util::sync::CancellationToken;
 const DEFAULT_MAX_ATTEMPTS: u32 = 3;
 const DEFAULT_MAX_NODES_PER_RUN: u32 = 32;
 const DEFAULT_MAX_DEPTH: u32 = 2;
-const DEFAULT_GRACE: Duration = Duration::from_secs(5);
 
 pub(crate) fn emit(h: &JournalHandle, node: Option<NodeId>, event: JournalEvent) {
     h.emit(node, event);
@@ -80,8 +81,6 @@ struct TaskEnd {
 pub struct Dispatcher {
     pub cfg: Arc<Config>,
     pub pool: Arc<AccountPool>,
-    pub exec: Arc<Executor>,
-    pub workspace: Arc<WorkspaceManager>,
     pub journal: JournalHandle,
     runner: Arc<dyn NodeRunner>,
     results: Mutex<HashMap<NodeId, NodeResult>>,
@@ -102,27 +101,20 @@ impl Dispatcher {
         ws: Arc<WorkspaceManager>,
         journal: JournalHandle,
     ) -> Arc<Self> {
-        let runner = Arc::new(ExecRunner {
-            exec: Arc::clone(&exec),
-            workspace: Arc::clone(&ws),
-        });
-        Self::with_runner(cfg, pool, exec, ws, journal, runner)
+        let runner = Arc::new(DirectRunner::new(exec, ws));
+        Self::with_runner(cfg, pool, journal, runner)
     }
 
-    /// The seam WP4's tests drive: a scripted runner in place of real processes and worktrees.
+    /// The seam the tests drive: a scripted runner in place of real processes and worktrees.
     pub fn with_runner(
         cfg: Arc<Config>,
         pool: Arc<AccountPool>,
-        exec: Arc<Executor>,
-        ws: Arc<WorkspaceManager>,
         journal: JournalHandle,
         runner: Arc<dyn NodeRunner>,
     ) -> Arc<Self> {
         Arc::new(Self {
             cfg,
             pool,
-            exec,
-            workspace: ws,
             journal,
             runner,
             results: Mutex::new(HashMap::new()),
@@ -170,7 +162,12 @@ impl Dispatcher {
             .into_iter()
             .map(|task| {
                 let tier = self.tier_of(&task);
-                (NodeId::new(), tier, self.provider_order(&task, tier), task)
+                (
+                    NodeId::new(),
+                    tier,
+                    provider_order(&self.cfg, &task, tier),
+                    task,
+                )
             })
             .collect();
         let record = DispatchRecord {
@@ -322,7 +319,7 @@ impl Dispatcher {
                 |s| Phase::from(&s),
             )));
         }
-        let grace = self.cfg.limits.grace_period.unwrap_or(DEFAULT_GRACE);
+        let grace = self.cfg.grace_period();
         let stop = match &token {
             Some(t) => Stop::Token(t),
             None => Stop::Kill { grace },
@@ -452,7 +449,7 @@ impl Dispatcher {
             depth,
             cancel,
         };
-        let spec = self.launch_spec(&task, tier, provider);
+        let spec = launch_spec(&self.cfg, &task, tier, provider, &self.journal.paths.dir);
         let outcome = run_node(&cx, spec, &task).await;
         watcher.abort();
         let cost = total_cost(outcome.attempts.iter().map(|a| a.cost));
@@ -523,68 +520,6 @@ impl Dispatcher {
             .unwrap_or_else(|| self.base_depth.load(Ordering::Relaxed))
     }
 
-    fn provider_order(&self, task: &TaskRequest, tier: Tier) -> Vec<Provider> {
-        match task.provider {
-            Some(p) => {
-                let mut order = vec![p];
-                order.extend(
-                    self.cfg
-                        .provider_order(tier)
-                        .into_iter()
-                        .filter(|q| *q != p),
-                );
-                order
-            }
-            None => {
-                let order = self.cfg.provider_order(tier);
-                if order.is_empty() {
-                    vec![Provider::Anthropic]
-                } else {
-                    order
-                }
-            }
-        }
-    }
-
-    fn launch_spec(&self, task: &TaskRequest, tier: Tier, provider: Provider) -> LaunchSpec {
-        let worker = self
-            .cfg
-            .providers
-            .get(&provider)
-            .map(|p| p.worker.clone())
-            .unwrap_or_default();
-        let isolation = task
-            .isolation
-            .or(self.cfg.workspace.isolation)
-            .unwrap_or(IsolationMode::Worktree);
-        LaunchSpec {
-            node: NodeIds {
-                id: NodeId::new(),
-                session_uuid: uuid::Uuid::new_v4(),
-            },
-            provider,
-            exec: String::new(),
-            env: Default::default(),
-            model: String::new(),
-            tier,
-            cwd: self.journal.paths.dir.clone(),
-            isolation,
-            session: SessionPlan::New { preassigned: None },
-            kind: NodeKind::Worker,
-            permission_mode: worker.permission_mode.clone().unwrap_or_default(),
-            sandbox: worker.sandbox.clone().unwrap_or_default(),
-            append_system_prompt: None,
-            allow_tools: worker.allow_tools.clone(),
-            deny_tools: worker.deny_tools.clone(),
-            mcp: None,
-            last_message_path: self.journal.paths.dir.join("last-message.txt"),
-            extra_args: worker.args_for(isolation),
-            extra: self.cfg.tier_extra(provider, tier),
-            partial_messages: false,
-            attempt: 1,
-        }
-    }
-
     fn settle(&self, result: NodeResult) {
         self.results.lock().insert(result.node, result);
         self.settled.notify_waiters();
@@ -633,6 +568,70 @@ pub(crate) fn total_cost(costs: impl Iterator<Item = Option<Cost>>) -> Option<Co
             CostBasis::Estimated
         },
     })
+}
+
+/// The task's own provider first, then the tier's order; Anthropic when nothing is configured.
+pub(crate) fn provider_order(cfg: &Config, task: &TaskRequest, tier: Tier) -> Vec<Provider> {
+    match task.provider {
+        Some(p) => {
+            let mut order = vec![p];
+            order.extend(cfg.provider_order(tier).into_iter().filter(|q| *q != p));
+            order
+        }
+        None => {
+            let order = cfg.provider_order(tier);
+            if order.is_empty() {
+                vec![Provider::Anthropic]
+            } else {
+                order
+            }
+        }
+    }
+}
+
+/// A worker's launch before an account is chosen: exec, env and model are filled per attempt.
+pub(crate) fn launch_spec(
+    cfg: &Config,
+    task: &TaskRequest,
+    tier: Tier,
+    provider: Provider,
+    run_dir: &Utf8Path,
+) -> LaunchSpec {
+    let worker = cfg
+        .providers
+        .get(&provider)
+        .map(|p| p.worker.clone())
+        .unwrap_or_default();
+    let isolation = task
+        .isolation
+        .or(cfg.workspace.isolation)
+        .unwrap_or(IsolationMode::Worktree);
+    LaunchSpec {
+        node: NodeIds {
+            id: NodeId::new(),
+            session_uuid: uuid::Uuid::new_v4(),
+        },
+        provider,
+        exec: String::new(),
+        env: Default::default(),
+        model: String::new(),
+        tier,
+        cwd: run_dir.to_path_buf(),
+        isolation,
+        session: SessionPlan::New { preassigned: None },
+        kind: NodeKind::Worker,
+        permission_mode: worker.permission_mode.clone().unwrap_or_default(),
+        sandbox: worker.sandbox.clone().unwrap_or_default(),
+        append_system_prompt: None,
+        allow_tools: worker.allow_tools.clone(),
+        deny_tools: worker.deny_tools.clone(),
+        mcp: None,
+        last_message_path: run_dir.join("last-message.txt"),
+        extra_args: worker.args_for(isolation),
+        extra: cfg.tier_extra(provider, tier),
+        partial_messages: false,
+        attempt: 1,
+    }
 }
 
 fn running(id: NodeId, task: &TaskRequest, tier: Tier, provider: Provider) -> NodeResult {
@@ -730,34 +729,5 @@ fn branch_of(r: &crate::model::node::NodeRecord) -> Option<String> {
     match &r.workspace {
         crate::model::core::WorkspaceRef::Worktree { branch, .. } => Some(branch.clone()),
         _ => None,
-    }
-}
-
-/// The production runner: real worktrees, real detached processes.
-struct ExecRunner {
-    exec: Arc<Executor>,
-    workspace: Arc<WorkspaceManager>,
-}
-
-#[async_trait]
-impl NodeRunner for ExecRunner {
-    async fn workspace(&self, logical: NodeId, attempt: u32) -> anyhow::Result<NodeWorktree> {
-        self.workspace.create(logical, attempt).await
-    }
-    async fn run(
-        &self,
-        spec: &LaunchSpec,
-        timeout: Duration,
-        cancel: CancellationToken,
-    ) -> anyhow::Result<crate::worker::RunOutcome> {
-        self.exec.run(spec, timeout, cancel).await
-    }
-    async fn finalize(
-        &self,
-        wt: &NodeWorktree,
-        title: &str,
-        tier: Tier,
-    ) -> anyhow::Result<Option<WorkResultRef>> {
-        self.workspace.finalize(wt, title, tier).await
     }
 }

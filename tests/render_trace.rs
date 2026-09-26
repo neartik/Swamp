@@ -3,9 +3,9 @@
 mod common;
 
 use camino::Utf8PathBuf;
-use std::str::FromStr;
+use common::journal::{at, line, nid, rid};
 use std::time::Duration;
-use swamp::ids::{NodeId, RunId};
+use swamp::ids::NodeId;
 use swamp::journal::fold::RunView;
 use swamp::journal::record::{JournalEvent, JournalLine, SCHEMA_VERSION};
 use swamp::model::core::{
@@ -16,37 +16,6 @@ use swamp::model::failure::{Detector, Failure};
 use swamp::model::node::{NodeRecord, WorkResultRef};
 use swamp::ui::fmt;
 use swamp::ui::trace::{Follower, TraceOpts, render};
-use time::OffsetDateTime;
-
-const CROCKFORD: &[u8] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
-
-fn ulid_text(i: usize) -> String {
-    let hi = CROCKFORD[(i / 32) % 32] as char;
-    let lo = CROCKFORD[i % 32] as char;
-    format!("01ARZ3NDEKTSV4RRFFQ69G5F{hi}{lo}")
-}
-
-fn nid(i: usize) -> NodeId {
-    NodeId::from_str(&ulid_text(i)).expect("node id")
-}
-
-fn rid() -> RunId {
-    RunId::from_str(&ulid_text(0)).expect("run id")
-}
-
-fn at(offset: i64) -> OffsetDateTime {
-    OffsetDateTime::from_unix_timestamp(1_700_000_000 + offset).expect("timestamp")
-}
-
-fn line(seq: u64, node: Option<NodeId>, event: JournalEvent) -> JournalLine {
-    JournalLine {
-        seq,
-        at: at(seq as i64),
-        run: rid(),
-        node,
-        event,
-    }
-}
 
 struct Node {
     id: NodeId,
@@ -69,7 +38,7 @@ struct Node {
 fn record(n: &Node) -> NodeRecord {
     NodeRecord {
         id: n.id,
-        run_id: rid(),
+        run_id: rid(0),
         parent: n.parent,
         logical: n.logical,
         attempt: n.attempt,
@@ -568,10 +537,7 @@ fn unstarted_tasks_render_their_state_and_reason() {
     let cells: Vec<&str> = queued.split_whitespace().collect();
     let dashes = cells.iter().filter(|c| **c == "-").count();
     assert_eq!(dashes, 5, "account, model, time, tokens and cost: {queued}");
-    assert!(
-        queued.contains(&common::journal::nid(4).short()),
-        "{queued}"
-    );
+    assert!(queued.contains(&nid(4).short()), "{queued}");
 }
 
 // ---------------------------------------------------------------- dispatches
@@ -602,11 +568,15 @@ fn dispatches_list_one_row_per_dispatch() {
         &schema_2(),
         ListOpts {
             failed: true,
-            json: false,
+            ..ListOpts::default()
         },
         at(900),
     );
-    let rows: Vec<&str> = failed.lines().skip(3).collect();
+    let rows: Vec<&str> = failed
+        .lines()
+        .skip(3)
+        .take_while(|l| !l.is_empty())
+        .collect();
     assert_eq!(
         rows.len(),
         1,
@@ -624,8 +594,8 @@ fn dispatches_json_carries_the_schema_and_every_count() {
     let text = render_list(
         &schema_2(),
         ListOpts {
-            failed: false,
             json: true,
+            ..ListOpts::default()
         },
         at(900),
     );
@@ -640,7 +610,7 @@ fn a_schema_1_run_lists_its_nodes_in_the_legacy_bucket() {
     use swamp::ui::dispatches::{ListOpts, render_list};
     let view = schema_1();
     let text = render_list(&view, ListOpts::default(), at(900));
-    let rows: Vec<&str> = text.lines().skip(3).collect();
+    let rows: Vec<&str> = text.lines().skip(3).take_while(|l| !l.is_empty()).collect();
     assert_eq!(rows.len(), 1, "{text}");
     assert!(rows[0].starts_with("legacy"), "{text}");
     assert!(rows[0].trim_end().ends_with('-'), "no caller: {text}");

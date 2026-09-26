@@ -8,7 +8,8 @@ use swamp::journal::record::{JournalEvent, JournalLine};
 use swamp::model::core::{
     AccountId, Cost, CostBasis, NodeKind, NodeState, Provider, Tier, Usage, WorkspaceRef,
 };
-use swamp::model::dispatch::{DispatchCounts, DispatchRecord, Phase, TaskRef};
+use swamp::model::dispatch::{DispatchCounts, DispatchRecord, NodeTransition, Phase, TaskRef};
+use swamp::model::event::WorkerEvent;
 use swamp::model::failure::{Detector, Failure};
 use swamp::model::node::NodeRecord;
 use time::OffsetDateTime;
@@ -224,8 +225,7 @@ pub fn tool_call(seq: u64, d: DispatchId) -> JournalEvent {
     }
 }
 
-/// A fails over, its second attempt runs E one level down, B is blocked first, C is rejected
-/// and D is still queued.
+/// A fails over and nests E, B was blocked, C rejected, D still queued.
 pub fn schema_2() -> Vec<JournalLine> {
     let (brain, a, b, c, d, e) = (nid(0), nid(1), nid(2), nid(3), nid(4), nid(5));
     let (a1, a2, b1, e1) = (nid(11), nid(12), nid(21), nid(51));
@@ -411,4 +411,61 @@ pub fn schema_2() -> Vec<JournalLine> {
         .enumerate()
         .map(|(i, (node, event))| line(i as u64, node, event))
         .collect()
+}
+
+/// A tool call as the brain CLI's own stream reports it.
+pub fn brain_call(id: usize, name: &str) -> JournalEvent {
+    JournalEvent::NodeEvent {
+        offset: 0,
+        event: WorkerEvent::ToolCall {
+            id: format!("toolu_{id}"),
+            name: name.to_owned(),
+            summary: String::new(),
+        },
+    }
+}
+
+/// `schema_2` with `reads` brain reads, its dispatch call, then two reads after the first dispatch.
+pub fn schema_2_with_reads(reads: usize) -> Vec<JournalLine> {
+    let brain = nid(0);
+    let lines = schema_2();
+    let first = lines
+        .iter()
+        .position(|l| matches!(l.event, JournalEvent::BrainToolCall { .. }))
+        .expect("schema_2 dispatches");
+    let mut before: Vec<(Option<NodeId>, JournalEvent)> = (0..reads)
+        .map(|i| {
+            (
+                Some(brain),
+                brain_call(i, if i % 2 == 0 { "Read" } else { "Grep" }),
+            )
+        })
+        .collect();
+    before.push((Some(brain), brain_call(reads, "mcp__swamp__swamp_dispatch")));
+    let mut after = vec![
+        (Some(brain), brain_call(reads + 1, "Read")),
+        (Some(brain), brain_call(reads + 2, "Bash")),
+    ];
+    let mut events: Vec<(Option<NodeId>, JournalEvent)> = Vec::new();
+    for (i, l) in lines.into_iter().enumerate() {
+        if i == first {
+            events.append(&mut before);
+        }
+        let issued = matches!(l.event, JournalEvent::DispatchIssued { .. });
+        events.push((l.node, l.event));
+        if issued {
+            events.append(&mut after);
+        }
+    }
+    events
+        .into_iter()
+        .enumerate()
+        .map(|(i, (node, event))| line(i as u64, node, event))
+        .collect()
+}
+
+/// Chained (each `from` is the previous `to`) and never leaving a terminal state.
+pub fn well_formed(chain: &[NodeTransition]) -> bool {
+    chain.iter().all(|t| !t.from.is_terminal())
+        && chain.windows(2).all(|w| Phase::from(&w[0].to) == w[1].from)
 }

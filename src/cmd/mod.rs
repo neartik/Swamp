@@ -79,7 +79,7 @@ impl Ctx {
         match hits.len() {
             1 => Ok(hits.remove(0)),
             0 => anyhow::bail!("no node matches `{spec}`"),
-            _ => anyhow::bail!("node `{spec}` is ambiguous: {}", candidates(&hits)),
+            _ => anyhow::bail!("node `{spec}` is ambiguous: {}", node_candidates(&hits)),
         }
     }
 
@@ -88,11 +88,7 @@ impl Ctx {
         let spec = spec.trim();
         let exact = NodeId::from_str(spec).is_ok();
         let mut hits: Vec<(RunPaths, NodeRecord)> = Vec::new();
-        for run in self.paths.list_runs()? {
-            let rp = self.paths.run_paths(run);
-            let Ok(view) = RunView::load(&rp.dir, false) else {
-                continue;
-            };
+        for (rp, view) in self.views()? {
             // The worktree branch carries the LOGICAL short id and the node directory the
             // attempt's, so both spellings are on screen and both have to resolve.
             let mut logical: Vec<NodeId> = Vec::new();
@@ -169,11 +165,7 @@ impl Ctx {
         anyhow::ensure!(!spec.is_empty(), "empty dispatch specifier");
         let exact = DispatchId::from_str(spec).is_ok();
         let mut hits = Vec::new();
-        for run in self.paths.list_runs()? {
-            let rp = self.paths.run_paths(run);
-            let Ok(view) = RunView::load(&rp.dir, false) else {
-                continue;
-            };
+        for (rp, view) in self.views()? {
             for id in crate::journal::inspect::match_dispatches(&view, spec) {
                 if exact {
                     return Ok(vec![(rp, id)]);
@@ -182,6 +174,31 @@ impl Ctx {
             }
         }
         Ok(hits)
+    }
+
+    /// Every task `spec` names across every run, with its title, started or not.
+    pub fn task_hits(&self, spec: &str) -> anyhow::Result<Vec<(RunPaths, NodeId, String)>> {
+        let mut hits = Vec::new();
+        for (rp, view) in self.views()? {
+            for id in crate::journal::inspect::match_tasks(&view, spec) {
+                let title = view
+                    .tasks
+                    .get(&id)
+                    .map(|t| t.title.clone())
+                    .unwrap_or_default();
+                hits.push((rp.clone(), id, title));
+            }
+        }
+        Ok(hits)
+    }
+
+    /// Every run that folds, newest first; one that does not is skipped.
+    fn views(&self) -> anyhow::Result<impl Iterator<Item = (RunPaths, RunView)> + '_> {
+        Ok(self.paths.list_runs()?.into_iter().filter_map(|run| {
+            let rp = self.paths.run_paths(run);
+            let view = RunView::load(&rp.dir, false).ok()?;
+            Some((rp, view))
+        }))
     }
 
     /// `short (run, N tasks)` per hit, for an error the user can act on.
@@ -243,7 +260,7 @@ fn run_node(view: &RunView, rp: &RunPaths) -> anyhow::Result<NodeRecord> {
         anyhow::anyhow!(
             "run {} has no finished node; name one: {}",
             rp.run,
-            candidates(&listed)
+            node_candidates(&listed)
         )
     })
 }
@@ -264,16 +281,20 @@ fn attempt_of(view: &RunView, logical: NodeId) -> Option<NodeRecord> {
         .map(|n| (*n).clone())
 }
 
+fn node_candidates(hits: &[(RunPaths, NodeRecord)]) -> String {
+    candidates(hits.iter().map(|(rp, n)| (rp.run, n.id, n.title.as_str())))
+}
+
 /// `short (run, title)` per hit, for an error the user can act on.
-fn candidates(hits: &[(RunPaths, NodeRecord)]) -> String {
-    hits.iter()
+fn candidates<'a>(hits: impl IntoIterator<Item = (RunId, NodeId, &'a str)>) -> String {
+    hits.into_iter()
         .take(8)
-        .map(|(rp, n)| {
+        .map(|(run, id, title)| {
             format!(
                 "{} (run {}, {})",
-                n.id.short(),
-                rp.run.short(),
-                crate::ui::fmt::truncate(&n.title, 40)
+                id.short(),
+                run.short(),
+                crate::ui::fmt::truncate(title, 40)
             )
         })
         .collect::<Vec<_>>()
@@ -497,27 +518,6 @@ fn write_header(
         serde_json::to_vec_pretty(&header)?,
     )?;
     Ok(())
-}
-
-/// Mirrors the workspace manager's layout: `<workspace.root>/<repo-name>-<hash8>`.
-pub fn worktree_root(ctx: &Ctx) -> Utf8PathBuf {
-    match &ctx.cfg.workspace.root {
-        Some(root) => {
-            let base = Utf8PathBuf::from(shellexpand::tilde(root.as_str()).into_owned());
-            let name = ctx.paths.repo.file_name().unwrap_or("repo");
-            base.join(format!("{name}-{}", hash8(ctx.paths.repo.as_str())))
-        }
-        None => ctx.paths.worktree_root(),
-    }
-}
-
-fn hash8(s: &str) -> String {
-    use sha2::{Digest, Sha256};
-    Sha256::digest(s.as_bytes())
-        .iter()
-        .take(4)
-        .map(|b| format!("{b:02x}"))
-        .collect()
 }
 
 /// Where a node's `NodeResult` is kept, so a lost journal can still be rebuilt.

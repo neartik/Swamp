@@ -7,7 +7,7 @@ use crate::model::core::{NodeKind, NodeState};
 use crate::model::event::WorkerEvent;
 use crate::model::failure::{Detector, Failure};
 use crate::model::node::NodeRecord;
-use crate::ui::{dispatches, fmt};
+use crate::ui::{delegation, dispatches, fmt};
 use serde_json::{Map, Value, json};
 use std::collections::BTreeMap;
 use std::io::Write;
@@ -30,6 +30,15 @@ pub struct TraceOpts {
     pub dispatch: Option<DispatchId>,
     /// One section per dispatch instead of one tree.
     pub by_dispatch: bool,
+    /// `limits.brain_read_budget`; the built-in default when unset.
+    pub read_budget: Option<u32>,
+}
+
+impl TraceOpts {
+    fn budget(&self) -> u32 {
+        self.read_budget
+            .unwrap_or(crate::brain::prompt::DEFAULT_READ_BUDGET)
+    }
 }
 
 pub fn render(view: &RunView, o: &TraceOpts) -> String {
@@ -45,7 +54,7 @@ pub fn render(view: &RunView, o: &TraceOpts) -> String {
         out.push_str(&blocks(view, &rows, o));
     }
     if o.node.is_none() {
-        out.push_str(&footer(view));
+        out.push_str(&footer(view, o.budget()));
     }
     out
 }
@@ -174,7 +183,7 @@ fn header(view: &RunView) -> String {
     )
 }
 
-fn footer(view: &RunView) -> String {
+fn footer(view: &RunView, budget: u32) -> String {
     let u = view.totals;
     let mut out = format!(
         "\nusage  in {}  out {}  cache-read {}  cache-write {}\n",
@@ -190,6 +199,9 @@ fn footer(view: &RunView) -> String {
         out.push_str(&format!("   ({unknown} {plural} reported no cost data)"));
     }
     out.push('\n');
+    if let Some(w) = view.brain_self_work() {
+        out.push_str(&delegation::line(&w, budget));
+    }
     out
 }
 
@@ -518,7 +530,11 @@ fn render_json(view: &RunView, o: &TraceOpts) -> String {
             .unwrap_or(Value::Null);
         return format!("{}\n", pretty(&value));
     }
-    format!("{}\n", pretty(&full_json(view, o.dispatch)))
+    let mut out = full_json(view, o.dispatch);
+    if o.dispatch.is_none() {
+        out["brain"] = json!(delegation::json(view, o.budget()));
+    }
+    format!("{}\n", pretty(&out))
 }
 
 fn pretty(v: &Value) -> String {
@@ -660,7 +676,7 @@ pub async fn follow(paths: &RunPaths, o: &TraceOpts) -> anyhow::Result<()> {
         }
         if follower.finished() {
             let mut out = std::io::stdout().lock();
-            out.write_all(footer(&follower.view).as_bytes())?;
+            out.write_all(footer(&follower.view, o.budget()).as_bytes())?;
             out.flush()?;
             return Ok(());
         }

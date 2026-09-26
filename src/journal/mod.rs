@@ -6,7 +6,7 @@ pub mod reader;
 pub mod record;
 pub mod writer;
 
-pub use fold::{LlmDigest, Projection, RunView, TreeRow};
+pub use fold::{BrainSelfWork, LlmDigest, Projection, RunView, TreeRow};
 pub use paths::{Paths, RunPaths};
 pub use raw::{RawSink, Redactor};
 pub use reader::{Tailer, replay};

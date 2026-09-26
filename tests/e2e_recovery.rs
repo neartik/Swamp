@@ -355,8 +355,7 @@ fn a_node_killed_mid_run_reads_orphaned() {
         .stdout(predicates::str::contains("orphaned"));
 }
 
-/// `chat --resume` continues a conversation, so its dispatcher is seeded from the resumed run:
-/// the call sequence picks up where that run stopped instead of restarting at 1.
+/// `chat --resume` continues the resumed run's call sequence instead of restarting at 1.
 #[test]
 fn a_resumed_conversation_continues_the_call_sequence_it_resumes() {
     use swamp::journal::record::{JournalEvent, JournalLine};
