@@ -134,6 +134,7 @@ expression: text
     "dispatched": true,
     "brain_usd": 1.0,
     "total_usd": 1.9,
-    "cost_share": 0.5263
+    "cost_share": 0.5263,
+    "cost_complete": true
   }
 }

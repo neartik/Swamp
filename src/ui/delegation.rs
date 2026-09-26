@@ -15,6 +15,8 @@ pub struct SelfWork {
     pub brain_usd: Option<f64>,
     pub total_usd: f64,
     pub cost_share: Option<f64>,
+    /// False when some node reported no cost: `total_usd` is a floor, `cost_share` a ceiling.
+    pub cost_complete: bool,
 }
 
 pub fn json(view: &RunView, budget: u32) -> Option<SelfWork> {
@@ -27,6 +29,7 @@ pub fn json(view: &RunView, budget: u32) -> Option<SelfWork> {
         brain_usd: w.brain_usd.map(|usd| round(usd, 6)),
         total_usd: round(w.total_usd, 6),
         cost_share: w.cost_share().map(|share| round(share, 4)),
+        cost_complete: w.cost_complete,
     })
 }
 
@@ -45,10 +48,11 @@ pub fn line(w: &BrainSelfWork, budget: u32) -> String {
     };
     let mut out = format!("brain  {}/{budget} calls {when}", w.calls);
     if let Some(share) = w.cost_share() {
-        out.push_str(&format!(", {} of the cost", percent(share)));
+        let known = if w.cost_complete { "" } else { "known " };
+        out.push_str(&format!(", {} of the {known}cost", percent(share)));
     }
     if w.over(budget) {
-        out.push_str(": over limits.brain_read_budget, delegate earlier");
+        out.push_str(": over limits.brain_read_budget");
     }
     out.push('\n');
     out
@@ -63,7 +67,8 @@ pub fn cell(w: &BrainSelfWork, budget: u32, share: bool) -> Cell {
         text.push_str(" over");
     }
     if let Some(part) = w.cost_share().filter(|_| share) {
-        text.push_str(&format!(" ({})", percent(part)));
+        let tilde = if w.cost_complete { "" } else { "~" };
+        text.push_str(&format!(" ({tilde}{})", percent(part)));
     }
     Cell::new("brain", text, if over { Role::Err } else { Role::Meta })
 }
@@ -101,12 +106,27 @@ mod tests {
     #[test]
     fn past_the_budget_the_line_and_the_cell_warn() {
         let w = work(12, true, Some(3.0));
-        assert!(line(&w, 8).ends_with(": over limits.brain_read_budget, delegate earlier\n"));
+        assert!(line(&w, 8).ends_with(", 75% of the cost: over limits.brain_read_budget\n"));
         let c = cell(&w, 8, true);
         assert_eq!(c.text, "brain 12/8 over (75%)");
         assert_eq!(c.role, Role::Err);
         assert_eq!(cell(&w, 8, false).text, "brain 12/8 over");
         let c = cell(&work(8, true, None), 8, true);
         assert_eq!((c.text.as_str(), c.role), ("brain 8/8", Role::Meta));
+    }
+
+    /// With a node's cost unknown the total is a floor, so the brain's share is only a ceiling.
+    #[test]
+    fn an_incomplete_cost_marks_the_share() {
+        let w = BrainSelfWork {
+            cost_complete: false,
+            ..work(2, true, Some(1.0))
+        };
+        assert!(
+            line(&w, 8).contains(", 25% of the known cost"),
+            "{}",
+            line(&w, 8)
+        );
+        assert_eq!(cell(&w, 8, true).text, "brain 2/8 (~25%)");
     }
 }

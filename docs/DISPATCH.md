@@ -39,9 +39,11 @@ the brain. Every surface prints it:
 
 - `swamp trace` and `swamp dispatches`, under the rows, and `/status` and `/dispatches` in chat:
   `brain  3/8 calls before the first dispatch, 12% of the cost`. Past the budget the line ends
-  `: over limits.brain_read_budget, delegate earlier`. The share is left out until the brain has
-  reported a cost.
-- `swamp board`, in the header: `brain 3/8 (12%)`, the share dropped at the narrow tier. Within
+  `: over limits.brain_read_budget`. The share is left out until the brain has reported a cost,
+  and reads `of the known cost` while some node has reported none: the total is then a floor and
+  the brain's share only a ceiling.
+- `swamp board`, in the header: `brain 3/8 (12%)`, `(~12%)` when the cost is incomplete, the
+  share dropped at the narrow tier. Within
   budget it is the first header cell to give way; past it the cell turns red, reads
   `brain 11/8 over`, and outlasts the queued count and the cost. The header shows the tailed run
   whose brain made the most calls.
@@ -51,11 +53,13 @@ the brain. Every surface prints it:
 ```json
 "brain": {
   "calls": 3, "budget": 8, "over_budget": false, "dispatched": true,
-  "brain_usd": 0.42, "total_usd": 3.5, "cost_share": 0.12
+  "brain_usd": 0.42, "total_usd": 3.5, "cost_share": 0.12, "cost_complete": true
 }
 ```
 
-`brain_usd` and `cost_share` are null until the brain has reported a cost.
+`brain_usd` and `cost_share` are null until the brain has reported a cost. `cost_complete` is
+false when some node reported no cost, which makes `total_usd` a floor and `cost_share` a
+ceiling.
 
 ## Cancelling
 
