@@ -499,27 +499,6 @@ fn write_header(
     Ok(())
 }
 
-/// Mirrors the workspace manager's layout: `<workspace.root>/<repo-name>-<hash8>`.
-pub fn worktree_root(ctx: &Ctx) -> Utf8PathBuf {
-    match &ctx.cfg.workspace.root {
-        Some(root) => {
-            let base = Utf8PathBuf::from(shellexpand::tilde(root.as_str()).into_owned());
-            let name = ctx.paths.repo.file_name().unwrap_or("repo");
-            base.join(format!("{name}-{}", hash8(ctx.paths.repo.as_str())))
-        }
-        None => ctx.paths.worktree_root(),
-    }
-}
-
-fn hash8(s: &str) -> String {
-    use sha2::{Digest, Sha256};
-    Sha256::digest(s.as_bytes())
-        .iter()
-        .take(4)
-        .map(|b| format!("{b:02x}"))
-        .collect()
-}
-
 /// Where a node's `NodeResult` is kept, so a lost journal can still be rebuilt.
 pub fn write_result(paths: &RunPaths, result: &crate::model::result::NodeResult) {
     let path: Utf8PathBuf = paths.result(result.node);

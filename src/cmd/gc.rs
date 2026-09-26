@@ -38,7 +38,7 @@ pub async fn run(ctx: &Ctx, args: &GcArgs) -> anyhow::Result<i32> {
 
     let git = Git::discover(&ctx.paths.repo).await?;
     let mut worktrees: Vec<(Utf8PathBuf, bool)> = Vec::new();
-    let root = crate::cmd::worktree_root(ctx);
+    let root = crate::workspace::worktree_root(&ctx.paths, &ctx.cfg);
     for path in worktree::list(&git).await? {
         if !path.starts_with(&root) {
             continue;

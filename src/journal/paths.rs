@@ -4,7 +4,6 @@ use anyhow::Context;
 use camino::{Utf8Path, Utf8PathBuf};
 use fs4::fs_std::FileExt;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
@@ -67,14 +66,9 @@ impl Paths {
 
     /// ~/.swamp/worktrees/<repo>-<hash8>
     pub fn worktree_root(&self) -> Utf8PathBuf {
-        let name = self.repo.file_name().unwrap_or("repo");
-        let mut h = Sha256::new();
-        h.update(self.repo.as_str().as_bytes());
-        let hash = h.finalize();
-        let hash8: String = hash.iter().take(4).map(|b| format!("{b:02x}")).collect();
         self.home_swamp
             .join("worktrees")
-            .join(format!("{name}-{hash8}"))
+            .join(crate::workspace::repo_slug(&self.repo))
     }
 
     /// ~/.swamp/accounts.json
