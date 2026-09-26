@@ -1,0 +1,18 @@
+---
+source: tests/doctor.rs
+expression: text
+---
+ok    environment/git              [git]
+ok    environment/repo             [repo] HEAD [sha], dirty
+WARN  environment/.swamp           [repo]/.swamp is not listed in .git/info/exclude; run any swamp command from the repo root to add it
+ok    environment/state            [home]/.swamp writable
+ok    environment/swamp            [exe] (the MCP bridge is spawned by absolute path)
+ok    environment/depth            not inside a worker
+ok    accounts/main                [repo]/bin/worker-main -> [repo]/bin/worker-main (anthropic) env TEST_CONFIG_DIR
+ok    accounts/alt                 [repo]/bin/worker-alt -> [repo]/bin/worker-alt (anthropic) env TEST_CONFIG_DIR
+WARN  providers/main/quota         no quota source; tokens only, utilization is estimated
+WARN  providers/alt/quota          no quota source; tokens only, utilization is estimated
+ok    providers/anthropic          tiers: high=tier-high  mid=tier-mid  low=tier-low
+WARN  brain/permission_mode        brain.permission_mode = "plan" denies every Bash call under --permission-prompts none and Bash is not allowed, so it cannot run tests, a build or git; add "Bash" to brain.allow_tools
+note  config/sources               built-in defaults only; no config file was found (looked for [user-config] and <repo>/.swamp/config.toml)
+note  protocol/schema              no recorded runs to measure adapter drift against

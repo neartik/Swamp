@@ -646,3 +646,52 @@ async fn an_unreadable_state_file_is_one_error_and_not_a_quota_warning() {
         "a telemetry problem that does not exist hides the real one"
     );
 }
+
+/// Every check a representative setup yields, machine paths replaced, pinned so a refactor of
+/// `src/doctor` cannot change what `swamp doctor` prints.
+#[tokio::test]
+async fn doctor_output_is_stable() {
+    let f = Fixture::new();
+    let mut cfg = healthy(&f);
+    cfg.brain.permission_mode = Some("plan".to_owned());
+    cfg.brain.allow_tools.clear();
+    let run: swamp::ids::RunId = "01J00000000000000000000000".parse().expect("run id");
+    let dir = f.paths.dot_swamp.join("runs").join(run.to_string());
+    std::fs::create_dir_all(&dir).expect("run dir");
+    std::fs::write(dir.join("journal.jsonl"), "").expect("journal");
+
+    let out = checks(&cfg, &f.paths, false, true).await;
+    let exe = std::env::current_exe().expect("current exe");
+    let user = swamp::config::load::user_config_path().expect("a user config path");
+    let git = std::process::Command::new("git")
+        .arg("--version")
+        .output()
+        .expect("git");
+    let git = String::from_utf8_lossy(&git.stdout).trim().to_owned();
+    let head = std::process::Command::new("git")
+        .current_dir(&f.repo)
+        .args(["rev-parse", "--short", "HEAD"])
+        .output()
+        .expect("git rev-parse");
+    let head = format!("HEAD {}", String::from_utf8_lossy(&head.stdout).trim());
+    let redact = |s: &str| {
+        s.replace(&exe.display().to_string(), "[exe]")
+            .replace(user.as_str(), "[user-config]")
+            .replace(f.paths.home_swamp.as_str(), "[home]/.swamp")
+            .replace(f.repo.as_str(), "[repo]")
+            .replace(&git, "[git]")
+            .replace(&head, "HEAD [sha]")
+    };
+    let text: String = out
+        .iter()
+        .map(|c| {
+            format!(
+                "{:<5} {:<28} {}\n",
+                c.level.label(),
+                c.name,
+                redact(&c.detail)
+            )
+        })
+        .collect();
+    insta::assert_snapshot!("doctor_checks", text);
+}
