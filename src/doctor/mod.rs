@@ -12,8 +12,9 @@ pub use reap::{Reaped, reap};
 
 use crate::config::Config;
 use crate::journal::paths::Paths;
-use crate::journal::record::{JournalEvent, JournalLine};
+use crate::journal::record::{JournalEvent, JournalLine, SCHEMA_VERSION};
 use crate::model::failure::{Detector, Failure};
+use std::cmp::Ordering;
 
 /// Above this share of unparsed stream lines the adapters have drifted from the CLIs.
 const UNPARSED_MAX: f64 = 0.02;
@@ -68,8 +69,74 @@ pub async fn checks(cfg: &Config, paths: &Paths, probe: bool, schema: bool) -> V
     env::config_sources(cfg, &mut out);
     if schema {
         out.push(schema_drift(paths));
+        out.extend(journal_schemas(paths));
+        out.push(permissions::mode_spelling(cfg).await);
     }
     out
+}
+
+/// `--schema`: the journal schema each recent run was written with. An older one still folds;
+/// a newer one was written by a newer swamp and this one may misread it.
+fn journal_schemas(paths: &Paths) -> Vec<Check> {
+    let runs = paths.list_runs().unwrap_or_default();
+    let mut out: Vec<Check> = runs
+        .into_iter()
+        .take(RECENT_RUNS)
+        .map(|run| {
+            let (level, detail) = match first_line(&paths.run_paths(run).journal()) {
+                Some(JournalEvent::RunStarted {
+                    schema,
+                    swamp_version,
+                    ..
+                }) => match schema.cmp(&SCHEMA_VERSION) {
+                    Ordering::Equal => (
+                        Level::Ok,
+                        format!("schema {schema} (swamp {swamp_version})"),
+                    ),
+                    Ordering::Less => (
+                        Level::Note,
+                        format!(
+                            "schema {schema} (swamp {swamp_version}): folds, without the \
+                             dispatch lineage schema {SCHEMA_VERSION} records"
+                        ),
+                    ),
+                    Ordering::Greater => (
+                        Level::Warn,
+                        format!(
+                            "schema {schema} (swamp {swamp_version}) is newer than the \
+                             {SCHEMA_VERSION} this swamp reads; upgrade before resuming it"
+                        ),
+                    ),
+                },
+                _ => (
+                    Level::Warn,
+                    "no run_started line: the journal is empty or damaged".to_owned(),
+                ),
+            };
+            Check::new(
+                "protocol/journal",
+                level,
+                format!("{} {detail}", run.short()),
+            )
+        })
+        .collect();
+    if out.is_empty() {
+        out.push(Check::new(
+            "protocol/journal",
+            Level::Note,
+            "no recorded runs",
+        ));
+    }
+    out
+}
+
+fn first_line(journal: &camino::Utf8Path) -> Option<JournalEvent> {
+    use std::io::BufRead;
+    let file = std::fs::File::open(journal).ok()?;
+    let line = std::io::BufReader::new(file).lines().next()?.ok()?;
+    serde_json::from_str::<JournalLine>(&line)
+        .ok()
+        .map(|l| l.event)
 }
 
 /// `--schema`: how often the classifier fell back to regexes, and how many raw lines the

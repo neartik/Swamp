@@ -695,3 +695,101 @@ async fn doctor_output_is_stable() {
         .collect();
     insta::assert_snapshot!("doctor_checks", text);
 }
+
+fn run_started(schema: u32) -> String {
+    use swamp::journal::record::{JournalEvent, JournalLine};
+    let line = JournalLine {
+        seq: 0,
+        at: time::OffsetDateTime::now_utc(),
+        run: swamp::ids::RunId::new(),
+        node: None,
+        event: JournalEvent::RunStarted {
+            swamp_version: "0.1.0".into(),
+            schema,
+            argv: Vec::new(),
+            cwd: "/repo".into(),
+            repo: None,
+            base: None,
+            config_sha256: String::new(),
+            task: None,
+        },
+    };
+    serde_json::to_string(&line).expect("json") + "\n"
+}
+
+/// `--schema` names the journal schema of every recent run: current, older (still folds) or
+/// newer than this binary reads.
+#[tokio::test]
+async fn schema_reports_the_journal_schema_of_each_recent_run() {
+    use swamp::journal::record::SCHEMA_VERSION;
+    let f = Fixture::new();
+    let runs = f.paths.dot_swamp.join("runs");
+    let mut ids = Vec::new();
+    for schema in [1, SCHEMA_VERSION, SCHEMA_VERSION + 1] {
+        let run = swamp::ids::RunId::new();
+        std::fs::create_dir_all(runs.join(run.to_string())).expect("run dir");
+        std::fs::write(
+            runs.join(run.to_string()).join("journal.jsonl"),
+            run_started(schema),
+        )
+        .expect("journal");
+        ids.push((run, schema));
+    }
+    let out = checks(&healthy(&f), &f.paths, false, true).await;
+    let journals: Vec<&Check> = out
+        .iter()
+        .filter(|c| c.name == "protocol/journal")
+        .collect();
+    assert_eq!(journals.len(), 3, "one line per run");
+    for (run, schema) in ids {
+        let c = journals
+            .iter()
+            .find(|c| c.detail.starts_with(&run.short()))
+            .unwrap_or_else(|| panic!("no line for {run}"));
+        assert!(
+            c.detail.contains(&format!("schema {schema} ")),
+            "{}",
+            c.detail
+        );
+        let level = match schema.cmp(&SCHEMA_VERSION) {
+            std::cmp::Ordering::Less => Level::Note,
+            std::cmp::Ordering::Equal => Level::Ok,
+            std::cmp::Ordering::Greater => Level::Warn,
+        };
+        assert_eq!(c.level, level, "{}", c.detail);
+    }
+}
+
+/// claude refuses a misspelt `--permission-mode` only once a worker starts; with `--schema`
+/// doctor asks the installed CLI which spellings it takes.
+#[tokio::test]
+async fn schema_checks_the_permission_mode_spelling_against_the_cli_help() {
+    let f = Fixture::new();
+    let help = Utf8PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("docs/ref/claude-help.txt");
+    let mut cfg = healthy(&f);
+    for account in &mut cfg.accounts {
+        std::fs::write(&account.exec, format!("#!/bin/sh\ncat '{help}'\n")).expect("fake help");
+    }
+    let spelling = |out: &[Check]| {
+        let c = out
+            .iter()
+            .find(|c| c.name == "protocol/permission_mode")
+            .expect("the spelling check ran");
+        (c.level, c.detail.clone())
+    };
+
+    let (level, detail) = spelling(&checks(&cfg, &f.paths, false, true).await);
+    assert_eq!(level, Level::Ok, "{detail}");
+    assert!(detail.contains("acceptEdits"), "{detail}");
+
+    cfg.brain.permission_mode = Some("acceptedits".into());
+    let (level, detail) = spelling(&checks(&cfg, &f.paths, false, true).await);
+    assert_eq!(level, Level::Error, "{detail}");
+    assert!(
+        detail.contains("brain.permission_mode = \"acceptedits\" is spelt \"acceptEdits\""),
+        "{detail}"
+    );
+
+    let quiet = checks(&cfg, &f.paths, false, false).await;
+    assert!(!quiet.iter().any(|c| c.name == "protocol/permission_mode"));
+}

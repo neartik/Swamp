@@ -16,3 +16,5 @@ ok    providers/anthropic          tiers: high=tier-high  mid=tier-mid  low=tier
 WARN  brain/permission_mode        brain.permission_mode = "plan" denies every Bash call under --permission-prompts none and Bash is not allowed, so it cannot run tests, a build or git; add "Bash" to brain.allow_tools
 note  config/sources               built-in defaults only; no config file was found (looked for [user-config] and <repo>/.swamp/config.toml)
 note  protocol/schema              no recorded runs to measure adapter drift against
+WARN  protocol/journal             000000 no run_started line: the journal is empty or damaged
+note  protocol/permission_mode     `[repo]/bin/worker-main --help` lists no --permission-mode choices; spelling not checked
