@@ -1302,25 +1302,30 @@ impl App {
         let elapsed: Duration = (self.now - since).try_into().unwrap_or(Duration::ZERO);
         let running: usize = self.batches().map(Batch::running).sum();
         let verb = spinner::verb(self.seed, elapsed, running > 0);
-        let tail = if running > 0 {
-            format!("{running} workers running")
+        let out = self.out_tokens.max(self.est_bytes / 4);
+        let tokens = format!("{} {}", t.g(Glyph::TokenArrow), fmt::tokens(out));
+        let tails = if running > 0 {
+            let mut tails = vec![format!("{running} workers running")];
+            if out > 0 {
+                tails.push(tokens);
+            }
+            tails
         } else {
-            format!(
-                "{} {} tokens",
-                t.g(Glyph::TokenArrow),
-                fmt::tokens(self.out_tokens.max(self.est_bytes / 4))
-            )
+            vec![format!("{tokens} tokens"), tokens]
         };
+        let head = format!("{} ", spinner::brain_frame(t, self.tick));
+        let verb = format!("{verb}… ");
+        let room = (self.width as usize).saturating_sub(head.width() + verb.width());
+        let took = fmt::duration(elapsed);
+        let parens = tails
+            .iter()
+            .map(|tail| format!("(esc to interrupt · {took} · {tail})"))
+            .find(|p| p.width() <= room)
+            .unwrap_or_else(|| fmt::truncate(&format!("(esc to interrupt · {took})"), room));
         Some(Line::from(vec![
-            t.span(
-                format!("{} ", spinner::brain_frame(t, self.tick)),
-                Role::Accent,
-            ),
-            t.span(format!("{verb}… "), Role::Accent),
-            t.span(
-                format!("(esc to interrupt · {} · {tail})", fmt::duration(elapsed)),
-                Role::Meta,
-            ),
+            t.span(head, Role::Accent),
+            t.span(verb, Role::Accent),
+            t.span(parens, Role::Meta),
         ]))
     }
 
@@ -1385,7 +1390,7 @@ impl App {
                 cells.push(Cell::new("state", state, Role::Meta));
             }
             if width >= 80 {
-                cells.push(Cell::new("cost", format!("~${total:.2}"), Role::Meta));
+                cells.push(Cell::new("cost", fmt::usd(total, true), Role::Meta));
             }
             &[Drop::Key("cost"), Drop::Key("state")]
         };

@@ -255,6 +255,22 @@ pub fn help_body(width: u16) -> Vec<String> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn the_readme_lists_every_command() {
+        let readme = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("README.md"),
+        )
+        .expect("README.md");
+        for c in COMMANDS {
+            let usage = if c.args.is_empty() {
+                format!("`{}`", c.name)
+            } else {
+                format!("`{} {}`", c.name, c.args)
+            };
+            assert!(readme.contains(&usage), "README.md is missing {usage}");
+        }
+    }
+
     /// UI.md illustrated the refused-input status line with `/adopt`, which has never been a
     /// slash command: adopting is CLI-only. Every command an example refuses must exist.
     #[test]

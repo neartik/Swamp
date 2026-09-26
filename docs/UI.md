@@ -590,12 +590,14 @@ headline sheds its trailing counts:
      · 9g5f0a    [low ]  write the c…   3m20s
      ✔ 9g5f05    [low ]  add the /us…   2m10s   ~$0.04
 
-· Orchestrating… (esc to interrupt · 4m12s · 2 workers running
+· Orchestrating… (esc to interrupt · 4m12s)
 ──────────────────────────────────────────────────────────────
 >
 ──────────────────────────────────────────────────────────────
   ? for shortcuts    2 running · 1 stuck · 1 queued · ~$0.43
 ```
+
+The working line fits the width: `N workers running` gives way to `↓ tokens`, then to nothing.
 
 - **Head**: unchanged, `● swamp_dispatch(args)`.
 - **Headline**: `⎿  {glyph} #N {short} · {counts} · {cost} · {elapsed}`, passed through

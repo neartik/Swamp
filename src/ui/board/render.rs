@@ -2,9 +2,10 @@
 
 use crate::dispatch::account::Health;
 use crate::dispatch::policy::{self, Ineligible, Scoring};
-use crate::ids::DispatchId;
+use crate::journal::inspect;
 use crate::model::core::{AccountId, LimitScope, LimitWindow, NodeState, Tier};
 use crate::model::dispatch::DispatchState;
+use crate::model::failure::Failure;
 use crate::ui::board::model::{
     Board, DispatchGroup, NodeRow, Reason, ReasonForm, Rows, Selection, SelectionNote, Summary,
     TaskRow,
@@ -23,6 +24,9 @@ use time::OffsetDateTime;
 use unicode_width::UnicodeWidthStr;
 
 const TITLE: &str = "swamp board";
+
+/// Wide enough for `~$12.34+`.
+const COST_W: usize = 8;
 
 /// Account lines the strip draws before it says how many more there are.
 pub const ACCOUNTS_MAX: usize = 6;
@@ -46,7 +50,7 @@ pub enum Pool {
     Compact,
     /// The 5h bar, the 7d percentage.
     Bar,
-    /// Both bars, the gate that holds it back, its tokens.
+    /// Both bars, the gate that holds it back, its tokens unless the gate leaves no room.
     Full,
 }
 
@@ -142,29 +146,6 @@ pub const LAYOUTS: [Layout; 3] = [NARROW, MEDIUM, WIDE];
 
 pub fn layout_for(w: u16) -> Layout {
     *LAYOUTS.iter().rev().find(|l| w >= l.min).unwrap_or(&NARROW)
-}
-
-/// The right block of a task row: each cell and the space before it.
-pub fn right_width(l: &Layout) -> usize {
-    let mut w = 7;
-    for (on, cell) in [
-        (l.account_w > 0, l.account_w),
-        (l.model_w > 0, l.model_w),
-        (l.tokens, 7),
-        (l.cost_col, 7),
-    ] {
-        if on {
-            w += cell + 1;
-        }
-    }
-    w
-}
-
-/// What a task row at `level` leaves its title: gutter, indent, glyph, id and tier cell on the
-/// left, the right block on the right.
-pub fn title_width(l: &Layout, width: usize, level: usize) -> usize {
-    let left = 1 + 3 + 4 * level.min(l.indent_cap) + 1 + 1 + 8 + 1 + if l.tier { 7 } else { 0 };
-    width.saturating_sub(left + right_width(l)).max(1)
 }
 
 /// Everything a line needs that is not the line itself.
@@ -314,12 +295,21 @@ pub fn header(b: &Board, rows: &Rows, c: &Ctx) -> Vec<Line<'static>> {
         second.spans.extend(order::spans(&cells, c.theme, c.w()));
         return vec![first.line(c.w()), second.line(c.w())];
     }
-    let mut cells = cells;
-    cells.push(fresh);
-    let room = c.w().saturating_sub(TITLE.width() + 2);
-    let cells = order::fit(cells, room, &drops);
-    first.to(c.w().saturating_sub(order::width(&cells)));
-    first.spans.extend(order::spans(&cells, c.theme, room));
+    let gap = TITLE.width() + 2;
+    let room = c.w().saturating_sub(gap);
+    // Freshness never drops: the counts before it give way first.
+    let fresh_text = fmt::truncate(&fresh.text, room);
+    let rest_room = room.saturating_sub(fresh_text.width() + SEP.width());
+    let cells = order::fit(cells, rest_room, &drops);
+    let mut spans = order::spans(&cells, c.theme, rest_room);
+    let rest_w: usize = spans.iter().map(|s| s.content.width()).sum();
+    if rest_w > 0 {
+        spans.push(c.theme.span(SEP.to_owned(), Role::Meta));
+    }
+    spans.push(c.theme.span(fresh_text, fresh.role));
+    let total: usize = spans.iter().map(|s| s.content.width()).sum();
+    first.to(c.w().saturating_sub(total).max(gap));
+    first.spans.extend(spans);
     vec![first.line(c.w())]
 }
 
@@ -591,7 +581,7 @@ fn right_cells(n: &NodeRow, c: &Ctx) -> Vec<String> {
         out.push(right(&tokens(n.spend.usage.billable(), false, c), 7));
     }
     if c.l.cost_col {
-        out.push(right(&dispatches::cost_cell(&n.spend), 7));
+        out.push(right(&dispatches::cost_cell(&n.spend), COST_W));
     }
     out
 }
@@ -673,7 +663,7 @@ fn dispatch_line(g: &DispatchGroup, recent: bool, selected: bool, c: &Ctx) -> Li
         if c.l.tokens {
             right_block.push(right(&tokens(g.cost.usage.billable(), false, c), 7));
         }
-        right_block.push(right(&cost, 7));
+        right_block.push(right(&cost, COST_W));
     }
     let right_w: usize = right_block.iter().map(|s| s.width() + 1).sum();
     let blank = right_block.iter().all(|s| s.trim().is_empty());
@@ -707,14 +697,7 @@ fn dispatch_line(g: &DispatchGroup, recent: bool, selected: bool, c: &Ctx) -> Li
 
 /// Why a settled dispatch went wrong, from its first failed or rejected task.
 fn reason_cell(g: &DispatchGroup) -> Option<String> {
-    let first = g.tasks.iter().find_map(|t| {
-        matches!(
-            t.row.state,
-            NodeState::Failed { .. } | NodeState::Rejected { .. }
-        )
-        .then_some(t.failure.as_ref())
-        .flatten()
-    })?;
+    let first = g.tasks.iter().find_map(|t| failure(&t.row.state))?;
     let more = (g.tally.failed + g.tally.rejected).saturating_sub(1);
     let tail = if more > 0 {
         format!(" +{more}")
@@ -724,16 +707,24 @@ fn reason_cell(g: &DispatchGroup) -> Option<String> {
     Some(format!("{}{tail}", trace::failure_short(first)))
 }
 
+/// Why a failed task failed, or why a rejected one was refused.
+fn failure(s: &NodeState) -> Option<&Failure> {
+    match s {
+        NodeState::Failed { failure } => Some(failure),
+        NodeState::Rejected { reason } => Some(reason),
+        _ => None,
+    }
+}
+
 /// The second line a stuck task gets: why it is waiting, or why it ended.
 fn stuck_line(t: &TaskRow, all: &Rows, c: &Ctx) -> Option<Line<'static>> {
     let (text, role) = match &t.row.state {
         NodeState::Blocked { until, .. } => {
-            let list = t.blocked.as_ref().map(|(_, l)| l.as_slice()).unwrap_or(&[]);
-            (blocked_text(*until, list, all, c), Role::Meta)
+            (blocked_text(*until, &t.ineligible, all, c), Role::Meta)
         }
-        NodeState::Failed { .. } => (trace::failure_short(t.failure.as_ref()?), Role::Err),
-        NodeState::Rejected { .. } => (
-            format!("rejected: {}", trace::failure_short(t.failure.as_ref()?)),
+        NodeState::Failed { failure } => (trace::failure_short(failure), Role::Err),
+        NodeState::Rejected { reason } => (
+            format!("rejected: {}", trace::failure_short(reason)),
             Role::Err,
         ),
         NodeState::Orphaned { pid, .. } => (format!("orphaned: pid {pid} is gone"), Role::Err),
@@ -804,9 +795,18 @@ pub fn accounts(rows: &Rows, sel: &Selection, c: &Ctx) -> Vec<Line<'static>> {
     } else {
         list.len()
     };
+    let flight_w = list[..keep]
+        .iter()
+        .map(|r| flight(r).width())
+        .max()
+        .unwrap_or(0)
+        .max(3);
     let mut out: Vec<Line<'static>> = list[..keep]
         .iter()
-        .map(|r| account_line(r, *sel == Selection::Account(r.account.clone()), c))
+        .map(|r| {
+            let on = *sel == Selection::Account(r.account.clone());
+            account_line(r, on, flight_w, c)
+        })
         .collect();
     if list.len() > keep {
         out.push(Line::from(c.theme.span(
@@ -821,7 +821,7 @@ pub fn accounts(rows: &Rows, sel: &Selection, c: &Ctx) -> Vec<Line<'static>> {
 }
 
 /// `g ● main        2/2   5h ▇▇▇▇▇▇▇░░░  71% ↻ 38m     7d  32%`, one path per pool.
-pub fn account_line(r: &AccountRow, selected: bool, c: &Ctx) -> Line<'static> {
+pub fn account_line(r: &AccountRow, selected: bool, flight_w: usize, c: &Ctx) -> Line<'static> {
     let t = c.theme;
     let health = watch::shown_health(r.health, r.cooldown_until, c.now);
     let role = usage::health_role(health);
@@ -836,13 +836,10 @@ pub fn account_line(r: &AccountRow, selected: bool, c: &Ctx) -> Line<'static> {
         Role::Name,
     );
     line.pad(1);
-    let flight = format!(
-        "{}/{}",
-        r.inflight,
-        r.max_concurrency
-            .map_or_else(|| "-".to_owned(), |m| m.to_string())
-    );
-    line.add(t, &right(&flight, 3), Role::Meta);
+    let flight = flight(r);
+    let fill = flight_w.saturating_sub(flight.width());
+    line.pad(fill);
+    line.add(t, &flight, Role::Meta);
 
     let out_of_service = matches!(
         health,
@@ -888,6 +885,14 @@ pub fn account_line(r: &AccountRow, selected: bool, c: &Ctx) -> Line<'static> {
         }
     }
     line.line(c.w())
+}
+
+/// `2/2`, `10/12`, `0/-` without a limit.
+fn flight(r: &AccountRow) -> String {
+    let max = r
+        .max_concurrency
+        .map_or_else(|| "-".to_owned(), |m| m.to_string());
+    format!("{}/{max}", r.inflight)
 }
 
 /// `5h ▇▇▇▇▇▇▇░░░  71% ↻ 38m   `
@@ -1035,7 +1040,7 @@ pub fn detail(b: &Board, rows: &Rows, c: &Ctx) -> Vec<Line<'static>> {
         Selection::Dispatch { run, id } => match rows.group(*run, *id) {
             Some(g) => dispatch_detail(g, c),
             None => vec![plain(
-                &format!("dispatch {} is gone", short_of(*id)),
+                &format!("dispatch {} is gone", inspect::short(*id)),
                 Role::Meta,
             )],
         },
@@ -1071,10 +1076,6 @@ fn seg_line(segs: Segs, c: &Ctx) -> Line<'static> {
     r.line(c.w())
 }
 
-fn short_of(id: DispatchId) -> String {
-    crate::journal::inspect::short(id)
-}
-
 fn brain_detail(n: &NodeRow, c: &Ctx) -> Vec<Segs> {
     let model = n
         .model
@@ -1104,7 +1105,7 @@ fn task_detail(b: &Board, t: &TaskRow, rows: &Rows, c: &Ctx) -> Vec<Segs> {
                     Role::Meta,
                 ),
             ]];
-            let list = t.blocked.as_ref().map(|(_, l)| l.as_slice()).unwrap_or(&[]);
+            let list = &t.ineligible;
             let longest = list.iter().map(|(a, _)| a.0.width()).max().unwrap_or(0);
             for (account, g) in list {
                 out.push(vec![
@@ -1186,7 +1187,7 @@ fn ran_detail(b: &Board, t: &TaskRow, rows: &Rows, c: &Ctx) -> Vec<Segs> {
         ));
     }
     if let Some(note) = note {
-        chunks.extend(passed_over(b, t, note, rows, room, narrow, c));
+        chunks.extend(passed_over(t, note, rows, room, narrow, c));
     }
     for line in order::attempt_lines(&t.prior) {
         chunks.extend(wrap(&[(line, Role::Meta)], room));
@@ -1208,7 +1209,6 @@ struct Passed {
 
 /// §3.4: every account passed over, the gate recorded at block time, else the live one.
 fn passed_over(
-    b: &Board,
     t: &TaskRow,
     note: &SelectionNote,
     rows: &Rows,
@@ -1216,11 +1216,7 @@ fn passed_over(
     narrow: bool,
     c: &Ctx,
 ) -> Vec<Segs> {
-    let recorded = b
-        .pane(t.row.run)
-        .and_then(|p| p.view.tasks.get(&t.row.logical))
-        .map(|t| t.ineligible.clone())
-        .unwrap_or_default();
+    let recorded = &t.ineligible;
     let passed = |text: String, role: Role, live: bool, eligible: bool| Passed {
         text,
         role,
@@ -1297,10 +1293,7 @@ fn dispatch_detail(g: &DispatchGroup, c: &Ctx) -> Vec<Segs> {
         Some(caller) => caller.short(),
         None => "brain".to_owned(),
     };
-    let state = match g.state {
-        DispatchState::Open => "open",
-        DispatchState::Settled => "settled",
-    };
+    let state = dispatches::state_word(g.state);
     let age: StdDuration = (c.now - g.at).try_into().unwrap_or(StdDuration::ZERO);
     let mut phrase = vec![dispatches::tasks_word(g.tally.total() as u32)];
     let counts = order::text(&g.tally.cells());
@@ -1326,7 +1319,10 @@ fn dispatch_detail(g: &DispatchGroup, c: &Ctx) -> Vec<Segs> {
     vec![
         head,
         plain(&phrase.join(SEP), Role::Meta),
-        plain(&format!("swamp dispatch {}", short_of(g.id)), Role::Accent),
+        plain(
+            &format!("swamp dispatch {}", inspect::short(g.id)),
+            Role::Accent,
+        ),
     ]
 }
 

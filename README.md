@@ -169,9 +169,9 @@ pipes, CI and `swamp run` are unaffected.
 
 The keys are in [Keys](#keys), with every other surface's.
 
-Commands: `/help`, `/status`, `/accounts`, `/usage [--json]`, `/trace [node]`, `/cost`,
-`/tier [low|mid|high]`, `/cancel <node|all>`, `/diff <node>`, `/thinking [on|off]`, `/clear`,
-`/resume <run>`, `/quit`.
+Commands: `/help`, `/status`, `/accounts`, `/usage [--json]`, `/trace [node|dispatch]`,
+`/dispatches [--failed]`, `/cost`, `/tier [low|mid|high]`, `/cancel <node|all>`, `/diff <node>`,
+`/thinking [on|off]`, `/clear`, `/resume <run|last>`, `/quit`.
 
 `[ui]` settings: `chat_theme` (`auto`, `truecolor`, `ansi256`, `plain`), `collapse_lines`
 (default 3), `chat_history` (default 500 entries, kept in `.swamp/chat_history`), `refresh_hz`
@@ -201,7 +201,7 @@ exists: `k` cancels on the board and in `swamp watch`, `r` is the raw view, `?` 
 | `tab` `shift+tab` | next / previous run | ✓ |  |  |  |
 | `f` | follow the newest running task | ✓ |  |  |  |
 | `0` | all runs merged | ✓ |  |  |  |
-| `g` `G` | top / bottom | ✓ | ✓ |  |  |
+| `g` `G` `home` `end` | top / bottom | ✓ | ✓ |  |  |
 | `↑` `↓` | scroll |  | ✓ |  |  |
 | `pgup` `pgdn` | scroll a page |  | ✓ |  |  |
 | `y` | confirm the prompt | ✓ |  | ✓ |  |

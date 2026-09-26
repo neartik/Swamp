@@ -327,10 +327,14 @@ pub fn issued_by(view: &RunView, logical: NodeId) -> Vec<DispatchId> {
         .values()
         .filter_map(|d| {
             let caller = d.record.as_ref()?.caller;
-            let of = view.attempts(caller).first().map_or(caller, |n| n.logical);
-            (of == logical).then_some(d.id)
+            (caller_task(view, caller) == logical).then_some(d.id)
         })
         .collect()
+}
+
+/// The logical task a dispatch's caller attempt belongs to, or the caller itself.
+pub fn caller_task(view: &RunView, caller: NodeId) -> NodeId {
+    view.attempts(caller).first().map_or(caller, |n| n.logical)
 }
 
 pub fn label(id: DispatchId) -> String {

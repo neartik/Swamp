@@ -88,7 +88,7 @@ fn grouped(view: &RunView, rows: Vec<TreeRow>, o: &TraceOpts) -> String {
         out.push_str(&format!(
             "\ndispatch {}{seq}  {}  caller {}  {}  {}\n",
             s.short,
-            dispatches::state_word(&s),
+            dispatches::state_word(s.state),
             dispatches::caller_word(&s),
             dispatches::tasks_word(s.tasks),
             dispatches::cost(&s.cost),

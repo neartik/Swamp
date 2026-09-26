@@ -12,7 +12,7 @@ expression: "live(&mut app, 62)"
      · 9g5f0a    [low ]  write the c…   3m20s
      ✔ 9g5f05    [low ]  add the /us…   2m10s   ~$0.04
 
-· Orchestrating… (esc to interrupt · 4m12s · 2 workers running
+· Orchestrating… (esc to interrupt · 4m12s)
 ──────────────────────────────────────────────────────────────
 >
 ──────────────────────────────────────────────────────────────

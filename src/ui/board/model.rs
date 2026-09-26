@@ -8,7 +8,6 @@ use crate::journal::paths::RunPaths;
 use crate::journal::record::{JournalEvent, JournalLine};
 use crate::model::core::{AccountId, Cost, NodeState, Provider, Tier, Usage};
 use crate::model::dispatch::DispatchState;
-use crate::model::failure::Failure;
 use crate::model::node::NodeRecord;
 use crate::ui::board::sources::Tail;
 use crate::ui::chat::theme::Role;
@@ -304,28 +303,17 @@ impl RunPane {
             .take(attempts.len().saturating_sub(1))
             .map(|a| inspect::attempt(a, now))
             .collect();
-        let blocked = match &row.state {
-            NodeState::Blocked { until, .. } => Some((
-                *until,
-                self.view
-                    .tasks
-                    .get(&logical)
-                    .map(|t| t.ineligible.clone())
-                    .unwrap_or_default(),
-            )),
-            _ => None,
-        };
-        let failure = match &row.state {
-            NodeState::Failed { failure } => Some(failure.clone()),
-            NodeState::Rejected { reason } => Some(reason.clone()),
-            _ => None,
-        };
+        let ineligible = self
+            .view
+            .tasks
+            .get(&logical)
+            .map(|t| t.ineligible.clone())
+            .unwrap_or_default();
         Some(TaskRow {
             row,
             level,
             prior,
-            blocked,
-            failure,
+            ineligible,
             nested: Vec::new(),
         })
     }
@@ -351,12 +339,9 @@ impl RunPane {
                 continue;
             }
             let Some(r) = &d.record else { continue };
-            let of = self
-                .view
-                .attempts(r.caller)
-                .first()
-                .map_or(r.caller, |n| n.logical);
-            out.entry(of).or_default().push(d);
+            out.entry(inspect::caller_task(&self.view, r.caller))
+                .or_default()
+                .push(d);
         }
         for list in out.values_mut() {
             list.sort_by_key(|d| inspect::dispatch_key(d));
@@ -530,10 +515,8 @@ pub struct TaskRow {
     pub level: usize,
     /// Every attempt before the live one, oldest first.
     pub prior: Vec<AttemptDetail>,
-    /// Until when, and why each account refused it, as the pool recorded.
-    pub blocked: Option<(OffsetDateTime, Vec<(AccountId, Ineligible)>)>,
-    /// The failure of a failed task, or the reason a rejected one was refused.
-    pub failure: Option<Failure>,
+    /// Why each account refused it, as the pool recorded.
+    pub ineligible: Vec<(AccountId, Ineligible)>,
     /// What this task dispatched in turn.
     pub nested: Vec<DispatchGroup>,
 }
@@ -573,10 +556,6 @@ impl DispatchGroup {
         order::label_cells(self.seq, self.id, Role::Meta)
             .swap_remove(0)
             .text
-    }
-
-    pub fn is_legacy(&self) -> bool {
-        self.id == DispatchId::LEGACY
     }
 
     /// This group, its tasks and their nested groups in draw order; folded ones only if `folded`.
@@ -949,6 +928,7 @@ mod tests {
     use super::*;
     use crate::ids::CallSeq;
     use crate::model::dispatch::{DispatchRecord, Phase, TaskRef};
+    use crate::model::failure::Failure;
     use crate::ui::board::sources::Tail;
     use crate::ui::chat::tests_support as fx;
     use camino::Utf8PathBuf;
@@ -1167,7 +1147,7 @@ mod tests {
         let run = &rows.runs[0];
         assert_eq!(run.active.len(), 1);
         let legacy = &run.active[0];
-        assert!(legacy.is_legacy());
+        assert_eq!(legacy.id, DispatchId::LEGACY);
         assert_eq!(legacy.label(), "legacy");
         assert_eq!(
             shorts(legacy),
@@ -1250,7 +1230,6 @@ mod tests {
         let rejected = &rows.runs[0].recent[0].tasks[0];
         assert!(matches!(rejected.row.state, NodeState::Rejected { .. }));
         assert_eq!(rejected.row.elapsed(b.now), None);
-        assert!(rejected.failure.is_some());
 
         let blocked = rows
             .task(fx::run_id(), fx::p4_task(3))
@@ -1259,8 +1238,7 @@ mod tests {
             blocked.row.elapsed(b.now),
             Some(StdDuration::from_secs(200))
         );
-        let (_, why) = blocked.blocked.as_ref().expect("recorded ineligible");
-        assert_eq!(why.len(), 2);
+        assert_eq!(blocked.ineligible.len(), 2);
 
         let retried = rows
             .task(fx::run_id(), fx::p4_task(2))

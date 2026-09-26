@@ -259,15 +259,29 @@ fn the_tiers_start_where_the_table_says() {
 }
 
 /// At a tier's narrowest width a task at its deepest indent still keeps `title_min` columns
-/// (below 40 the board is best effort).
+/// (below 40 the board is best effort), measured on the row the board draws.
 #[test]
 fn every_tier_keeps_its_title_minimum() {
+    let b = board();
+    let theme = Theme::plain();
     for (l, width, want) in [
-        (render::NARROW, 40usize, 14usize),
-        (render::MEDIUM, 60, 17),
-        (render::WIDE, 100, 25),
+        (render::NARROW, 40u16, 14usize),
+        (render::MEDIUM, 60, 16),
+        (render::WIDE, 100, 24),
     ] {
-        let title = render::title_width(&l, width, l.indent_cap);
+        let mut rows = b.rows();
+        let task = &mut rows.runs[0].active[0].tasks[0];
+        task.level = l.indent_cap;
+        task.row.title = "x".repeat(200);
+        let c = render::Ctx::new(&b, width, &theme, 0, MAX_AGE);
+        let body = render::body(&rows, &Selection::None, &rows, &c);
+        let title = body
+            .lines
+            .iter()
+            .flat_map(|line| &line.spans)
+            .find(|s| s.content.starts_with("xxx"))
+            .map(|s| s.content.width())
+            .expect("the title span");
         assert_eq!(title, want, "{:?}", l.band);
         assert!(
             title >= l.title_min,
@@ -383,6 +397,37 @@ fn a_stale_run_freezes_its_glyphs() {
     insta::assert_snapshot!("stale_60", mid);
     assert!(mid.contains("1 stale"), "{mid}");
     assert!(mid.contains("? brain"), "the frozen brain glyph: {mid}");
+
+    b.accounts_at = Some(fx::now() - time::Duration::seconds(7505));
+    let head = draw(&b, 60).lines().next().expect("header").to_owned();
+    assert!(head.starts_with("swamp board  "), "{head}");
+    assert!(head.ends_with(" · observed 2h05m ago"), "{head}");
+    assert!(head.width() <= 60, "{head}");
+}
+
+/// Ten or more in flight and a cost of $10 or more are never cut.
+#[test]
+fn wide_counts_are_never_cut() {
+    let mut b = board();
+    b.accounts[0].max_concurrency = Some(12);
+    let rows = b.rows();
+    let theme = Theme::plain();
+    let c = render::Ctx::new(&b, 100, &theme, 0, MAX_AGE);
+    let mut rows_10 = rows.clone();
+    rows_10.accounts[0].inflight = 10;
+    let strip = screen(render::accounts(&rows_10, &Selection::None, &c), 100);
+    assert!(strip.contains("main         10/12"), "{strip}");
+    assert!(strip.contains("  1/- "), "{strip}");
+
+    let mut rows_cost = rows;
+    let task = &mut rows_cost.runs[0].active[0].tasks[0];
+    task.row.spend.usd = 12.34;
+    task.row.spend.complete = false;
+    let body = screen(
+        render::body(&rows_cost, &Selection::None, &rows_cost, &c).lines,
+        100,
+    );
+    assert!(body.contains("~$12.34+"), "{body}");
 }
 
 // ---------------------------------------------------------------- detail

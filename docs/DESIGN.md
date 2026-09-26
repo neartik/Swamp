@@ -2019,7 +2019,7 @@ Flags: `--node <id>`, `--events`, `--raw` (verbatim `stream.jsonl`), `--stderr`,
 
 ### 7.7 `swamp watch`
 
-Read-only ratatui view, fed by the journal tail, with an optional subscription to the supervisor's
+Ratatui view, read-only except a confirmed `k` cancel, fed by the journal tail, with an optional subscription to the supervisor's
 broadcast channel when it happens to be the same process. It never requires the supervisor to be
 alive, so an interrupted run is inspectable with the same tool, and `swamp watch` from a second
 terminal works against a run started elsewhere.
@@ -2028,8 +2028,9 @@ terminal works against a run started elsewhere.
 - Right 60%: the selected node's normalized event log; `r` toggles the raw JSONL view.
 - Footer: per-account utilization gauges coloured by `Health`, with cooldown countdowns.
 
-Keys: up/down select, `r` raw toggle, `d` open the node diff in `$PAGER`, `k` cancel node, `a`
-accounts pane, `q` quit (detaches; never kills the run).
+Keys: up/down select, `r` raw toggle, `d` open the node diff in `$PAGER`, `k` cancel node (asks
+`y` / `n`), `a` accounts pane, `esc` back (never quits), `?` keys, `q` or `ctrl+d` quit (detaches;
+never kills the run). The README `## Keys` table is generated from `ui::keys` and is the reference.
 
 `crossterm::event::EventStream` and the journal tail are joined in one `tokio::select!`, redraw
 capped at `[ui] refresh_hz`. A `TerminalGuard` `Drop` impl and a panic hook both restore the
@@ -2083,7 +2084,8 @@ swamp trace [RUN|last]                      RUN accepts a full id, a unique pref
                                             With no RUN, --node searches every run, so a node of
                                             an older run renders that run
 
-swamp watch [RUN|last]                      Live TUI, read-only, attachable from another terminal
+swamp watch [RUN|last]                      Live TUI, attachable from another terminal; k cancels
+                                            after a y / n
 
 swamp runs                                  List runs, newest first
       --all --interrupted --limit <N> --json
@@ -2457,6 +2459,8 @@ tail_lines    = 200
 chat_theme     = "auto"
 collapse_lines = 3
 chat_history   = 500
+# `swamp board` cancels the selected task or dispatch with `k`, after a y / n.
+board_actions  = true
 
 # ---------------------------------------------------------------- profiles
 # `swamp --profile cheap run "..."` layers this over everything above.

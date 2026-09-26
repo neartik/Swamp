@@ -182,7 +182,7 @@ impl Batch {
                 None => complete = false,
             }
         }
-        format!("~${usd:.2}{}", if complete { "" } else { "+" })
+        fmt::usd(usd, complete)
     }
 
     fn label(&self) -> Vec<Cell> {

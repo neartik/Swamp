@@ -253,11 +253,7 @@ impl App {
             totals.nodes,
             totals.failed,
             fmt::tokens(totals.usage.billable()),
-            if totals.cost_complete {
-                format!("~${:.2}", totals.cost_usd)
-            } else {
-                format!("~${:.2}+", totals.cost_usd)
-            },
+            fmt::usd(totals.cost_usd, totals.cost_complete),
         );
         let room = width.saturating_sub(unicode_width::UnicodeWidthStr::width(head.as_str()));
         head + &keys::hints(Surface::Watch, room, &[])

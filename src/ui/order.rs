@@ -202,8 +202,7 @@ impl Tally {
                 Role::Meta,
             ));
         }
-        let plus = if complete { "" } else { "+" };
-        cells.push(Cell::new("cost", format!("~${usd:.2}{plus}"), Role::Meta));
+        cells.push(Cell::new("cost", fmt::usd(usd, complete), Role::Meta));
         cells
     }
 }

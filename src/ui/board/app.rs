@@ -231,7 +231,7 @@ impl App {
             }
             KeyAction::Ends => {
                 self.touched = true;
-                self.move_end(board, key.code == KeyCode::Char('G'))
+                self.move_end(board, matches!(key.code, KeyCode::Char('G') | KeyCode::End))
             }
             KeyAction::Stuck => {
                 self.touched = true;
@@ -314,7 +314,9 @@ impl App {
                 p.scroll = p.scroll.saturating_sub(20)
             }
             Some(KeyAction::Page) => p.scroll = p.scroll.saturating_add(20),
-            Some(KeyAction::Ends) if key.code == KeyCode::Char('g') => p.scroll = 0,
+            Some(KeyAction::Ends) if matches!(key.code, KeyCode::Char('g') | KeyCode::Home) => {
+                p.scroll = 0
+            }
             Some(KeyAction::Ends) => p.scroll = p.lines.len(),
             Some(KeyAction::Raw) if matches!(p.kind, PagerKind::Trace | PagerKind::Dispatch) => {
                 if let Some(run) = p.run {
@@ -709,11 +711,7 @@ fn parent(board: &Board, sel: &Selection) -> Selection {
         }),
         Selection::Dispatch { run, id } => board.pane(run).and_then(|p| {
             let caller = p.view.dispatches.get(&id)?.record.as_ref()?.caller;
-            let logical = p
-                .view
-                .attempts(caller)
-                .first()
-                .map_or(caller, |n| n.logical);
+            let logical = inspect::caller_task(&p.view, caller);
             (logical != p.brain).then_some(Selection::Node { run, logical })
         }),
         _ => None,

@@ -193,7 +193,7 @@ pub const BINDINGS: &[Binding] = &[
     ),
     bind(&["0"], A::AllRuns, "all runs merged", B, Some("0 all runs")),
     bind(
-        &["g", "G"],
+        &["g", "G", "home", "end"],
         A::Ends,
         "top / bottom",
         B | P,
@@ -347,6 +347,8 @@ pub fn name(k: &KeyEvent) -> Option<String> {
         KeyCode::BackTab => return Some("shift+tab".to_owned()),
         KeyCode::PageUp => "pgup".to_owned(),
         KeyCode::PageDown => "pgdn".to_owned(),
+        KeyCode::Home => "home".to_owned(),
+        KeyCode::End => "end".to_owned(),
         _ => return None,
     };
     let named = !matches!(k.code, KeyCode::Char(_));
@@ -584,6 +586,10 @@ mod tests {
         assert_eq!(action(Surface::Board, &back), Some(KeyAction::Run));
         let big_g = KeyEvent::new(KeyCode::Char('G'), KeyModifiers::SHIFT);
         assert_eq!(action(Surface::Board, &big_g), Some(KeyAction::Ends));
+        for code in [KeyCode::Home, KeyCode::End] {
+            let k = KeyEvent::new(code, KeyModifiers::NONE);
+            assert_eq!(action(Surface::Pager, &k), Some(KeyAction::Ends));
+        }
     }
 
     #[test]

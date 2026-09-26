@@ -5,6 +5,7 @@ use crate::journal::fold::RunView;
 use crate::journal::inspect::{self, DispatchSummary, TaskDetail};
 use crate::journal::paths::RunPaths;
 use crate::journal::reader::Tailer;
+use crate::model::dispatch::DispatchState;
 use crate::ui::fmt;
 use crate::ui::trace::{attempt_cells, failure_detail};
 use std::collections::BTreeMap;
@@ -87,7 +88,7 @@ pub fn row(d: &DispatchSummary) -> String {
         d.call_seq.map_or_else(|| "-".to_owned(), |s| s.to_string()),
         d.age_s
             .map_or_else(|| "-".to_owned(), |s| fmt::duration(Duration::from_secs(s))),
-        state_word(d),
+        state_word(d.state),
         d.tasks,
         c.waiting(),
         c.running,
@@ -100,10 +101,10 @@ pub fn row(d: &DispatchSummary) -> String {
     )
 }
 
-pub fn state_word(d: &DispatchSummary) -> &'static str {
-    match d.state {
-        crate::model::dispatch::DispatchState::Open => "open",
-        crate::model::dispatch::DispatchState::Settled => "settled",
+pub fn state_word(s: DispatchState) -> &'static str {
+    match s {
+        DispatchState::Open => "open",
+        DispatchState::Settled => "settled",
     }
 }
 
@@ -129,8 +130,7 @@ pub fn cost(r: &inspect::Rollup) -> String {
     if r.usd == 0.0 && (!r.complete || r.usage.billable() == 0) {
         return "-".to_owned();
     }
-    let plus = if r.complete { "" } else { "+" };
-    format!("~${:.2}{plus}", r.usd)
+    fmt::usd(r.usd, r.complete)
 }
 
 /// `cost`, blank where it would print `-`.
@@ -155,7 +155,7 @@ pub fn render_detail(view: &RunView, id: DispatchId, json: bool, now: OffsetDate
         "dispatch {}  run {run}  seq {}  {}  caller {}",
         d.short,
         d.call_seq.map_or_else(|| "-".to_owned(), |s| s.to_string()),
-        state_word(d),
+        state_word(d.state),
         caller_word(d),
     );
     if let Some(age) = d.age_s {
@@ -239,7 +239,7 @@ fn task_block(view: &RunView, t: &TaskDetail, level: usize, now: OffsetDateTime,
             "{detail}dispatch {}  {}  {}\n",
             sub.dispatch.short,
             tasks_word(sub.dispatch.tasks),
-            state_word(&sub.dispatch)
+            state_word(sub.dispatch.state)
         ));
         for st in &sub.tasks {
             task_block(view, st, level + 1, now, out);

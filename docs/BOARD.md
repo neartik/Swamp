@@ -189,14 +189,15 @@ decision. Within a tier only the title width and the header and hint cells that 
 | short id after `#N` | no | yes | yes |
 | dispatch cost | inline cell | cost column | cost column |
 | blocked line | first refusal, `+N` | every refusal, as words | every refusal, with numbers |
-| account strip | percentages | 5h bar, 7d percentage | both bars, the gate, tokens |
+| account strip | percentages | 5h bar, 7d percentage | both bars, the gate, tokens when they fit |
 | account name width | 10 | 11 | 12 |
 | `detail_max` | 5 | 6 | 4 |
 
 The header reads the same at every width: `N running · N stuck · N queued · ~$X · observed Xs
 ago`, with `N runs` first when more than one run is tailed and `N stale` in `err`. When the cells
 do not fit, `queued`, then `runs`, then the cost drop; `running`, `stuck`, `stale` and the
-freshness never do. Freshness is `err` once older than `quota_max_age`.
+freshness never do; if they still overflow the counts are cut with `…` before the freshness is.
+Freshness is `err` once older than `quota_max_age`.
 
 A dispatch header is `▾`/`▸`, the label (`#N`, the short id without a call number, or `legacy`),
 `by <caller>` on a nested one, `N tasks`, the count phrase in rank order, and, on a `recent` row,
@@ -345,10 +346,12 @@ failure of a failed task; `rejected: <reason>`; `orphaned: pid N is gone`. Past 
 the tail of the rank order becomes `… +N more · enter lists all`.
 
 The strip is one line per account: health glyph, name, `inflight/max_concurrency` recounted from
-the journals (`-` when unlimited), then the tier's quota cells. An account that is cooling, has
-broken auth or is disabled says so instead of its bars below Wide; at Wide the status cell is the
+the journals (`-` when unlimited, right-aligned to the widest one shown and never cut), then the
+tier's quota cells. An account that is cooling, has broken auth or is disabled says so instead of
+its bars below Wide; at Wide the status cell is the
 gate `policy::gate` finds (`at capacity (2/2)`, `quota stop (93%)`, `cooling until 23:20`), else
-its health word when it is not healthy. A percentage at or past `stop_at` is `err`; a stale one is
+its health word when it is not healthy; the tokens follow at the right edge and give way when the
+status leaves no room for them. A percentage at or past `stop_at` is `err`; a stale one is
 `meta`.
 
 ### 3.4 The detail block

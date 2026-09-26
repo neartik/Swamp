@@ -63,6 +63,12 @@ pub fn cost(c: Option<Cost>) -> String {
     }
 }
 
+/// `~$0.43`, with a trailing `+` when some attempt reported no cost.
+pub fn usd(usd: f64, complete: bool) -> String {
+    let plus = if complete { "" } else { "+" };
+    format!("~${usd:.2}{plus}")
+}
+
 pub fn glyph(s: &NodeState) -> &'static str {
     match s {
         NodeState::Queued => "·",
