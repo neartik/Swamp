@@ -149,8 +149,6 @@ fn only_dispatch(h: &Harness, run: swamp::ids::RunId) -> swamp::ids::DispatchId 
     ids[0]
 }
 
-/// Dispatch ids resolve like node ids: in full, by the short id `swamp dispatches` prints, or
-/// by a prefix, across every run; a prefix two dispatches share names neither.
 #[test]
 fn a_dispatch_resolves_by_short_id_or_prefix_and_a_shared_prefix_is_ambiguous() {
     let h = Harness::new().scenario("main", Scenario::claude().edits("fixed.txt", "patched\n"));

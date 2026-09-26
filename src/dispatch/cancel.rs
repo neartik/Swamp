@@ -1,7 +1,7 @@
 use crate::ids::NodeId;
 use crate::journal::paths::RunPaths;
 use crate::journal::{JournalEvent, JournalHandle, RunView};
-use crate::model::core::{CancelSource, NodeState};
+use crate::model::core::{CancelSource, NodeKind, NodeState};
 use crate::model::dispatch::Phase;
 use crate::worker::liveness;
 use crate::worker::spawn::{Reaper, terminate};
@@ -53,6 +53,12 @@ pub async fn cancel_node(
     by: CancelSource,
     stop: Stop<'_>,
 ) -> anyhow::Result<Outcome> {
+    anyhow::ensure!(
+        !is_brain(view, logical),
+        "node {} is the brain of run {}: cancel the run instead",
+        logical.short(),
+        paths.run
+    );
     let state = view
         .state_of(logical)
         .ok_or_else(|| anyhow::anyhow!("no task {logical} in run {}", paths.run))?;
@@ -73,13 +79,18 @@ pub async fn cancel_node(
         to: NodeState::Cancelled { by },
         why: format!("cancelled by {}", source_word(by)),
     };
-    match sink {
-        Sink::Live(j) => j.emit_durable(Some(logical), event).await?,
+    let appended = match sink {
+        Sink::Live(j) => j.emit_durable(Some(logical), event).await,
         Sink::Shared => {
             crate::journal::writer::append_shared(&paths.journal(), paths.run, Some(logical), event)
-                .await?
+                .await
         }
     };
+    if let Err(e) = appended {
+        // Left behind, the marker would suppress the owner's own Cancelled line.
+        let _ = std::fs::remove_file(paths.cancel_marker(logical));
+        return Err(e);
+    }
     let live = live_pgid(paths, view, logical);
     match stop {
         Stop::Token(t) => t.cancel(),
@@ -118,6 +129,10 @@ pub fn source_word(by: CancelSource) -> &'static str {
         CancelSource::Timeout => "timeout",
         CancelSource::Shutdown => "shutdown",
     }
+}
+
+pub fn is_brain(view: &RunView, id: NodeId) -> bool {
+    view.attempts(id).iter().any(|n| n.kind == NodeKind::Brain)
 }
 
 /// The latest attempt still running under a pidfile this machine can vouch for.

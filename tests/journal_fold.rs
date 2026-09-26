@@ -136,8 +136,7 @@ async fn concurrent_emits_round_trip_with_a_dense_sequence() {
     assert_eq!(notes, expected, "every emitted event survives exactly once");
 }
 
-/// `swamp cancel` appends to a journal whose writer lives in another process. The owner has
-/// to continue the sequence past that line, or the fold drops its next one as a replay.
+/// Otherwise the fold drops the owner's next line as a replay.
 #[tokio::test]
 async fn a_line_appended_by_another_process_keeps_the_sequence_dense() {
     let sb = sandbox();
@@ -1313,8 +1312,6 @@ fn resume_ends_a_task_whose_terminal_transition_was_lost() {
     );
 }
 
-/// `swamp_inspect` names why a task waits with the pool's own structured verdict, and why a
-/// rejected one never ran.
 #[test]
 fn inspect_carries_the_blocked_verdict_and_the_rejection() {
     use swamp::journal::inspect;

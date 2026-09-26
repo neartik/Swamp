@@ -241,11 +241,10 @@ fn block(view: &RunView, row: &TreeRow, siblings: bool, o: &TraceOpts) -> String
         for id in &row.attempts {
             if let Some(a) = view.nodes.get(id) {
                 out.push_str(&format!(
-                    "{detail}attempt {}  {}  {}  {}\n",
+                    "{detail}attempt {}  {}  {}\n",
                     a.attempt,
                     a.id.short(),
-                    fmt::pad(&account_cell(a), ACCOUNT_WIDTH),
-                    attempt_outcome(a),
+                    attempt_cells(a, a.duration()),
                 ));
             }
         }
@@ -338,18 +337,18 @@ fn numbers(rec: &NodeRecord) -> String {
     )
 }
 
-fn attempt_outcome(rec: &NodeRecord) -> String {
+/// An attempt line's account, model, outcome and elapsed, shared with `swamp dispatch`.
+pub(crate) fn attempt_cells(rec: &NodeRecord, elapsed: Option<std::time::Duration>) -> String {
     let tail = match &rec.state {
         NodeState::Failed { failure } => failure_summary(failure),
         s => fmt::state_word(s).to_owned(),
     };
     let model = rec.model.as_deref().unwrap_or("-");
     format!(
-        "{}  {tail}  {}",
+        "{}  {}  {tail}  {}",
+        fmt::pad(&account_cell(rec), ACCOUNT_WIDTH),
         fmt::pad(model, MODEL_WIDTH),
-        rec.duration()
-            .map(fmt::duration)
-            .unwrap_or_else(|| "-".to_owned())
+        elapsed.map(fmt::duration).unwrap_or_else(|| "-".to_owned())
     )
 }
 

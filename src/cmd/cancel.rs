@@ -7,13 +7,16 @@ use crate::journal::inspect;
 use crate::journal::paths::RunPaths;
 use crate::model::core::{CancelSource, NodeKind, NodeState};
 use crate::ui::fmt;
+use crate::worker::liveness;
 use crate::worker::spawn::{Reaper, terminate};
-use std::time::Duration;
+use camino::Utf8Path;
+use nix::sys::signal::{Signal, kill};
+use nix::unistd::Pid;
+use std::time::{Duration, Instant};
 
 /// What one TARGET named: a whole run, or some of its tasks.
 struct Target {
     paths: RunPaths,
-    view: RunView,
     tasks: Vec<NodeId>,
     /// A whole run also stops what is not a task, the brain included.
     whole: bool,
@@ -37,7 +40,7 @@ pub async fn run(ctx: &Ctx, args: &CancelArgs) -> anyhow::Result<i32> {
             if let Ok(view) = RunView::load(&paths.dir, false)
                 && !view.finished
             {
-                targets.push(whole_run(paths, view));
+                targets.push(whole_run(paths, &view));
             }
         }
     }
@@ -51,9 +54,11 @@ pub async fn run(ctx: &Ctx, args: &CancelArgs) -> anyhow::Result<i32> {
     let mut cancelled = 0;
     for t in targets {
         for logical in &t.tasks {
+            // An earlier task's grace period gives this one time to settle on its own.
+            let view = ctx.view(&t.paths, false)?;
             let outcome = cancel_node(
                 &t.paths,
-                &t.view,
+                &view,
                 Sink::Shared,
                 *logical,
                 CancelSource::User,
@@ -90,19 +95,18 @@ pub async fn run(ctx: &Ctx, args: &CancelArgs) -> anyhow::Result<i32> {
             }
         }
         if t.whole {
-            cancelled += stop_the_rest(&t, grace).await?;
+            let view = ctx.view(&t.paths, false)?;
+            cancelled += stop_the_rest(&t, &view, grace).await?;
         }
     }
     println!("cancelled {cancelled} nodes");
     Ok(if cancelled > 0 { 0 } else { 1 })
 }
 
-fn whole_run(paths: RunPaths, view: RunView) -> Target {
-    let tasks = view.tasks.keys().copied().collect();
+fn whole_run(paths: RunPaths, view: &RunView) -> Target {
     Target {
         paths,
-        view,
-        tasks,
+        tasks: view.tasks.keys().copied().collect(),
         whole: true,
     }
 }
@@ -113,7 +117,7 @@ fn resolve(ctx: &Ctx, spec: &str) -> anyhow::Result<Target> {
     let prefixed = spec.starts_with("dsp_") || spec.starts_with("nd_");
     if !prefixed && let Ok(paths) = ctx.run_paths(Some(spec)) {
         let view = ctx.view(&paths, false)?;
-        return Ok(whole_run(paths, view));
+        return Ok(whole_run(paths, &view));
     }
     let nodes = if spec.starts_with("dsp_") {
         Vec::new()
@@ -126,10 +130,15 @@ fn resolve(ctx: &Ctx, spec: &str) -> anyhow::Result<Target> {
         ctx.dispatch_hits(spec)?
     };
     match (&nodes[..], &dispatches[..]) {
-        ([(paths, node)], []) => tasks(ctx, paths.clone(), vec![node.logical]),
+        ([(paths, node)], []) if node.kind == NodeKind::Brain => anyhow::bail!(
+            "node {} is the brain of run {}: cancel the run instead",
+            node.id.short(),
+            paths.run
+        ),
+        ([(paths, node)], []) => Ok(tasks(paths.clone(), vec![node.logical])),
         ([], [(paths, id)]) => dispatch(ctx, paths.clone(), *id),
         ([], []) => match unstarted(ctx, spec)? {
-            Some((paths, logical)) => tasks(ctx, paths, vec![logical]),
+            Some((paths, logical)) => Ok(tasks(paths, vec![logical])),
             None => anyhow::bail!("no run, node or dispatch matches `{spec}`"),
         },
         _ if dispatches.is_empty() => {
@@ -147,29 +156,22 @@ fn resolve(ctx: &Ctx, spec: &str) -> anyhow::Result<Target> {
     }
 }
 
-fn tasks(ctx: &Ctx, paths: RunPaths, tasks: Vec<NodeId>) -> anyhow::Result<Target> {
-    let view = ctx.view(&paths, false)?;
-    Ok(Target {
+fn tasks(paths: RunPaths, tasks: Vec<NodeId>) -> Target {
+    Target {
         paths,
-        view,
         tasks,
         whole: false,
-    })
+    }
 }
 
 fn dispatch(ctx: &Ctx, paths: RunPaths, id: DispatchId) -> anyhow::Result<Target> {
     let view = ctx.view(&paths, false)?;
-    let tasks = view
+    let list = view
         .dispatches
         .get(&id)
         .map(|d| d.tasks.clone())
         .unwrap_or_default();
-    Ok(Target {
-        paths,
-        view,
-        tasks,
-        whole: false,
-    })
+    Ok(tasks(paths, list))
 }
 
 /// A task still waiting for its first attempt has no node to find, only a logical id.
@@ -209,18 +211,35 @@ fn unstarted(ctx: &Ctx, spec: &str) -> anyhow::Result<Option<(RunPaths, NodeId)>
 }
 
 /// What a whole run holds besides its tasks: the brain, or a schema-1 node nobody tracked.
-async fn stop_the_rest(t: &Target, grace: Duration) -> anyhow::Result<usize> {
+async fn stop_the_rest(t: &Target, view: &RunView, grace: Duration) -> anyhow::Result<usize> {
     let mut killed = 0;
-    for (id, node) in &t.view.nodes {
+    for (id, node) in &view.nodes {
+        if node.kind == NodeKind::Brain {
+            if node.state.is_terminal() {
+                continue;
+            }
+            // The brain pidfile names its supervisor; the journaled pgid is a past turn's child.
+            let pidfile = t.paths.pidfile(*id);
+            let Some(pid) = liveness::owner(&pidfile) else {
+                continue;
+            };
+            stop_supervisor(&pidfile, pid, grace).await;
+            killed += 1;
+            println!(
+                "stopped the brain of run {} (supervisor pid {pid})",
+                t.paths.run
+            );
+            continue;
+        }
         let NodeState::Running { pid, pgid, .. } = node.state else {
             continue;
         };
-        if node.kind != NodeKind::Brain && t.tasks.contains(&node.logical) {
+        if t.tasks.contains(&node.logical) {
             continue;
         }
         // A recycled pid can belong to anything; the pidfile carries the start time.
-        if !crate::worker::liveness::is_ours(&t.paths.pidfile(*id)) {
-            if crate::worker::liveness::running(pid) {
+        if !liveness::is_ours(&t.paths.pidfile(*id)) {
+            if liveness::running(pid) {
                 println!(
                     "skipping node {}: pid {pid} is not ours any more",
                     id.short()
@@ -237,4 +256,23 @@ async fn stop_the_rest(t: &Target, grace: Duration) -> anyhow::Result<usize> {
         );
     }
     Ok(killed)
+}
+
+/// SIGTERM lets the supervisor cancel its own work and exit; SIGKILL once the grace runs out.
+async fn stop_supervisor(pidfile: &Utf8Path, pid: i32, grace: Duration) {
+    let target = Pid::from_raw(pid);
+    let gone = || liveness::owner(pidfile) != Some(pid);
+    if !grace.is_zero() {
+        let _ = kill(target, Signal::SIGTERM);
+        let deadline = Instant::now() + grace;
+        while Instant::now() < deadline {
+            if gone() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+    if !gone() {
+        let _ = kill(target, Signal::SIGKILL);
+    }
 }

@@ -350,7 +350,11 @@ async fn result(disp: &Arc<Dispatcher>, args: Value) -> Result<Value, RpcError> 
             task_verdict(&mut value, &view, logical, max);
             value
         }
-        None => journal_result(&view, logical),
+        None => {
+            let mut v = journal_result(&view, logical);
+            wrap_failures(&mut v, logical, max);
+            v
+        }
     };
     if let Some(obj) = value.as_object_mut() {
         obj.insert("attempt".into(), json!(attempt.map(|a| a.id.to_string())));

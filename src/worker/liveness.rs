@@ -18,18 +18,16 @@ pub fn write_pidfile(path: &Utf8Path, pid: i32) -> anyhow::Result<()> {
 
 /// PID-reuse safe: compares the recorded process start time, not just the pid.
 pub fn is_ours(path: &Utf8Path) -> bool {
-    let Ok(text) = std::fs::read_to_string(path) else {
-        return false;
-    };
+    owner(path).is_some()
+}
+
+/// The pid a pidfile names, while that process is still the one that wrote it.
+pub fn owner(path: &Utf8Path) -> Option<i32> {
+    let text = std::fs::read_to_string(path).ok()?;
     let mut parts = text.split_whitespace();
-    let Some(pid) = parts.next().and_then(|p| p.parse::<i32>().ok()) else {
-        return false;
-    };
-    let recorded = parts.next().and_then(|t| t.parse::<u64>().ok());
-    match (recorded, start_time(pid)) {
-        (Some(a), Some(b)) => a == b,
-        _ => false,
-    }
+    let pid = parts.next()?.parse::<i32>().ok()?;
+    let recorded = parts.next()?.parse::<u64>().ok()?;
+    (start_time(pid)? == recorded).then_some(pid)
 }
 
 #[allow(clippy::manual_async_fn)]

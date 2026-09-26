@@ -519,6 +519,9 @@ async fn cancel_node(app: &App, node: NodeId) {
     let Some(logical) = app.view.nodes.get(&node).map(|n| n.logical) else {
         return;
     };
+    if crate::dispatch::cancel::is_brain(&app.view, logical) {
+        return;
+    }
     let stop = crate::dispatch::cancel::Stop::Kill {
         grace: std::time::Duration::from_secs(5),
     };

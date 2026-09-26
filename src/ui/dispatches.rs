@@ -6,15 +6,13 @@ use crate::journal::inspect::{self, DispatchSummary, TaskDetail};
 use crate::journal::paths::RunPaths;
 use crate::journal::reader::Tailer;
 use crate::ui::fmt;
-use crate::ui::trace::failure_detail;
+use crate::ui::trace::{attempt_cells, failure_detail};
 use std::collections::BTreeMap;
 use std::io::Write;
 use std::time::Duration;
 use time::OffsetDateTime;
 
 const TITLE_WIDTH: usize = 34;
-const ACCOUNT_WIDTH: usize = 16;
-const MODEL_WIDTH: usize = 10;
 /// A dispatch tree deeper than this is a cycle in a damaged journal, not real nesting.
 const MAX_NESTING: usize = 8;
 
@@ -40,11 +38,7 @@ pub fn render_list(view: &RunView, o: ListOpts, now: OffsetDateTime) -> String {
     let failed = if o.failed { " failed" } else { "" };
     let mut out = format!("run {run}  {n}{failed} {noun}\n\n");
     if list.dispatches.is_empty() {
-        out.push_str(if o.failed {
-            "no failed dispatches\n"
-        } else {
-            "no dispatches recorded\n"
-        });
+        out.push_str(empty_line(o));
         return out;
     }
     out.push_str(&heading());
@@ -52,6 +46,14 @@ pub fn render_list(view: &RunView, o: ListOpts, now: OffsetDateTime) -> String {
         out.push_str(&row(d));
     }
     out
+}
+
+fn empty_line(o: ListOpts) -> &'static str {
+    if o.failed {
+        "no failed dispatches\n"
+    } else {
+        "no dispatches recorded\n"
+    }
 }
 
 fn keep(d: &DispatchSummary, o: ListOpts) -> bool {
@@ -193,22 +195,15 @@ fn task_block(view: &RunView, t: &TaskDetail, level: usize, now: OffsetDateTime,
         cost(&t.cost),
     ));
     for a in &t.attempts {
-        let account = a.account.as_ref().map_or("-", |a| a.0.as_str());
-        let outcome = match &a.failure {
-            Some(f) => crate::ui::trace::failure_summary(f),
-            None => fmt::phase_word(a.state).to_owned(),
+        let Some(rec) = view.nodes.get(&a.node) else {
+            continue;
         };
         let pid = a.pid.map(|p| format!("  pid {p}")).unwrap_or_default();
         out.push_str(&format!(
-            "{detail}attempt {}  {}  {}  {}  {:>7}  {outcome}{pid}\n",
+            "{detail}attempt {}  {}  {}{pid}\n",
             a.attempt,
             a.node.short(),
-            fmt::pad(&format!("{}/{account}", a.provider), ACCOUNT_WIDTH),
-            fmt::pad(a.model.as_deref().unwrap_or("-"), MODEL_WIDTH),
-            a.elapsed_ms.map_or_else(
-                || "-".to_owned(),
-                |ms| fmt::duration(Duration::from_millis(ms))
-            ),
+            attempt_cells(rec, a.elapsed_ms.map(Duration::from_millis)),
         ));
     }
     if let Some(reason) = &t.rejected {
@@ -301,11 +296,19 @@ impl Follower {
     pub fn finished(&self) -> bool {
         self.view.finished
     }
+
+    /// Nothing matched yet: text mode then owes the reader the empty-state line.
+    pub fn nothing_printed(&self) -> bool {
+        self.printed.is_empty()
+    }
 }
 
 pub async fn follow(paths: &RunPaths, opts: ListOpts) -> anyhow::Result<()> {
     let mut tailer = Tailer::open(&paths.journal())?;
     let mut follower = Follower::new(opts);
+    if !opts.json {
+        println!("run {}\n", paths.run.short());
+    }
     loop {
         let lines = tailer.poll().await?;
         let text = follower.ingest(&lines, OffsetDateTime::now_utc());
@@ -315,6 +318,9 @@ pub async fn follow(paths: &RunPaths, opts: ListOpts) -> anyhow::Result<()> {
             out.flush()?;
         }
         if follower.finished() {
+            if !opts.json && follower.nothing_printed() {
+                print!("{}", empty_line(opts));
+            }
             return Ok(());
         }
     }

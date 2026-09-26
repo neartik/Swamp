@@ -624,8 +624,6 @@ fn config_validate_counts_the_layer_the_invocation_added() {
     assert!(with_extra.contains("ok: 3 layers"), "{with_extra}");
 }
 
-/// P3 acceptance: `swamp cancel <dispatch>` from a second process stops every live node of
-/// that dispatch, journals each as cancelled, and the supervising run does not retry them.
 #[test]
 fn cancel_a_dispatch_from_a_second_process() {
     use std::time::Duration;
