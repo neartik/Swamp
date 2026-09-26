@@ -234,7 +234,7 @@ async fn stop_the_rest(t: &Target, view: &RunView, grace: Duration) -> anyhow::R
             continue;
         }
         // A recycled pid can belong to anything; the pidfile carries the start time.
-        if !liveness::is_ours(&t.paths.pidfile(*id)) {
+        if !t.paths.is_live(*id) {
             if liveness::running(pid) {
                 println!(
                     "skipping node {}: pid {pid} is not ours any more",

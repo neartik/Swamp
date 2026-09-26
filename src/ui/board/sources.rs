@@ -214,7 +214,7 @@ impl Sources {
         let now = board.now;
         for pane in &mut board.runs {
             let paths = pane.paths.clone();
-            pane.refresh_liveness(&|id| liveness::is_ours(&paths.pidfile(id)), now);
+            pane.refresh_liveness(&|id| paths.is_live(id), now);
         }
     }
 
@@ -308,7 +308,7 @@ impl Sources {
     fn alive(&self, run: RunId, board: &Board) -> bool {
         let paths = self.run_paths(run);
         let socket = paths.socket().exists();
-        let alive = |id: NodeId| liveness::is_ours(&paths.pidfile(id));
+        let alive = |id: NodeId| paths.is_live(id);
         if let Some(pane) = board.pane(run) {
             return is_live(&pane.view, &alive, socket);
         }

@@ -58,8 +58,7 @@ pub async fn run(ctx: &Ctx, args: &TraceArgs) -> anyhow::Result<i32> {
         let cutoff = time::OffsetDateTime::now_utc() - parse_duration(since)?;
         keep_since(&mut view, cutoff);
     }
-    let pidfiles = paths.clone();
-    view.mark_orphans(&move |id| crate::worker::liveness::is_ours(&pidfiles.pidfile(id)));
+    view.mark_orphans_in(&paths);
     ctx.out(&render(&view, &TraceOpts { node, ..opts }));
     Ok(0)
 }

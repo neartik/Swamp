@@ -30,10 +30,7 @@ pub fn render_list(view: &RunView, o: ListOpts, now: OffsetDateTime) -> String {
     if o.json {
         return format!("{}\n", pretty(&list));
     }
-    let run = view
-        .header
-        .as_ref()
-        .map_or_else(|| "?".to_owned(), |h| h.run.short());
+    let run = view.run_short();
     let n = list.dispatches.len();
     let noun = if n == 1 { "dispatch" } else { "dispatches" };
     let failed = if o.failed { " failed" } else { "" };
@@ -147,10 +144,7 @@ pub fn render_detail(view: &RunView, id: DispatchId, json: bool, now: OffsetDate
         return format!("{}\n", pretty(&detail));
     }
     let d = &detail.dispatch;
-    let run = view
-        .header
-        .as_ref()
-        .map_or_else(|| "?".to_owned(), |h| h.run.short());
+    let run = view.run_short();
     let mut out = format!(
         "dispatch {}  run {run}  seq {}  {}  caller {}",
         d.short,

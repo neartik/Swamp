@@ -3,7 +3,6 @@ use crate::journal::paths::RunPaths;
 use crate::journal::{JournalEvent, JournalHandle, RunView};
 use crate::model::core::{CancelSource, NodeKind, NodeState};
 use crate::model::dispatch::Phase;
-use crate::worker::liveness;
 use crate::worker::spawn::{Reaper, terminate};
 use camino::Utf8Path;
 use serde::{Deserialize, Serialize};
@@ -149,9 +148,7 @@ fn live_pgid(paths: &RunPaths, view: &RunView, logical: NodeId) -> Option<i32> {
         .into_iter()
         .rev()
         .find_map(|n| match n.state {
-            NodeState::Running { pgid, .. } if liveness::is_ours(&paths.pidfile(n.id)) => {
-                Some(pgid)
-            }
+            NodeState::Running { pgid, .. } if paths.is_live(n.id) => Some(pgid),
             _ => None,
         })
 }

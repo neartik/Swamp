@@ -20,8 +20,7 @@ pub async fn reap(paths: &Paths) -> anyhow::Result<Reaped> {
             Err(_) => continue,
         };
         let live = view.nodes.values().any(|n| {
-            matches!(n.state, crate::model::core::NodeState::Running { .. })
-                && crate::worker::liveness::is_ours(&rp.pidfile(n.id))
+            matches!(n.state, crate::model::core::NodeState::Running { .. }) && rp.is_live(n.id)
         });
         if live {
             continue;

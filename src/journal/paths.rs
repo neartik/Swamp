@@ -362,6 +362,10 @@ impl RunPaths {
     pub fn pidfile(&self, n: NodeId) -> Utf8PathBuf {
         self.node_dir(n).join("pid")
     }
+    /// The node's pidfile names a process that is still ours.
+    pub fn is_live(&self, n: NodeId) -> bool {
+        crate::worker::liveness::is_ours(&self.pidfile(n))
+    }
     pub fn result(&self, n: NodeId) -> Utf8PathBuf {
         self.node_dir(n).join("result.json")
     }

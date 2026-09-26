@@ -600,6 +600,18 @@ impl RunView {
         }
     }
 
+    /// `mark_orphans` against the run's own pidfiles.
+    pub fn mark_orphans_in(&mut self, paths: &crate::journal::paths::RunPaths) {
+        self.mark_orphans(&|id| paths.is_live(id));
+    }
+
+    /// The run's short id, `?` before its header is folded.
+    pub fn run_short(&self) -> String {
+        self.header
+            .as_ref()
+            .map_or_else(|| "?".to_owned(), |h| h.run.short())
+    }
+
     pub fn tree(&self) -> Vec<TreeRow> {
         let (roots, children) = self.logical_tree();
         let mut out = Vec::new();
@@ -823,8 +835,7 @@ impl Projection for LlmDigest {
 
     fn finish(mut self) -> Self::Out {
         if let Some(paths) = self.paths.clone() {
-            self.view
-                .mark_orphans(&|id| crate::worker::liveness::is_ours(&paths.pidfile(id)));
+            self.view.mark_orphans_in(&paths);
         }
         LlmDigest::render(&self.view, self.max_bytes, None)
     }
@@ -833,11 +844,7 @@ impl Projection for LlmDigest {
 impl LlmDigest {
     /// The digest of a folded view, optionally narrowed to one dispatch's tasks.
     pub fn render(view: &RunView, max_bytes: usize, dispatch: Option<DispatchId>) -> String {
-        let run = view
-            .header
-            .as_ref()
-            .map(|h| h.run.short())
-            .unwrap_or_else(|| "?".to_owned());
+        let run = view.run_short();
         let state = if view.finished { "finished" } else { "running" };
         let (t, scope) = match dispatch {
             Some(d) => (

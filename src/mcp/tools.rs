@@ -551,7 +551,7 @@ async fn load_view(disp: &Arc<Dispatcher>) -> Result<RunView, RpcError> {
     let paths = disp.journal.paths().clone();
     tokio::task::spawn_blocking(move || {
         let mut view = RunView::load(&paths.dir, false)?;
-        view.mark_orphans(&|id| crate::worker::liveness::is_ours(&paths.pidfile(id)));
+        view.mark_orphans_in(&paths);
         anyhow::Ok(view)
     })
     .await

@@ -91,8 +91,7 @@ impl App {
             self.view.apply(l);
         }
         if let Some(paths) = self.paths.clone() {
-            self.view
-                .mark_orphans(&|id| crate::worker::liveness::is_ours(&paths.pidfile(id)));
+            self.view.mark_orphans_in(&paths);
         }
         self.rows = self.view.tree();
         self.selected = self.selected.min(self.rows.len().saturating_sub(1));
