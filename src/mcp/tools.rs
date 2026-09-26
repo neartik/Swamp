@@ -227,13 +227,7 @@ async fn dispatch(disp: &Arc<Dispatcher>, seq: CallSeq, raw: Value) -> Result<Va
         .await;
     Ok(json!({
         "dispatch_id": out.id.to_string(),
-        "nodes": out.results.iter().map(|r| {
-            let mut v = result_json(disp, r);
-            if let Some(obj) = v.as_object_mut() {
-                obj.insert("logical".into(), json!(r.node.to_string()));
-            }
-            v
-        }).collect::<Vec<_>>(),
+        "nodes": out.results.iter().map(|r| result_json(disp, r)).collect::<Vec<_>>(),
         "running": out.results.iter().filter(|r| r.state == "running").count(),
     }))
 }

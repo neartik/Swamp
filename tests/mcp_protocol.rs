@@ -368,7 +368,6 @@ async fn dispatch_creates_nodes_journals_the_call_and_wraps_worker_text() {
     let dispatch = out["dispatch_id"].as_str().expect("a dispatch id");
     assert!(dispatch.starts_with("dsp_"), "{dispatch}");
     let dispatch: DispatchId = dispatch.parse().expect("the dispatch id parses back");
-    assert_eq!(node["logical"], node["node"]);
     let dispatch = json!(dispatch);
     assert_eq!(call["dispatch"], dispatch);
     assert_eq!(call["call_seq"], json!(1));
@@ -383,11 +382,7 @@ async fn dispatch_creates_nodes_journals_the_call_and_wraps_worker_text() {
         .expect("the dispatch is journaled");
     assert_eq!(issued["record"]["id"], dispatch);
     assert_eq!(issued["record"]["call_seq"], json!(1));
-    let logical: NodeId = node["logical"]
-        .as_str()
-        .expect("logical")
-        .parse()
-        .expect("id");
+    let logical: NodeId = node["node"].as_str().expect("node").parse().expect("id");
     assert_eq!(issued["record"]["tasks"][0]["logical"], json!(logical));
 
     h.server.abort();

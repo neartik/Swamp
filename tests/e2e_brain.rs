@@ -352,6 +352,13 @@ fn identical_dispatch_calls_are_distinct_dispatches() {
         let d = &view.dispatches[id];
         assert_eq!(d.state, DispatchState::Settled);
         assert_eq!(d.tasks.len(), 1);
+        let cost = d.cost.expect("a settled dispatch carries its cost");
+        let rollup = view.rollup(swamp::journal::fold::Scope::Dispatch(*id));
+        assert!(rollup.cost_complete, "{id}: {rollup:?}");
+        assert!(
+            (cost.usd - rollup.cost_usd).abs() < 1e-9,
+            "{id}: {cost:?} vs {rollup:?}"
+        );
     }
 
     // A waiting task is visible before it is leased or spawned.

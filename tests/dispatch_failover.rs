@@ -15,7 +15,7 @@ use swamp::journal::writer::{FsyncPolicy, Writer};
 use swamp::journal::{JournalHandle, Projection, RunView};
 use swamp::model::core::NodeState;
 use swamp::model::core::{
-    AccountId, LimitScope, NodeKind, Provider, SessionHandle, Tier, WorkspaceRef,
+    AccountId, Cost, CostBasis, LimitScope, NodeKind, Provider, SessionHandle, Tier, WorkspaceRef,
 };
 use swamp::model::dispatch::{DispatchState, NodeTransition, Phase};
 use swamp::model::failure::{Detector, Failure};
@@ -1031,7 +1031,25 @@ async fn a_cancelled_same_account_backoff_returns_at_once() {
 #[tokio::test]
 async fn a_rotate_retry_shares_its_logical_id_and_dispatch() {
     let f = fixture(TWO_ACCOUNTS).await;
-    let runner = Scripted::new(&f.root, vec![failed(rate_limited()), success()]);
+    let reported = |usd| {
+        Some(Cost {
+            usd,
+            basis: CostBasis::Reported,
+        })
+    };
+    let runner = Scripted::new(
+        &f.root,
+        vec![
+            RunOutcome {
+                cost: reported(0.1),
+                ..failed(rate_limited())
+            },
+            RunOutcome {
+                cost: reported(0.5),
+                ..success()
+            },
+        ],
+    );
     let disp = f.dispatcher(runner.clone()).await;
     let caller = NodeId(f.journal.run().0);
     let out = disp
@@ -1077,6 +1095,11 @@ async fn a_rotate_retry_shares_its_logical_id_and_dispatch() {
     );
     let r = view.rollup(Scope::Dispatch(out.id));
     assert_eq!((r.nodes, r.failed), (1, 0));
+    let cost = d.cost.expect("a settled dispatch carries its cost");
+    assert_eq!(cost.basis, CostBasis::Reported, "both attempts count");
+    assert!((cost.usd - 0.6).abs() < 1e-9, "{cost:?}");
+    assert!(r.cost_complete);
+    assert!((cost.usd - r.cost_usd).abs() < 1e-9, "{cost:?} vs {r:?}");
 }
 
 /// A task that waits out a pool-wide cooldown goes Queued, Blocked, Leased, then settles.
