@@ -6,7 +6,7 @@ use camino::Utf8PathBuf;
 use regex::RegexSet;
 use std::collections::BTreeMap;
 use std::str::FromStr;
-use swamp::config::FailurePatterns;
+use swamp::config::{FailurePatterns, load, resolve};
 use swamp::ids::{NodeId, NodeIds};
 use swamp::model::core::{
     ChangeKind, CostBasis, EvidenceSource, FinalSummary, LimitReached, LimitScope, LimitStatus,
@@ -217,34 +217,23 @@ fn the_brain_allows_every_registered_swamp_mcp_tool() {
     s.deny_tools = vec!["WebFetch".to_owned()];
     let argv = argv_of(&s);
 
-    let allowed: Vec<&String> = argv
-        .iter()
-        .skip_while(|a| *a != "--allowed-tools")
-        .skip(1)
-        .take_while(|a| !a.starts_with("--"))
-        .collect();
+    let allowed = values(&argv, "--allowed-tools");
     let registered = swamp::mcp::tools::qualified_names();
     assert!(!registered.is_empty(), "the tool registry is empty");
     for name in &registered {
         assert!(name.starts_with("mcp__swamp__"), "{name}");
         assert!(
-            allowed.contains(&name),
+            allowed.contains(&name.as_str()),
             "{name} is missing from {allowed:?}"
         );
     }
-    assert!(allowed.contains(&&"Read".to_owned()), "{allowed:?}");
+    assert!(allowed.contains(&"Read"), "{allowed:?}");
 
     // The read-only denials and the configured ones compose into one flag: a repeated
     // variadic option overwrites, which would have dropped one of the two lists.
-    let denied: Vec<&String> = argv
-        .iter()
-        .skip_while(|a| *a != "--disallowed-tools")
-        .skip(1)
-        .take_while(|a| !a.starts_with("--"))
-        .collect();
     assert_eq!(
-        denied,
-        vec!["Edit", "Write", "MultiEdit", "NotebookEdit", "WebFetch"]
+        values(&argv, "--disallowed-tools"),
+        ["Edit", "Write", "MultiEdit", "NotebookEdit", "WebFetch"]
     );
     assert_eq!(
         argv.iter().filter(|a| *a == "--disallowed-tools").count(),
@@ -315,12 +304,10 @@ fn readonly_isolation_denies_the_writing_tools() {
     let mut s = spec();
     s.isolation = IsolationMode::ReadOnly;
     let argv = argv_of(&s);
-    let denied: Vec<&String> = argv
-        .iter()
-        .skip_while(|a| *a != "--disallowed-tools")
-        .skip(1)
-        .collect();
-    assert_eq!(denied, vec!["Edit", "Write", "MultiEdit", "NotebookEdit"]);
+    assert_eq!(
+        values(&argv, "--disallowed-tools"),
+        ["Edit", "Write", "MultiEdit", "NotebookEdit"]
+    );
 }
 
 #[test]
@@ -940,4 +927,53 @@ fn a_recovered_run_credits_the_account_total_and_not_the_main_model() {
         credited.billable() > st.usage.billable(),
         "the side-call is missing from what resume would credit"
     );
+}
+
+fn default_worker(iso: IsolationMode) -> LaunchSpec {
+    let cfg = resolve::from_schema(load::merge(vec![load::default_layer()]));
+    let w = &cfg.providers[&Provider::Anthropic].worker;
+    LaunchSpec {
+        permission_mode: w.permission_mode.clone().unwrap_or_default(),
+        allow_tools: w.allow_tools.clone(),
+        deny_tools: w.deny_tools.clone(),
+        extra_args: w.args_for(iso),
+        isolation: iso,
+        ..spec()
+    }
+}
+
+fn values<'a>(argv: &'a [String], flag: &str) -> Vec<&'a str> {
+    assert!(argv.iter().any(|a| a == flag), "{flag} missing: {argv:?}");
+    argv.iter()
+        .skip_while(|a| *a != flag)
+        .skip(1)
+        .take_while(|a| !a.starts_with("--"))
+        .map(String::as_str)
+        .collect()
+}
+
+#[test]
+fn the_default_worker_accepts_edits_and_may_run_bash_without_bypassing_permissions() {
+    let argv = argv_of(&default_worker(IsolationMode::Worktree));
+    assert_eq!(values(&argv, "--permission-mode"), ["acceptEdits"]);
+    assert_eq!(values(&argv, "--permission-prompts"), ["none"]);
+    assert_eq!(
+        values(&argv, "--allowed-tools"),
+        ["Bash", "Read", "Grep", "Glob", "Edit", "Write", "MultiEdit"]
+    );
+    assert!(
+        !argv
+            .iter()
+            .any(|a| a.contains("bypassPermissions") || a.contains("dangerously")),
+        "{argv:?}"
+    );
+}
+
+#[test]
+fn read_only_isolation_still_denies_the_edit_tools_the_default_allows() {
+    let argv = argv_of(&default_worker(IsolationMode::ReadOnly));
+    let denied = values(&argv, "--disallowed-tools");
+    for tool in ["Edit", "Write", "MultiEdit", "NotebookEdit"] {
+        assert!(denied.contains(&tool), "{tool} not denied: {argv:?}");
+    }
 }

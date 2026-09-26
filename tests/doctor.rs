@@ -394,8 +394,6 @@ async fn a_permission_mode_that_denies_bash_warns_until_bash_is_allowed() {
     );
 }
 
-/// The shipped defaults are the recommended pair for both the worker and the brain, so a fresh
-/// install starts with no permission warning, offline or in `swamp chat`.
 #[tokio::test]
 async fn the_default_config_gives_no_permission_warning() {
     let f = Fixture::new();

@@ -249,8 +249,6 @@ fn a_layer_only_contributes_the_keys_it_sets() {
     assert_eq!(with_env.limits.max_depth, Some(9));
 }
 
-/// A fresh install must give the Anthropic worker the tools it needs to run tests and write
-/// files, without reaching for bypassPermissions.
 #[test]
 fn the_default_anthropic_worker_may_run_bash_under_accept_edits() {
     let sb = Sandbox::new();

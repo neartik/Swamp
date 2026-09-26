@@ -637,8 +637,7 @@ pub(crate) async fn settle<T>(mut task: JoinHandle<T>, grace: Duration) -> bool 
     false
 }
 
-/// Kills the child if it is still there and reaps it within the grace period: the brain owns
-/// a terminal, not a worktree.
+/// Kills the child and reaps it within the grace period.
 pub(crate) async fn terminate(mut child: Child, grace: Duration) -> anyhow::Result<()> {
     if child.try_wait()?.is_some() {
         return Ok(());

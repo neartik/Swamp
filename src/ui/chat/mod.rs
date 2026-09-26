@@ -171,6 +171,13 @@ async fn plain_slash(command: &str, disp: &Arc<Dispatcher>, ctx: &Ctx) -> anyhow
     Ok(quit)
 }
 
+/// A dead brain cannot be interrupted, and that must not stop the chat from quitting.
+pub async fn interrupt(brain: &mut dyn Brain) {
+    if let Err(e) = brain.interrupt().await {
+        tracing::warn!("interrupt failed: {e}");
+    }
+}
+
 async fn interactive(
     mut brain: Box<dyn Brain>,
     disp: Arc<Dispatcher>,
@@ -284,7 +291,7 @@ async fn interactive(
                     term.commit(lines)?;
                 }
                 Effect::Send(text) => brain.send(&text).await?,
-                Effect::Interrupt => brain.interrupt().await?,
+                Effect::Interrupt => interrupt(brain.as_mut()).await,
                 Effect::CancelAll => {
                     let n = disp.cancel_all();
                     effects.extend(app.note_cancelled(n));

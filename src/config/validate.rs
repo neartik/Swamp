@@ -204,15 +204,29 @@ pub fn problems(cfg: &Config) -> Vec<Problem> {
     {
         push("brain.permission_mode".into(), "must not be empty".into());
     }
+    let defaults = crate::config::load::default_layer().schema.providers;
     for (p, pc) in &cfg.providers {
-        for (key, value) in [
-            ("permission_mode", &pc.worker.permission_mode),
-            ("sandbox", &pc.worker.sandbox),
+        let builtin = defaults.get(p).map(|d| &d.worker);
+        for (key, value, default) in [
+            (
+                "permission_mode",
+                &pc.worker.permission_mode,
+                builtin.and_then(|w| w.permission_mode.as_deref()),
+            ),
+            (
+                "sandbox",
+                &pc.worker.sandbox,
+                builtin.and_then(|w| w.sandbox.as_deref()),
+            ),
         ] {
             if value.as_deref().is_some_and(str::is_empty) {
+                let hint = match default {
+                    Some(d) => format!("remove the key to fall back to the built-in \"{d}\""),
+                    None => "remove the key to leave it to the CLI".to_owned(),
+                };
                 push(
                     format!("providers.{p}.worker.{key}"),
-                    "must not be empty; remove the key to leave it to the CLI".into(),
+                    format!("must not be empty; {hint}"),
                 );
             }
         }

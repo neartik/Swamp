@@ -4,6 +4,7 @@
 mod common;
 
 use camino::Utf8PathBuf;
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use serde_json::Value;
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -15,6 +16,10 @@ use swamp::journal::paths::Paths;
 use swamp::journal::writer::FsyncPolicy;
 use swamp::journal::{Journal, JournalHandle};
 use swamp::model::core::Provider;
+use swamp::ui::chat::app::{App, Effect, Msg};
+use swamp::ui::chat::blocks::WelcomeInfo;
+use swamp::ui::chat::input::History;
+use swamp::ui::chat::theme::Theme;
 use swamp::{RunId, RunPaths};
 use tokio::time::Instant;
 
@@ -46,6 +51,13 @@ cat "$dir/stream.jsonl"
 /// Never reads stdin and never exits: EOF on fd0 is not how this CLI ends a turn.
 const FAKE_DEAF: &str = r#"#!/bin/sh
 exec sleep 600
+"#;
+
+/// Fails its first turn and exits, leaving the brain's stdin open onto a dead pipe.
+const FAKE_DIES: &str = r#"#!/bin/sh
+dir=$(dirname "$0")
+read -r line
+sed 's/"is_error":false/"is_error":true/' "$dir/stream.jsonl"
 "#;
 
 /// `limits.grace_period` in every test config.
@@ -328,6 +340,48 @@ async fn the_session_is_journaled_before_the_process_starts() {
     Box::new(brain).shutdown().await.expect("shutdown");
 }
 
+#[tokio::test]
+async fn ctrl_d_after_a_fatal_still_shuts_the_dead_brain_down() {
+    let f = Fixture::new(Provider::Anthropic, FAKE_DIES, "claude-stream-sample.jsonl").await;
+    let mut brain = f.brain(Provider::Anthropic).await;
+    brain.start().await.expect("start");
+    brain.send("ping").await.expect("send");
+    let events = turn(&mut brain).await;
+    assert!(
+        events.last().is_some_and(|e| e.starts_with("fatal")),
+        "{events:?}"
+    );
+    let mut dead = false;
+    for _ in 0..100 {
+        if brain.interrupt().await.is_err() {
+            dead = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(dead, "writing to the dead brain never failed");
+
+    let mut app = App::new(
+        f.paths.run,
+        Theme::plain(),
+        WelcomeInfo::default(),
+        History::load(None, 0),
+        &f.cfg,
+    );
+    let effects = app.reduce(Msg::Key(KeyEvent::new(
+        KeyCode::Char('d'),
+        KeyModifiers::CONTROL,
+    )));
+    assert!(matches!(effects.last(), Some(Effect::Quit(0))));
+    for effect in effects {
+        if matches!(effect, Effect::Interrupt) {
+            swamp::ui::chat::interrupt(brain.as_mut()).await;
+        }
+    }
+    brain.shutdown().await.expect("shutdown");
+    f.journal_after("node_finished").await;
+}
+
 // ---------------------------------------------------------------- openai
 
 #[tokio::test]
@@ -383,8 +437,7 @@ async fn the_resume_per_turn_brain_resumes_the_thread_it_was_given() {
 
 // ---------------------------------------------------------------- shutdown
 
-/// Shutdown is bounded by `limits.grace_period`, never by the 15 minute turn timeout: a CLI
-/// that ignores its stdin closing must not hang `swamp chat` on the way out.
+/// Shutdown is bounded by grace_period, not the turn timeout.
 async fn shutdown_is_bounded(provider: Provider) {
     let f = Fixture::new(provider, FAKE_DEAF, "claude-stream-sample.jsonl").await;
     let mut brain = f.brain(provider).await;
@@ -441,8 +494,6 @@ fn the_system_prompt_states_the_contract() {
     assert!(!prompt.contains('\u{2014}'), "no em dashes");
 }
 
-/// The brain delegates early: a small read budget before the first dispatch, investigation
-/// sent out as a low tier task, and low as the starting tier.
 #[test]
 fn the_prompt_sets_a_read_budget_and_starts_at_low_tier() {
     let mut cfg = config(Provider::Anthropic, &Utf8PathBuf::from("/bin/true"));

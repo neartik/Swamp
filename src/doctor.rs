@@ -508,8 +508,7 @@ fn unsafe_args(cfg: &Config, out: &mut Vec<Check>) {
 /// allowed Bash is the recommended pair, because `auto` denies the file writes as well.
 const BASH_DENYING_MODES: [&str; 4] = ["acceptEdits", "plan", "manual", "dontAsk"];
 
-/// The permission check alone: offline and instant, so `swamp chat` and `swamp run` can
-/// afford it at every startup.
+/// The permission check alone, without probing.
 pub fn permission_checks(cfg: &Config) -> Vec<Check> {
     let mut out = Vec::new();
     permission_modes(cfg, &mut out);
