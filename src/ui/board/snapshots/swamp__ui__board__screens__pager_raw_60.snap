@@ -1,0 +1,14 @@
+---
+source: src/ui/board/screens.rs
+expression: raw
+---
+ raw journal  run 9g5fav · last 200 lines
+────────────────────────────────────────────────────────────
+{"seq":1,"at":"2023-11-14T22:12:20Z","run":"01ARZ3NDEKTSV4R…
+{"seq":2,"at":"2023-11-14T22:12:28Z","run":"01ARZ3NDEKTSV4R…
+{"seq":3,"at":"2023-11-14T22:13:20Z","run":"01ARZ3NDEKTSV4R…
+
+
+
+────────────────────────────────────────────────────────────
+esc back · ↑↓ scroll · g G ends · q quit

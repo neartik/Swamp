@@ -47,9 +47,9 @@ pub enum Command {
     Dispatches(DispatchesArgs),
     /// One dispatch: its task tree, attempts and rejection reasons
     Dispatch(DispatchArgs),
-    /// Live TUI, read-only, attachable from another terminal
+    /// Live TUI, attachable from another terminal; k cancels after a y / n
     Watch(WatchArgs),
-    /// Read-only dispatch board: which account works on what, right now
+    /// Dispatch board: what every live dispatch is doing and what is stuck, right now
     Board(BoardArgs),
     /// List runs, newest first
     Runs(RunsArgs),

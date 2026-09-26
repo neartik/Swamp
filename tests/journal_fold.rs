@@ -1201,7 +1201,7 @@ fn a_node_whose_process_exited_is_never_an_orphan() {
 
 #[test]
 fn the_board_draws_tasks_that_never_reached_an_attempt() {
-    use swamp::ui::board::model::{RunPane, Section};
+    use swamp::ui::board::model::RunPane;
     use swamp::ui::board::sources::Tail;
 
     let (a, c, d) = (nid(1), nid(3), nid(4));
@@ -1215,24 +1215,32 @@ fn the_board_draws_tasks_that_never_reached_an_attempt() {
         Tail::detached(dir.join("journal.jsonl").as_str()),
     );
     pane.apply(&schema_2());
-    let rows = pane.rows();
     let row = |id: NodeId| {
-        rows.iter()
-            .find(|r| r.logical == id)
-            .unwrap_or_else(|| panic!("no row for {id}: {rows:?}"))
+        pane.node_row(id)
+            .unwrap_or_else(|| panic!("no row for {id}"))
     };
 
     assert!(matches!(row(c).state, NodeState::Rejected { .. }));
-    assert_eq!(row(c).section(), Section::Recent);
     assert_eq!((row(c).title.as_str(), row(c).attempt), ("docs", 0));
+    assert_eq!(row(c).elapsed(at(100)), None, "a refused task never waited");
     assert_eq!(row(d).state, NodeState::Queued);
-    assert_eq!(row(d).section(), Section::Waiting);
     assert_eq!(
         row(d).created_at,
         at(0),
         "a waiting row counts from its dispatch"
     );
     assert_eq!(row(a).state, NodeState::Succeeded);
+
+    let rows = pane.run_rows(at(10));
+    let grouped: Vec<NodeId> = rows
+        .active
+        .iter()
+        .chain(&rows.recent)
+        .flat_map(|g| g.tasks.iter().map(|t| t.row.logical))
+        .collect();
+    for id in [a, c, d] {
+        assert!(grouped.contains(&id), "{id} sits under its dispatch");
+    }
 }
 
 #[test]

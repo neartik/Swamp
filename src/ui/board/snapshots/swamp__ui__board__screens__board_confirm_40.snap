@@ -1,6 +1,6 @@
 ---
 source: src/ui/board/screens.rs
-expression: narrow
+expression: text
 ---
 swamp board              observed 4s ago
 2 running · 1 stuck · 1 queued · ~$0.43
@@ -27,4 +27,4 @@ swamp board              observed 4s ago
     alt   quota stop (93%)
 
 
-↑↓ select · k cancel · ? keys · q quit
+cancel 9g5f04 "rebuild the index"? y / n

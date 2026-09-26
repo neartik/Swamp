@@ -1,6 +1,6 @@
 ---
 source: src/ui/board/screens.rs
-expression: medium
+expression: text
 ---
 swamp board   2 running · 1 stuck · ~$0.43 · observed 4s ago
 ────────────────────────────────────────────────────────────
@@ -8,7 +8,10 @@ swamp board   2 running · 1 stuck · ~$0.43 · observed 4s ago
 
   ▾ #1 9g5f18 · 2 running · 1 blocked          3m20s  ~$0.34
     ⠋ 9g5f01   add pagination to /u… main      3m10s  ~$0.08
-▌   ⠙ 9g5f09·2 backfill the users i… alt       2m48s  ~$0.21
+▌     ▾ #3 9g5f1k · by 9g5f01 · 2 queued       1m02s
+        · 9g5f1m   split the handler           1m02s
+        · 9g5f1n   write the tests             1m02s
+    ⠙ 9g5f09·2 backfill the users i… alt       2m48s  ~$0.21
     ⏸ 9g5f04   rebuild the index               3m20s
       until 22:54 · main at capacity · alt quota stop
     · 9g5f0a   write the changelog             3m20s
@@ -21,10 +24,10 @@ swamp board   2 running · 1 stuck · ~$0.43 · observed 4s ago
   ◐ alt         1/-   5h ▇▇▇▇▇▇▇▇▇░  93% ↻ 12m     7d  54%
   ✘ codex-main  0/2   cooling until 23:20
 ────────────────────────────────────────────────────────────
-  9g5f09·2 → alt   score .41 = util .93×.50 + load .33×.30 +
-                   share .12×.15 − weight .00 − idle .02
-                   passed over (now): main at capacity (2/2)
-                   · codex-main cooling until 23:20
-                   attempt 1 9g5f08 on main: rate_limited
-                   (five_hour) after 41s
+  #3 9g5f1k · by 9g5f01 · open · 1m02s ago
+  2 tasks · 2 queued
+  swamp dispatch 9g5f1k
+
+
+
 ↑↓ select · k cancel · enter open · r raw · ? keys · q quit

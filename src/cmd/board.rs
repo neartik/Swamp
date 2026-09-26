@@ -1,13 +1,13 @@
 use crate::cli::{BoardArgs, WatchArgs};
 use crate::cmd::Ctx;
 use crate::ui::board::sources::{Scope, Sources};
-use crate::ui::board::{app, render};
+use crate::ui::board::{app, model, render};
 use crate::ui::chat::blocks::text_of;
 use crate::ui::chat::theme::Theme;
 use std::time::{Duration, Instant};
 
-/// The read-only dispatch board of `docs/BOARD.md`. It tails journals and reads
-/// `accounts.json`; it never talks to a supervisor, so it is safe to leave open forever.
+/// The dispatch board of `docs/BOARD.md`. It tails journals and reads `accounts.json`; it
+/// never talks to a supervisor, and the one thing it changes is a confirmed cancel.
 pub async fn run(ctx: &Ctx, args: &BoardArgs) -> anyhow::Result<i32> {
     let scope = match (&args.run, args.all) {
         (Some(spec), _) => Scope::Pinned(ctx.paths.resolve_run(spec)?),
@@ -26,7 +26,10 @@ pub async fn run(ctx: &Ctx, args: &BoardArgs) -> anyhow::Result<i32> {
     }
 
     if args.once {
-        let board = sources.board(Instant::now())?;
+        let mut board = sources.board(Instant::now())?;
+        if let Some(sel) = model::attention(&board.rows()) {
+            board.selected = sel;
+        }
         let width = terminal_width();
         let theme = Theme::detect(ctx.color, ctx.cfg.ui.chat_theme.as_deref());
         let lines = render::frame(&board, width, &theme, 0, ctx.cfg.quota_max_age());

@@ -1,4 +1,4 @@
-Read-only dispatch board: which account works on what, right now
+Dispatch board: what every live dispatch is doing and what is stuck, right now
 
 Usage: swamp board [OPTIONS]
 
