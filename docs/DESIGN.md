@@ -321,6 +321,12 @@ macro_rules! ulid_id {
 }
 ulid_id!(RunId, "run_");
 ulid_id!(NodeId, "nd_");
+ulid_id!(DispatchId, "dsp_");   // DispatchId::LEGACY (the nil ULID) holds schema-1 nodes
+
+/// Per-run and monotonic: the n-th MCP tool call of a run, starting at 1.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct CallSeq(pub u64);
 
 /// `claude --session-id` requires a valid UUID, so every node carries a paired UUID
 /// alongside its ULID. Both are journaled; neither is derived from the other.
@@ -369,11 +375,14 @@ pub enum NodeState {
     Succeeded,
     Failed { failure: Failure },
     Cancelled { by: CancelSource },
+    /// Refused by a hard dispatch limit before it was ever queued.
+    Rejected { reason: Failure },
 }
 
 impl NodeState {
     pub fn is_terminal(&self) -> bool {
-        matches!(self, Self::Succeeded | Self::Failed { .. } | Self::Cancelled { .. })
+        matches!(self, Self::Succeeded | Self::Failed { .. } | Self::Cancelled { .. }
+                     | Self::Rejected { .. })
     }
 }
 
@@ -661,6 +670,10 @@ pub struct NodeRecord {
     /// Byte offset consumed so far in nodes/<id>/stream.jsonl. Restart resumes exactly here.
     pub stream_offset: u64,
     pub unparsed_lines: u32,
+    /// Nesting depth below the run root: the brain's workers are 1. Zero in schema 1.
+    #[serde(default)] pub depth: u32,
+    /// The dispatch that created this node's logical task. None in schema 1.
+    #[serde(default)] pub dispatch: Option<DispatchId>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1720,7 +1733,7 @@ with `swamp accounts reset <id>`. Nothing deletes them silently.
   runs/<run_id>/
     run.json                              # header: cwd, git HEAD, config hash, swamp version, argv
     journal.jsonl                         # THE tree: append-only JournalLine stream
-    tools/                                # the arguments of every brain tool call, one file per distinct payload (<tool>-<sha16>.json); results live in the journal
+    tools/                                # the arguments of every brain tool call, one file per call (<call_seq>-<tool>.json, never overwritten); results live in the journal
     nodes/<node_short>/                     # the ATTEMPT id; the branch keeps the LOGICAL one
       prompt.md                           # the exact bytes fed to fd0
       stream.jsonl                        # RAW provider stdout, verbatim, never rewritten
@@ -1779,7 +1792,10 @@ pub enum JournalEvent {
     /// Git's list: paths relative to the worktree root, counts from `--numstat`. The event
     /// stream's absolute, count-free list is only the fallback when there is no diff.
     NodeFiles { files: Vec<FileChange> },
-    NodeBlocked { #[serde(with = "time::serde::rfc3339")] until: OffsetDateTime, why: String },
+    /// `why` is for display; `ineligible` is the same verdict per account, from the gate
+    /// `dispatch::policy` scores with.
+    NodeBlocked { #[serde(with = "time::serde::rfc3339")] until: OffsetDateTime, why: String,
+                  #[serde(default)] ineligible: Vec<(AccountId, Ineligible)> },
     NodeRetry { attempt: u32, reason: Failure, rotate: bool },
     ProviderSwitch { from: Provider, to: Provider },
     WorktreeCreated { path: Utf8PathBuf, branch: String, base: String },
@@ -1797,7 +1813,27 @@ pub enum JournalEvent {
     AccountUsage { account: AccountId, window: Usage, lifetime: Usage,
                    window_key: Option<WindowKey>, rolled: bool, source: Option<QuotaSource> },
     BrainTurn { role: TurnRole, text: String },
-    BrainToolCall { tool: String, args_sha256: String, args_path: Utf8PathBuf },
+    /// `dispatch` is set for `swamp_dispatch` only, and names the dispatch the call issued.
+    BrainToolCall { tool: String, args_sha256: String, args_path: Utf8PathBuf,
+                    #[serde(default)] call_seq: Option<CallSeq>,
+                    #[serde(default)] dispatch: Option<DispatchId> },
+    // ---- schema 2 ----
+    /// Durable, before any task of the dispatch starts. Line node: the caller.
+    DispatchIssued { record: Box<DispatchRecord> },
+    /// Durable, before the task waits for a lease, so a waiting task is visible before
+    /// attempt 1 exists. Line node: the logical id.
+    TaskQueued { logical: NodeId, dispatch: Option<DispatchId>, title: String, tier: Tier,
+                 depth: u32 },
+    /// A hard limit refused the task (deps, max_depth, max_nodes_per_run); it is never queued.
+    DispatchRejected { dispatch: DispatchId, logical: NodeId, reason: Failure },
+    /// Line node: a logical task (Queued -> Blocked -> Leased, back to Queued on a rotation,
+    /// then terminal) or an attempt (Leased -> Running -> terminal). `from` is a payload-free
+    /// `Phase`; `to` carries the full state. Never journaled out of a terminal state.
+    NodeStateChanged { from: Phase, to: NodeState, why: String },
+    /// The worker process is gone. `ProcessStarted` without it, and a dead pid, is Orphaned.
+    ProcessExited { code: Option<i32>, signal: Option<i32> },
+    /// Every task of the dispatch has ended. Line node: the caller.
+    DispatchSettled { dispatch: DispatchId, counts: DispatchCounts, cost: Option<Cost> },
     Adopted { into: String, commit: String, conflicts: Vec<Utf8PathBuf> },
     Note { author: NoteAuthor, text: String },
     /// Written on graceful shutdown. Its ABSENCE is what marks a run interrupted.
@@ -1805,7 +1841,27 @@ pub enum JournalEvent {
 }
 ```
 
-`schema: u32` in `RunStarted` is the compatibility marker. Once users have traces, `JournalEvent`
+The dispatch model (`model/dispatch.rs`):
+
+```rust
+pub struct DispatchRecord {
+    pub id: DispatchId, pub run: RunId,
+    pub caller: NodeId,              // the brain for swamp_dispatch; the run root for --no-brain
+    pub call_seq: Option<CallSeq>,   // None outside an MCP tool call
+    pub wait: bool, pub max_wait_s: Option<u64>,
+    pub tasks: Vec<TaskRef>,         // logical ids are assigned before anything runs
+    #[serde(with = "time::serde::rfc3339")] pub at: OffsetDateTime,
+}
+pub struct TaskRef { pub logical: NodeId, pub title: String, pub tier: Tier, pub provider: Provider }
+pub enum DispatchState { Open, Settled }
+pub struct DispatchCounts { pub succeeded: u32, pub failed: u32, pub cancelled: u32, pub rejected: u32 }
+pub enum Phase { Queued, Blocked, Leased, Running, Succeeded, Failed, Cancelled, Rejected }
+pub struct NodeTransition { pub from: Phase, pub to: NodeState, pub why: String }
+```
+
+`schema: u32` in `RunStarted` is the compatibility marker; it is 2 since the dispatch events.
+Schema 2 is additive: a schema-1 journal folds to the identical tree, with its nodes in the
+`DispatchId::LEGACY` bucket. Once users have traces, `JournalEvent`
 cannot break: every new field gets `#[serde(default)]`, every enum gets `#[serde(other)]` on the read
 path, and changes are additive only. Renaming a variant is a breaking change and is treated as one.
 
@@ -1858,6 +1914,11 @@ pub struct RunView {
     pub roots: Vec<NodeId>,
     pub by_logical: BTreeMap<NodeId, Vec<NodeId>>,   // attempt chains, collapsed in the tree view
     pub accounts: BTreeMap<AccountId, AccountState>,
+    pub dispatches: BTreeMap<DispatchId, DispatchView>, // plus DispatchId::LEGACY for schema 1
+    pub tasks: BTreeMap<NodeId, TaskView>,           // logical tasks, queued and rejected included
+    pub transitions: BTreeMap<NodeId, Vec<NodeTransition>>,
+    pub exited: BTreeSet<NodeId>,                    // ProcessExited seen
+    pub call_seq: Option<CallSeq>,                   // highest tool call seen
     pub events: BTreeMap<NodeId, Vec<WorkerEvent>>,  // only when with_events
     pub totals: Usage,
     pub cost_usd: f64,
@@ -1870,10 +1931,17 @@ impl RunView {
     /// Pure and idempotent: replaying the same prefix always yields the same state.
     pub fn apply(&mut self, l: &JournalLine);
     pub fn load(dir: &Utf8Path, with_events: bool) -> anyhow::Result<Self>;
-    /// Running nodes with no NodeFinished and a dead pid become Orphaned.
-    pub fn mark_orphans(&mut self);
+    /// Running nodes with no ProcessExited, no NodeFinished and a dead pid become Orphaned.
+    pub fn mark_orphans(&mut self, alive: &dyn Fn(NodeId) -> bool);
     pub fn tree(&self) -> Vec<TreeRow>;
+    /// The latest attempt's state while it is live, else the task's journaled one.
+    pub fn state_of(&self, logical_or_attempt: NodeId) -> Option<NodeState>;
+    pub fn attempts(&self, logical_or_attempt: NodeId) -> Vec<&NodeRecord>;
+    /// Nodes, failures, rejections, tokens and cost of a dispatch, a task or a subtree.
+    pub fn rollup(&self, scope: Scope) -> Totals;
 }
+
+pub enum Scope { Dispatch(DispatchId), Task(NodeId), Subtree(NodeId) }
 
 /// Live tail: yields historical lines first, then new ones. Byte-offset poll at 150ms.
 /// No filesystem-watcher dependency for a file whose path and writer we already know.
