@@ -1,5 +1,6 @@
 pub mod board;
 pub mod chat;
+pub mod dispatches;
 pub mod fmt;
 pub mod trace;
 pub mod usage;

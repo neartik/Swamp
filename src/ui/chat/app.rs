@@ -1,7 +1,7 @@
 use crate::brain::BrainEvent;
 use crate::config::schema::AccountCfg;
 use crate::dispatch::account::AccountState;
-use crate::ids::{NodeId, RunId};
+use crate::ids::{DispatchId, NodeId, RunId};
 use crate::journal::fold::RunView;
 use crate::journal::record::{JournalEvent, JournalLine};
 use crate::model::core::{AccountId, NodeState, Provider, Tier};
@@ -11,7 +11,7 @@ use crate::ui::chat::markdown::MdStream;
 use crate::ui::chat::theme::{Glyph, Role, Theme};
 use crate::ui::chat::workers::{Batch, brain_children, expected_tasks};
 use crate::ui::chat::{slash, spinner};
-use crate::ui::{fmt, trace, watch};
+use crate::ui::{dispatches, fmt, trace, watch};
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::text::Line;
 use std::str::FromStr;
@@ -53,7 +53,10 @@ pub enum Effect {
     CancelAll,
     Cancel(NodeId),
     /// `/trace` needs the event stream, which the board deliberately does not keep.
-    Trace(Option<NodeId>),
+    Trace {
+        node: Option<NodeId>,
+        dispatch: Option<DispatchId>,
+    },
     Clear,
     Quit(i32),
     /// §3.2: one out-of-band quota probe per account whose reading has gone stale.
@@ -913,9 +916,14 @@ impl App {
                 let body = trace::render(&self.view, &trace::TraceOpts::default());
                 vec![self.output("", lines_of(&body))]
             }
-            "trace" => {
-                let node = arg.as_deref().and_then(|a| self.find_node(a));
-                vec![Effect::Trace(node)]
+            "trace" => self.trace(arg.as_deref()),
+            "dispatches" => {
+                let opts = dispatches::ListOpts {
+                    failed: arg.as_deref() == Some("--failed"),
+                    json: false,
+                };
+                let body = dispatches::render_list(&self.view, opts, self.now);
+                vec![self.output("", lines_of(&body))]
             }
             "accounts" => {
                 let body = self.accounts_body();
@@ -1019,6 +1027,40 @@ impl App {
             }
             Err(_) => {
                 self.note("/tier takes low, mid or high");
+                Vec::new()
+            }
+        }
+    }
+
+    /// A node narrows the trace to that node, a dispatch id to that dispatch's tasks.
+    fn trace(&mut self, arg: Option<&str>) -> Vec<Effect> {
+        let Some(spec) = arg else {
+            return vec![Effect::Trace {
+                node: None,
+                dispatch: None,
+            }];
+        };
+        if let Some(node) = self.find_node(spec) {
+            return vec![Effect::Trace {
+                node: Some(node),
+                dispatch: None,
+            }];
+        }
+        match crate::journal::inspect::match_dispatches(&self.view, spec)[..] {
+            [one] => vec![Effect::Trace {
+                node: None,
+                dispatch: Some(one),
+            }],
+            [] => {
+                self.note(format!(
+                    "no node or dispatch matches {spec} · try /dispatches"
+                ));
+                Vec::new()
+            }
+            _ => {
+                self.note(format!(
+                    "{spec} names more than one dispatch · try /dispatches"
+                ));
                 Vec::new()
             }
         }

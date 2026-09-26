@@ -1,4 +1,4 @@
-use crate::ids::NodeId;
+use crate::ids::{DispatchId, NodeId};
 use crate::journal::fold::{RunView, TreeRow};
 use crate::journal::paths::RunPaths;
 use crate::journal::reader::Tailer;
@@ -7,7 +7,7 @@ use crate::model::core::{NodeKind, NodeState};
 use crate::model::event::WorkerEvent;
 use crate::model::failure::{Detector, Failure};
 use crate::model::node::NodeRecord;
-use crate::ui::fmt;
+use crate::ui::{dispatches, fmt};
 use serde_json::{Map, Value, json};
 use std::collections::BTreeMap;
 use std::io::Write;
@@ -26,6 +26,10 @@ pub struct TraceOpts {
     pub depth: Option<u32>,
     pub failed: bool,
     pub json: bool,
+    /// Only this dispatch's tasks and what hangs below them.
+    pub dispatch: Option<DispatchId>,
+    /// One section per dispatch instead of one tree.
+    pub by_dispatch: bool,
 }
 
 pub fn render(view: &RunView, o: &TraceOpts) -> String {
@@ -35,11 +39,10 @@ pub fn render(view: &RunView, o: &TraceOpts) -> String {
     let mut out = String::new();
     out.push_str(&header(view));
     let rows = visible(view, o);
-    for (i, row) in rows.iter().enumerate() {
-        if row.depth > 0 {
-            out.push_str(&format!("{}|\n", "  ".repeat(row.depth as usize)));
-        }
-        out.push_str(&block(view, row, more_siblings(&rows, i), o));
+    if o.by_dispatch {
+        out.push_str(&grouped(view, rows, o));
+    } else {
+        out.push_str(&blocks(view, &rows, o));
     }
     if o.node.is_none() {
         out.push_str(&footer(view));
@@ -47,10 +50,63 @@ pub fn render(view: &RunView, o: &TraceOpts) -> String {
     out
 }
 
-/// Rows the flags leave standing, already filtered by depth, node and failure.
+fn blocks(view: &RunView, rows: &[TreeRow], o: &TraceOpts) -> String {
+    let mut out = String::new();
+    for (i, row) in rows.iter().enumerate() {
+        if row.depth > 0 {
+            out.push_str(&format!("{}|\n", "  ".repeat(row.depth as usize)));
+        }
+        out.push_str(&block(view, row, more_siblings(rows, i), o));
+    }
+    out
+}
+
+/// `--group-by dispatch`: rows outside any dispatch first, then one section per dispatch with
+/// its tasks one level down, a nested dispatch getting a section of its own.
+fn grouped(view: &RunView, rows: Vec<TreeRow>, o: &TraceOpts) -> String {
+    let of = |logical: NodeId| view.tasks.get(&logical).map(|t| t.dispatch);
+    let loose: Vec<TreeRow> = rows
+        .iter()
+        .filter(|r| of(r.logical).is_none())
+        .cloned()
+        .collect();
+    let mut out = blocks(view, &loose, o);
+    for d in view.dispatches.values() {
+        let members: Vec<TreeRow> = rows
+            .iter()
+            .filter(|r| of(r.logical) == Some(d.id))
+            .map(|r| TreeRow {
+                depth: 1,
+                ..r.clone()
+            })
+            .collect();
+        if members.is_empty() {
+            continue;
+        }
+        // Age is not shown here, so the clock does not make the render unstable.
+        let s = crate::journal::inspect::summary(view, d, OffsetDateTime::UNIX_EPOCH);
+        let seq = s.call_seq.map(|c| format!("  seq {c}")).unwrap_or_default();
+        out.push_str(&format!(
+            "\ndispatch {}{seq}  {}  caller {}  {}  {}\n",
+            s.short,
+            dispatches::state_word(&s),
+            dispatches::caller_word(&s),
+            dispatches::tasks_word(s.tasks),
+            dispatches::cost(&s.cost),
+        ));
+        out.push_str(&blocks(view, &members, o));
+    }
+    out
+}
+
+/// Rows the flags leave standing, already filtered by depth, node, failure and dispatch.
 fn visible(view: &RunView, o: &TraceOpts) -> Vec<TreeRow> {
-    view.tree()
-        .into_iter()
+    let rows = view.tree();
+    let rows = match o.dispatch {
+        Some(d) => under_dispatch(view, rows, d),
+        None => rows,
+    };
+    rows.into_iter()
         .filter(|r| o.depth.is_none_or(|d| r.depth <= d))
         .filter(|r| {
             !o.failed
@@ -64,6 +120,33 @@ fn visible(view: &RunView, o: &TraceOpts) -> Vec<TreeRow> {
             Some(id) => r.logical == id || r.attempts.contains(&id),
         })
         .collect()
+}
+
+/// The dispatch's tasks and every row below them, in tree order.
+fn under_dispatch(view: &RunView, rows: Vec<TreeRow>, d: DispatchId) -> Vec<TreeRow> {
+    let tasks = view
+        .dispatches
+        .get(&d)
+        .map(|v| v.tasks.clone())
+        .unwrap_or_default();
+    let mut out = Vec::new();
+    let mut inside: Option<u32> = None;
+    for r in rows {
+        if inside.is_some_and(|depth| r.depth <= depth) {
+            inside = None;
+        }
+        if inside.is_none() && tasks.contains(&r.logical) {
+            inside = Some(r.depth);
+        }
+        // The dispatch's own tasks become the roots of what is rendered.
+        if let Some(base) = inside {
+            out.push(TreeRow {
+                depth: r.depth - base,
+                ..r
+            });
+        }
+    }
+    out
 }
 
 fn more_siblings(rows: &[TreeRow], i: usize) -> bool {

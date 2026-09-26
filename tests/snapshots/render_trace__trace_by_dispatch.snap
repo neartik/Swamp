@@ -1,0 +1,29 @@
+---
+source: tests/render_trace.rs
+expression: text
+---
+run 9g5f00  /repo  base HEAD  started 22:13:20  35s  ~$1.90  440 tok
+
+* 9g5f00  task 9g5f00                         anthropic/-       -                 -        0   ~$1.00  queued
+
+dispatch 9g5f18  seq 1  settled  caller brain  2 tasks  ~$0.85
+  |
+  +- 9g5f0c  [mid ] task 9g5f01                         anthropic/-       -               11s      110   ~$0.50  ok
+  |    attempt 1  9g5f0b  anthropic/-       -           rate_limited (five_hour, telemetry)  3s
+  |    attempt 2  9g5f0c  anthropic/-       -           ok  11s
+  |
+  +- 9g5f0n  [mid ] task 9g5f02                         anthropic/-       -                 -      110   ~$0.25  ok
+
+dispatch 9g5f19  seq 2  open  caller brain  2 tasks  -
+  |
+  +- 9g5f03  [mid ] docs                                -                 -                 -        -        -  rejected
+  |    WorkerError(max_nodes_per_run): run already spawned 3 nodes
+  |
+  +- 9g5f04  [mid ] bench                               -                 -                 -        -        -  queued
+
+dispatch 9g5f1a  settled  caller task 9g5f01  1 task  ~$0.05
+  |
+  +- 9g5f1k  [mid ] task 9g5f05                         anthropic/-       -                 -      110   ~$0.05  ok
+
+usage  in 400  out 40  cache-read 0  cache-write 0
+cost   ~$1.90

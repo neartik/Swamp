@@ -5,6 +5,7 @@ pub mod cancel;
 pub mod chat;
 pub mod config;
 pub mod diff;
+pub mod dispatches;
 pub mod doctor;
 pub mod gc;
 pub mod mcp_bridge;
@@ -19,7 +20,7 @@ pub mod worktrees;
 
 use crate::config::Config;
 use crate::dispatch::{AccountPool, Dispatcher};
-use crate::ids::{NodeId, RunId};
+use crate::ids::{DispatchId, NodeId, RunId};
 use crate::journal::fold::RunView;
 use crate::journal::paths::{Paths, RunPaths};
 use crate::journal::record::{JournalEvent, SCHEMA_VERSION};
@@ -74,6 +75,17 @@ impl Ctx {
             let node = run_node(&view, &rp)?;
             return Ok((rp, node));
         }
+        let mut hits = self.node_hits(spec)?;
+        match hits.len() {
+            1 => Ok(hits.remove(0)),
+            0 => anyhow::bail!("no node matches `{spec}`"),
+            _ => anyhow::bail!("node `{spec}` is ambiguous: {}", candidates(&hits)),
+        }
+    }
+
+    /// Every node `spec` names across every run; a full id stops at its one hit.
+    pub fn node_hits(&self, spec: &str) -> anyhow::Result<Vec<(RunPaths, NodeRecord)>> {
+        let spec = spec.trim();
         let exact = NodeId::from_str(spec).is_ok();
         let mut hits: Vec<(RunPaths, NodeRecord)> = Vec::new();
         for run in self.paths.list_runs()? {
@@ -88,7 +100,7 @@ impl Ctx {
                 if n.id.matches(spec) {
                     // A full id is unique by construction; only a prefix can collide.
                     if exact {
-                        return Ok((rp, n.clone()));
+                        return Ok(vec![(rp, n.clone())]);
                     }
                     hits.push((rp.clone(), n.clone()));
                 } else if n.logical.matches(spec) && !logical.contains(&n.logical) {
@@ -103,16 +115,66 @@ impl Ctx {
                     continue;
                 };
                 if exact {
-                    return Ok((rp, node));
+                    return Ok(vec![(rp, node)]);
                 }
                 hits.push((rp.clone(), node));
             }
         }
+        Ok(hits)
+    }
+
+    /// A full dispatch id, a unique prefix or its short id, searched across every run newest
+    /// first. A prefix two dispatches share names neither, exactly like a node.
+    pub fn find_dispatch(&self, spec: &str) -> anyhow::Result<(RunPaths, DispatchId)> {
+        let mut hits = self.dispatch_hits(spec)?;
         match hits.len() {
             1 => Ok(hits.remove(0)),
-            0 => anyhow::bail!("no node matches `{spec}`"),
-            _ => anyhow::bail!("node `{spec}` is ambiguous: {}", candidates(&hits)),
+            0 => anyhow::bail!("no dispatch matches `{spec}`"),
+            _ => anyhow::bail!(
+                "dispatch `{spec}` is ambiguous: {}",
+                self.dispatch_candidates(&hits)
+            ),
         }
+    }
+
+    /// Every dispatch `spec` names across every run; a full id stops at its one hit.
+    pub fn dispatch_hits(&self, spec: &str) -> anyhow::Result<Vec<(RunPaths, DispatchId)>> {
+        let spec = spec.trim();
+        anyhow::ensure!(!spec.is_empty(), "empty dispatch specifier");
+        let exact = DispatchId::from_str(spec).is_ok();
+        let mut hits = Vec::new();
+        for run in self.paths.list_runs()? {
+            let rp = self.paths.run_paths(run);
+            let Ok(view) = RunView::load(&rp.dir, false) else {
+                continue;
+            };
+            for id in crate::journal::inspect::match_dispatches(&view, spec) {
+                if exact {
+                    return Ok(vec![(rp, id)]);
+                }
+                hits.push((rp.clone(), id));
+            }
+        }
+        Ok(hits)
+    }
+
+    /// `short (run, N tasks)` per hit, for an error the user can act on.
+    pub fn dispatch_candidates(&self, hits: &[(RunPaths, DispatchId)]) -> String {
+        hits.iter()
+            .take(8)
+            .map(|(rp, id)| {
+                let tasks = RunView::load(&rp.dir, false)
+                    .ok()
+                    .and_then(|v| v.dispatches.get(id).map(|d| d.tasks.len()))
+                    .unwrap_or(0);
+                format!(
+                    "{} (run {}, {tasks} tasks)",
+                    crate::journal::inspect::short(*id),
+                    rp.run.short()
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
     }
 
     pub fn out(&self, text: &str) {

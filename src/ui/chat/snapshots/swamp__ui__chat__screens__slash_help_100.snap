@@ -1,6 +1,6 @@
 ---
 source: src/ui/chat/screens.rs
-assertion_line: 296
+assertion_line: 338
 expression: "committed(help, 100)"
 ---
 > /help
@@ -9,7 +9,8 @@ commands
 /status                   the run tree, same output as swamp trace
 /accounts                 the account pool, health and spend
 /usage [--json]           per-account tokens and quota windows
-/trace [node]             the run tree with its events
+/trace [node|dispatch]    the run tree with its events
+/dispatches [--failed]    one row per dispatch: tasks, states, cost
 /cost                     tokens and spend for this run
 /tier [low|mid|high]      show or set the default dispatch tier
 /cancel <node|all>        stop one worker or all of them

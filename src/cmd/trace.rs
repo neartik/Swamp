@@ -1,6 +1,6 @@
-use crate::cli::TraceArgs;
+use crate::cli::{GroupBy, TraceArgs};
 use crate::cmd::{Ctx, parse_duration};
-use crate::ids::NodeId;
+use crate::ids::{DispatchId, NodeId};
 use crate::journal::fold::RunView;
 use crate::journal::paths::RunPaths;
 use crate::ui::trace::{TraceOpts, follow, keep_since, render};
@@ -9,7 +9,16 @@ use std::io::Write;
 
 /// Static tree render of a recorded run.
 pub async fn run(ctx: &Ctx, args: &TraceArgs) -> anyhow::Result<i32> {
-    let (paths, node) = locate(ctx, args)?;
+    let (paths, node, dispatch) = match args.dispatch.as_deref() {
+        Some(spec) => {
+            let (paths, id) = dispatch_in(ctx, args.run.as_deref(), spec)?;
+            (paths, None, Some(id))
+        }
+        None => {
+            let (paths, node) = locate(ctx, args)?;
+            (paths, node, None)
+        }
+    };
     let opts = TraceOpts {
         node: None,
         events: args.events,
@@ -18,6 +27,8 @@ pub async fn run(ctx: &Ctx, args: &TraceArgs) -> anyhow::Result<i32> {
         depth: args.depth,
         failed: args.failed,
         json: ctx.json,
+        dispatch,
+        by_dispatch: args.group_by == Some(GroupBy::Dispatch),
     };
 
     if args.follow {
@@ -62,6 +73,20 @@ fn only_node(view: &RunView) -> Option<NodeId> {
     match view.nodes.len() {
         1 => view.nodes.keys().next().copied(),
         _ => None,
+    }
+}
+
+/// Within the named run, or across every run when none is named.
+fn dispatch_in(ctx: &Ctx, run: Option<&str>, spec: &str) -> anyhow::Result<(RunPaths, DispatchId)> {
+    let Some(run) = run else {
+        return ctx.find_dispatch(spec);
+    };
+    let paths = ctx.run_paths(Some(run))?;
+    let view = ctx.view(&paths, false)?;
+    match crate::journal::inspect::match_dispatches(&view, spec)[..] {
+        [one] => Ok((paths, one)),
+        [] => anyhow::bail!("no dispatch matches `{spec}` in run {}", paths.run),
+        _ => anyhow::bail!("dispatch `{spec}` is ambiguous in run {}", paths.run),
     }
 }
 

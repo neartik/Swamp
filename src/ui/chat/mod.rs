@@ -148,11 +148,12 @@ async fn plain_slash(command: &str, disp: &Arc<Dispatcher>, ctx: &Ctx) -> anyhow
             Effect::Commit(body) => {
                 println!("{}", blocks::text_of(&body).join("\n"));
             }
-            Effect::Trace(node) => {
+            Effect::Trace { node, dispatch } => {
                 let text = render(
                     &app.view,
                     &TraceOpts {
                         node,
+                        dispatch,
                         events: true,
                         ..TraceOpts::default()
                     },
@@ -163,12 +164,19 @@ async fn plain_slash(command: &str, disp: &Arc<Dispatcher>, ctx: &Ctx) -> anyhow
                 let n = disp.cancel_all();
                 effects.extend(app.note_cancelled(n));
             }
-            Effect::Cancel(id) => disp.cancel(id).await?,
+            Effect::Cancel(id) => cancel(disp, id).await,
             Effect::Quit(_) => quit = true,
             _ => {}
         }
     }
     Ok(quit)
+}
+
+/// A node that already ended, or the brain itself, is not worth ending the chat over.
+async fn cancel(disp: &Arc<Dispatcher>, id: crate::ids::NodeId) {
+    if let Err(e) = disp.cancel(id).await {
+        tracing::warn!("cancelling {}: {e:#}", id.short());
+    }
 }
 
 /// A dead brain cannot be interrupted, and that must not stop the chat from quitting.
@@ -296,13 +304,14 @@ async fn interactive(
                     let n = disp.cancel_all();
                     effects.extend(app.note_cancelled(n));
                 }
-                Effect::Cancel(id) => disp.cancel(id).await?,
-                Effect::Trace(node) => {
+                Effect::Cancel(id) => cancel(&disp, id).await,
+                Effect::Trace { node, dispatch } => {
                     let view = RunView::load(&paths.dir, true)?;
                     let text = render(
                         &view,
                         &TraceOpts {
                             node,
+                            dispatch,
                             events: true,
                             ..TraceOpts::default()
                         },

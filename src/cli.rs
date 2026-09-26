@@ -43,6 +43,10 @@ pub enum Command {
     Run(RunArgs),
     /// Render a run tree
     Trace(TraceArgs),
+    /// List a run's dispatches: tasks, states, cost and caller
+    Dispatches(DispatchesArgs),
+    /// One dispatch: its task tree, attempts and rejection reasons
+    Dispatch(DispatchArgs),
     /// Live TUI, read-only, attachable from another terminal
     Watch(WatchArgs),
     /// Read-only dispatch board: which account works on what, right now
@@ -61,7 +65,7 @@ pub enum Command {
     Adopt(AdoptArgs),
     /// Inspect and clean worker worktrees
     Worktrees(WorktreesArgs),
-    /// Cancel a run or a node
+    /// Cancel a run, a node or a dispatch
     Cancel(CancelArgs),
     /// Delete old runs and worktrees
     Gc(GcArgs),
@@ -154,6 +158,43 @@ pub struct TraceArgs {
     pub failed: bool,
     #[arg(long, value_name = "DUR")]
     pub since: Option<String>,
+    /// Only one dispatch's tasks: a full id, a unique prefix or its short id
+    #[arg(long, value_name = "ID")]
+    pub dispatch: Option<String>,
+    #[arg(long, value_name = "KEY")]
+    pub group_by: Option<GroupBy>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum GroupBy {
+    /// One section per dispatch
+    Dispatch,
+}
+
+#[derive(Debug, Default, Args)]
+pub struct DispatchesArgs {
+    /// A full id, a unique prefix, `last`, or `-2`
+    #[arg(value_name = "RUN")]
+    pub run: Option<String>,
+    /// Keep printing rows as they change until the run finishes
+    #[arg(long)]
+    pub follow: bool,
+    /// Only dispatches with a failed or rejected task
+    #[arg(long)]
+    pub failed: bool,
+    /// Machine-readable output; same as the global --json
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct DispatchArgs {
+    /// A full dispatch id, a unique prefix or its short id, searched across every run
+    #[arg(value_name = "ID")]
+    pub id: String,
+    /// Machine-readable output; same as the global --json
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Debug, Args)]
@@ -304,6 +345,7 @@ pub enum WorktreesCmd {
 
 #[derive(Debug, Args)]
 pub struct CancelArgs {
+    /// A run, a node (attempt or logical id) or a dispatch
     #[arg(value_name = "TARGET")]
     pub targets: Vec<String>,
     #[arg(long)]

@@ -34,8 +34,13 @@ pub const COMMANDS: &[Cmd] = &[
     },
     Cmd {
         name: "/trace",
-        args: "[node]",
+        args: "[node|dispatch]",
         help: "the run tree with its events",
+    },
+    Cmd {
+        name: "/dispatches",
+        args: "[--failed]",
+        help: "one row per dispatch: tasks, states, cost",
     },
     Cmd {
         name: "/cost",

@@ -92,6 +92,21 @@ pub fn state_word(s: &NodeState) -> &'static str {
     }
 }
 
+/// `state_word` for a state without its payload.
+pub fn phase_word(p: crate::model::dispatch::Phase) -> &'static str {
+    use crate::model::dispatch::Phase;
+    match p {
+        Phase::Queued => "queued",
+        Phase::Blocked => "blocked",
+        Phase::Leased => "leased",
+        Phase::Running => "running",
+        Phase::Succeeded => "ok",
+        Phase::Failed => "failed",
+        Phase::Cancelled => "cancelled",
+        Phase::Rejected => "rejected",
+    }
+}
+
 /// Worker output reaches the terminal verbatim. ESC and its friends would let a worker
 /// repaint the screen and forge Swamp's own lines, so they never survive to stdout.
 fn is_control(c: char) -> bool {
