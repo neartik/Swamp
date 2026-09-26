@@ -2,7 +2,7 @@
 
 use crate::brain::BrainEvent;
 use crate::model::core::{Cost, CostBasis, Usage};
-use crate::ui::chat::app::{App, Effect, Msg};
+use crate::ui::chat::app::{App, Effect, Msg, Phase};
 use crate::ui::chat::tests_support as fx;
 use crate::ui::chat::theme::{Palette, Theme};
 use crate::ui::chat::{render, workers};
@@ -422,6 +422,34 @@ fn ctrl_c_clears_once_and_quits_twice() {
         quit.iter().any(|e| matches!(e, Effect::Quit(0))),
         "the third leaves"
     );
+}
+
+fn quit_code(effects: &[Effect]) -> i32 {
+    match effects {
+        [Effect::Interrupt, Effect::CancelAll, Effect::Quit(code)] => *code,
+        _ => panic!("expected interrupt, cancel all, then quit"),
+    }
+}
+
+#[test]
+fn ctrl_d_on_an_empty_editor_quits_like_an_armed_ctrl_c() {
+    let mut app = fx::app(100);
+    assert_eq!(quit_code(&app.reduce(ctrl('d'))), 0);
+
+    app.phase = Phase::Working { since: app.now };
+    assert_eq!(
+        quit_code(&app.reduce(ctrl('d'))),
+        6,
+        "leaving mid turn is an interrupted exit"
+    );
+}
+
+#[test]
+fn ctrl_d_with_text_in_the_editor_does_nothing() {
+    let mut app = fx::app(100);
+    typed(&mut app, "x");
+    assert!(app.reduce(ctrl('d')).is_empty());
+    assert_eq!(app.editor.text(), "x", "the buffer is left alone");
 }
 
 #[test]

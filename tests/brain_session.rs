@@ -4,7 +4,6 @@
 mod common;
 
 use camino::Utf8PathBuf;
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use serde_json::Value;
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -16,10 +15,6 @@ use swamp::journal::paths::Paths;
 use swamp::journal::writer::FsyncPolicy;
 use swamp::journal::{Journal, JournalHandle};
 use swamp::model::core::Provider;
-use swamp::ui::chat::app::{App, Effect, Msg};
-use swamp::ui::chat::blocks::WelcomeInfo;
-use swamp::ui::chat::input::History;
-use swamp::ui::chat::theme::Theme;
 use swamp::{RunId, RunPaths};
 use tokio::time::Instant;
 
@@ -361,23 +356,7 @@ async fn ctrl_d_after_a_fatal_still_shuts_the_dead_brain_down() {
     }
     assert!(dead, "writing to the dead brain never failed");
 
-    let mut app = App::new(
-        f.paths.run,
-        Theme::plain(),
-        WelcomeInfo::default(),
-        History::load(None, 0),
-        &f.cfg,
-    );
-    let effects = app.reduce(Msg::Key(KeyEvent::new(
-        KeyCode::Char('d'),
-        KeyModifiers::CONTROL,
-    )));
-    assert!(matches!(effects.last(), Some(Effect::Quit(0))));
-    for effect in effects {
-        if matches!(effect, Effect::Interrupt) {
-            swamp::ui::chat::interrupt(brain.as_mut()).await;
-        }
-    }
+    swamp::ui::chat::interrupt(brain.as_mut()).await;
     brain.shutdown().await.expect("shutdown");
     f.journal_after("node_finished").await;
 }
