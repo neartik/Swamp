@@ -34,6 +34,7 @@ pub enum Glyph {
     Failed,
     Cancelled,
     Blocked,
+    Rejected,
     Orphaned,
     Queued,
     Leased,
@@ -49,6 +50,9 @@ pub enum Glyph {
     BoxVertical,
     Quote,
     ListDot,
+    Fold,
+    Folded,
+    Brain,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -169,6 +173,8 @@ impl Theme {
             (Glyph::Cancelled, true) => "/",
             (Glyph::Blocked, false) => "⏸",
             (Glyph::Blocked, true) => "~",
+            (Glyph::Rejected, false) => "⊗",
+            (Glyph::Rejected, true) => "X",
             (Glyph::Orphaned, _) => "?",
             (Glyph::Queued, false) => "·",
             (Glyph::Queued, true) => ".",
@@ -195,6 +201,12 @@ impl Theme {
             (Glyph::Quote, true) => ">",
             (Glyph::ListDot, false) => "•",
             (Glyph::ListDot, true) => "-",
+            (Glyph::Fold, false) => "▾",
+            (Glyph::Fold, true) => "v",
+            (Glyph::Folded, false) => "▸",
+            (Glyph::Folded, true) => ">",
+            (Glyph::Brain, false) => "◆",
+            (Glyph::Brain, true) => "*",
         }
     }
 
@@ -202,10 +214,12 @@ impl Theme {
     pub fn state_glyph(&self, s: &NodeState) -> &'static str {
         match s {
             NodeState::Succeeded => self.g(Glyph::Succeeded),
-            NodeState::Failed { .. } | NodeState::Rejected { .. } => self.g(Glyph::Failed),
+            NodeState::Failed { .. } => self.g(Glyph::Failed),
+            NodeState::Rejected { .. } => self.g(Glyph::Rejected),
             NodeState::Cancelled { .. } => self.g(Glyph::Cancelled),
             NodeState::Orphaned { .. } => self.g(Glyph::Orphaned),
-            NodeState::Queued | NodeState::Blocked { .. } => self.g(Glyph::Queued),
+            NodeState::Blocked { .. } => self.g(Glyph::Blocked),
+            NodeState::Queued => self.g(Glyph::Queued),
             NodeState::Leased { .. } => self.g(Glyph::Leased),
             NodeState::Running { .. } => self.g(Glyph::Queued),
         }
@@ -214,7 +228,10 @@ impl Theme {
     pub fn state_role(&self, s: &NodeState) -> Role {
         match s {
             NodeState::Succeeded => Role::Ok,
-            NodeState::Failed { .. } | NodeState::Rejected { .. } => Role::Err,
+            NodeState::Failed { .. }
+            | NodeState::Rejected { .. }
+            | NodeState::Blocked { .. }
+            | NodeState::Orphaned { .. } => Role::Err,
             NodeState::Running { .. } => Role::Run,
             _ => Role::Meta,
         }

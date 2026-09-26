@@ -1,6 +1,6 @@
 use crate::cli::{CancelArgs, SignalArg};
 use crate::cmd::Ctx;
-use crate::dispatch::cancel::{Outcome, Sink, Stop, cancel_node};
+use crate::dispatch::cancel::{Outcome, Sink, Stop, cancel_node, dispatch_tasks};
 use crate::ids::{DispatchId, NodeId};
 use crate::journal::fold::RunView;
 use crate::journal::inspect;
@@ -166,11 +166,7 @@ fn tasks(paths: RunPaths, tasks: Vec<NodeId>) -> Target {
 
 fn dispatch(ctx: &Ctx, paths: RunPaths, id: DispatchId) -> anyhow::Result<Target> {
     let view = ctx.view(&paths, false)?;
-    let list = view
-        .dispatches
-        .get(&id)
-        .map(|d| d.tasks.clone())
-        .unwrap_or_default();
+    let list = dispatch_tasks(&view, id);
     Ok(tasks(paths, list))
 }
 

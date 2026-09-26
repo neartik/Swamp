@@ -96,6 +96,7 @@ tree_width = 46
 board_width = 46
 show_thinking = false
 tail_lines = 200
+board_actions = true
 "#;
 
 /// Env vars are `SWAMP_<SECTION>__<KEY>`; anything else (SWAMP_LOG, SWAMP_DEPTH) is not config.

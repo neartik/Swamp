@@ -384,6 +384,15 @@ pub(crate) fn failure_summary(f: &Failure) -> String {
     }
 }
 
+/// The few words a row has room for: `rate_limited (five_hour)`, a worker error's subtype.
+pub(crate) fn failure_short(f: &Failure) -> String {
+    match f {
+        Failure::RateLimited { scope, .. } => format!("rate_limited ({})", scope_word(scope)),
+        Failure::WorkerError { subtype, .. } => fmt::sanitize(subtype),
+        f => failure_summary(f),
+    }
+}
+
 pub(crate) fn failure_detail(f: &Failure) -> String {
     match f {
         Failure::RateLimited { evidence, .. } => {

@@ -14,7 +14,7 @@ use time::OffsetDateTime;
 
 const TITLE_WIDTH: usize = 34;
 /// A dispatch tree deeper than this is a cycle in a damaged journal, not real nesting.
-const MAX_NESTING: usize = 8;
+pub const MAX_NESTING: usize = 8;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ListOpts {

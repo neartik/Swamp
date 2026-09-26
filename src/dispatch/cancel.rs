@@ -1,4 +1,4 @@
-use crate::ids::NodeId;
+use crate::ids::{DispatchId, NodeId};
 use crate::journal::paths::RunPaths;
 use crate::journal::{JournalEvent, JournalHandle, RunView};
 use crate::model::core::{CancelSource, NodeKind, NodeState};
@@ -129,6 +129,14 @@ pub fn source_word(by: CancelSource) -> &'static str {
         CancelSource::Timeout => "timeout",
         CancelSource::Shutdown => "shutdown",
     }
+}
+
+/// The direct tasks a dispatch cancel covers, the same list from every surface.
+pub fn dispatch_tasks(view: &RunView, id: DispatchId) -> Vec<NodeId> {
+    view.dispatches
+        .get(&id)
+        .map(|d| d.tasks.clone())
+        .unwrap_or_default()
 }
 
 pub fn is_brain(view: &RunView, id: NodeId) -> bool {

@@ -270,4 +270,6 @@ pub struct UiCfg {
     pub chat_theme: Option<String>,
     pub collapse_lines: Option<usize>,
     pub chat_history: Option<usize>,
+    /// `swamp board` may cancel the selected task or dispatch, after a y / n confirm.
+    pub board_actions: Option<bool>,
 }

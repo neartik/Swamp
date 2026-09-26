@@ -367,7 +367,7 @@ pub fn caller(view: &RunView, node: NodeId) -> Caller {
     }
 }
 
-fn attempt(n: &NodeRecord, now: OffsetDateTime) -> AttemptDetail {
+pub fn attempt(n: &NodeRecord, now: OffsetDateTime) -> AttemptDetail {
     let (pid, pgid) = process(Some(n));
     AttemptDetail {
         node: n.id,

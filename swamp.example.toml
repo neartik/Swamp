@@ -226,6 +226,8 @@ tail_lines    = 200
 chat_theme     = "auto"
 collapse_lines = 3
 chat_history   = 500
+# `swamp board` cancels the selected task or dispatch with `k`, after a y / n.
+board_actions  = true
 
 # ---------------------------------------------------------------- profiles
 # `swamp --profile cheap run "..."` layers this over everything above.

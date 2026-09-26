@@ -5,6 +5,7 @@ use crate::config::Config;
 use crate::config::schema::AccountCfg;
 use crate::dispatch::account::{AccountState, Health, QuotaSource};
 use crate::dispatch::persist::StateMap;
+use crate::dispatch::policy::Ineligible;
 use crate::model::core::{
     AccountId, CostBasis, LimitReached, LimitScope, LimitWindow, Provider, RateLimitSnapshot, Usage,
 };
@@ -468,6 +469,38 @@ fn cost_cell(usd: f64) -> String {
         return format!("~${usd:.2}");
     }
     format!("~${}", fmt::tokens(usd.round() as u64))
+}
+
+/// Why the pool would pass over an account. With `numbers` and a row it carries the figures
+/// that tripped the gate: `at capacity (2/2)`, `quota stop (93%)`, `cooling until 23:20`.
+pub fn ineligible_text(
+    g: Ineligible,
+    row: Option<&AccountRow>,
+    numbers: bool,
+    now: OffsetDateTime,
+) -> String {
+    let Some(r) = row.filter(|_| numbers) else {
+        return g.word().to_owned();
+    };
+    match g {
+        Ineligible::AtCapacity => match r.max_concurrency {
+            Some(max) => format!("{} ({}/{max})", g.word(), r.inflight),
+            None => g.word().to_owned(),
+        },
+        Ineligible::QuotaStop => match r
+            .quota
+            .as_ref()
+            .and_then(|q| q.measured_utilization_at(now))
+        {
+            Some(u) => format!("{} ({}%)", g.word(), (u * 100.0).round() as i64),
+            None => g.word().to_owned(),
+        },
+        Ineligible::Cooling => match r.cooldown_until.filter(|t| *t > now) {
+            Some(t) => format!("cooling until {}", fmt::clock_day(t, now)),
+            None => g.word().to_owned(),
+        },
+        g => g.word().to_owned(),
+    }
 }
 
 pub(crate) fn health_role(h: Health) -> Role {
