@@ -162,7 +162,16 @@ pub async fn run_node(cx: &NodeCtx, spec: LaunchSpec, task: &TaskRequest) -> Nod
         cx,
         state: NodeState::Queued,
     };
-    let out = attempt_loop(cx, spec, task, &mut phase).await;
+    let mut out = attempt_loop(cx, spec, task, &mut phase).await;
+    // A cancel marked during finalize already journaled the task Cancelled; the outcome follows it.
+    if let Some(by) = crate::dispatch::cancel::requested(&cx.journal.paths, cx.logical)
+        && !matches!(out.failure, Some(Failure::Cancelled { .. }))
+    {
+        out.failure = Some(Failure::Cancelled { by });
+        if let Some(o) = out.outcome.as_mut() {
+            o.failure = out.failure.clone();
+        }
+    }
     let why = out.failure.as_ref().map_or("succeeded", Failure::kind);
     phase.to(settled_state(out.failure.as_ref()), why);
     out

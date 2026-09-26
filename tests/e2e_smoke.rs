@@ -739,3 +739,99 @@ fn cancel_a_dispatch_from_a_second_process() {
         .collect();
     assert!(seqs.windows(2).all(|w| w[0] < w[1]), "{seqs:?}");
 }
+
+#[test]
+fn cancel_a_task_by_its_logical_id_and_refuse_the_brain() {
+    use std::time::Duration;
+    use swamp::model::core::{CancelSource, NodeKind};
+
+    // The brain reserves one slot, so one task runs and the other waits without an attempt.
+    let h = Harness::new().max_concurrency(2).scenario(
+        "main",
+        Scenario::claude()
+            .slow(30_000)
+            .dispatches("lex", "write the lexer")
+            .dispatches("parse", "write the parser"),
+    );
+    let mut run = h.spawn(&["run", "split the parser work in two"]);
+
+    let split = |view: &swamp::RunView| -> Option<(swamp::ids::NodeId, swamp::ids::NodeId)> {
+        if view.tasks.len() != 2 {
+            return None;
+        }
+        let rp = h.last_run();
+        let mut running = None;
+        let mut waiting = None;
+        for t in view.tasks.keys() {
+            match view.attempts(*t).last() {
+                Some(a)
+                    if matches!(a.state, NodeState::Running { .. })
+                        && swamp::worker::liveness::is_ours(&rp.pidfile(a.id)) =>
+                {
+                    running = Some(*t)
+                }
+                None => waiting = Some(*t),
+                _ => {}
+            }
+        }
+        running.zip(waiting)
+    };
+    support::wait_for(
+        "one running and one waiting task",
+        Duration::from_secs(60),
+        || {
+            let Some(run) = h.runs().first().copied() else {
+                return false;
+            };
+            let dir = h.paths().run_paths(run).dir;
+            swamp::RunView::load(&dir, false).is_ok_and(|v| split(&v).is_some())
+        },
+    );
+    let view = h.last_view();
+    let (running, waiting) = split(&view).expect("one running and one waiting task");
+    let brain = view
+        .nodes
+        .values()
+        .find(|n| n.kind == NodeKind::Brain)
+        .expect("a brain node")
+        .id;
+
+    // The brain shares the run's short id, so only the node prefix names it.
+    h.swamp(&["cancel", &format!("nd_{}", brain.short())])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("cancel the run instead"));
+
+    for logical in [waiting, running] {
+        h.swamp(&["cancel", &logical.short()])
+            .assert()
+            .success()
+            .stdout(predicates::str::contains(format!(
+                "cancelled node {}",
+                logical.short()
+            )));
+    }
+    let cancelled = Some(NodeState::Cancelled {
+        by: CancelSource::User,
+    });
+    for logical in [waiting, running] {
+        support::wait_for(
+            &format!("task {logical} to settle cancelled"),
+            Duration::from_secs(30),
+            || h.last_view().state_of(logical) == cancelled,
+        );
+    }
+    assert!(
+        h.last_view().attempts(waiting).is_empty(),
+        "a task cancelled while waiting still launched"
+    );
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    while run.try_wait().expect("polling the run").is_none() {
+        if std::time::Instant::now() > deadline {
+            let _ = run.kill();
+            panic!("the run did not finish after its tasks were cancelled");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
