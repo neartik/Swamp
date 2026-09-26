@@ -193,12 +193,7 @@ fn candidates(hits: &[(RunPaths, NodeRecord)]) -> String {
 }
 
 fn node_matches(id: NodeId, spec: &str) -> bool {
-    if let Ok(exact) = NodeId::from_str(spec) {
-        return exact == id;
-    }
-    let needle = spec.trim_start_matches("nd_").to_ascii_lowercase();
-    let full = id.0.to_string().to_ascii_lowercase();
-    !needle.is_empty() && (full.starts_with(&needle) || id.short() == needle)
+    id.matches(spec)
 }
 
 /// "25m" on the command line; config uses the same spelling through humantime.
@@ -343,14 +338,23 @@ impl RunSession {
         })
     }
 
+    /// Seeded from the run's journal, so a resumed run continues its depths and counters.
     pub fn dispatcher(&self) -> Arc<Dispatcher> {
-        Dispatcher::new(
+        let d = Dispatcher::new(
             self.cfg.clone(),
             self.pool.clone(),
             self.exec.clone(),
             self.workspace.clone(),
             self.journal.clone(),
-        )
+        );
+        match RunView::load(&self.paths.dir, false) {
+            Ok(view) => d.seed(&view),
+            Err(e) => tracing::warn!(
+                "cannot seed the dispatcher from run {}: {e}",
+                self.paths.run
+            ),
+        }
+        d
     }
 
     /// The absence of `RunFinished` is what marks a run interrupted, so this is durable and

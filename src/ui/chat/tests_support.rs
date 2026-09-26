@@ -131,6 +131,8 @@ fn record(node: NodeId, title: &str, state: NodeState) -> NodeRecord {
         summary: None,
         stream_offset: 0,
         unparsed_lines: 0,
+        depth: 1,
+        dispatch: None,
     }
 }
 
@@ -275,6 +277,7 @@ pub fn blocked() -> Vec<JournalLine> {
         JournalEvent::NodeBlocked {
             until: at(2_660),
             why: "main cooling until 22:57".into(),
+            ineligible: Vec::new(),
         },
     )]
 }

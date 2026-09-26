@@ -11,9 +11,10 @@ pub use pool::{AccountPool, Lease, NoCapacity};
 pub use retry::{NodeCtx, NodeOutcome, NodeRunner, run_node};
 
 use crate::config::Config;
-use crate::ids::{NodeId, NodeIds};
-use crate::journal::{JournalEvent, JournalHandle};
-use crate::model::core::{NodeKind, Provider, Tier};
+use crate::ids::{CallSeq, DispatchId, NodeId, NodeIds};
+use crate::journal::{JournalEvent, JournalHandle, RunView};
+use crate::model::core::{Cost, CostBasis, NodeKind, NodeState, Provider, Tier};
+use crate::model::dispatch::{DispatchCounts, DispatchRecord, TaskRef};
 use crate::model::failure::Failure;
 use crate::model::node::WorkResultRef;
 use crate::model::result::{IsolationMode, NodeResult, TaskRequest};
@@ -24,7 +25,7 @@ use async_trait::async_trait;
 use parking_lot::Mutex;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::time::Duration;
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
@@ -35,6 +36,42 @@ const DEFAULT_MAX_DEPTH: u32 = 2;
 
 pub(crate) fn emit(h: &JournalHandle, node: Option<NodeId>, event: JournalEvent) {
     h.emit(node, event);
+}
+
+pub struct DispatchRequest {
+    pub id: DispatchId,
+    pub caller: NodeId,
+    pub call_seq: Option<CallSeq>,
+    pub tasks: Vec<TaskRequest>,
+    pub wait: bool,
+    /// How long the call blocks for results. None blocks until every task settles.
+    pub max_wait: Option<Duration>,
+}
+
+impl DispatchRequest {
+    pub fn new(caller: NodeId, tasks: Vec<TaskRequest>) -> Self {
+        DispatchRequest {
+            id: DispatchId::new(),
+            caller,
+            call_seq: None,
+            tasks,
+            wait: true,
+            max_wait: None,
+        }
+    }
+}
+
+pub struct Dispatched {
+    pub id: DispatchId,
+    /// In request order; `node` is the task's logical id.
+    pub results: Vec<NodeResult>,
+}
+
+struct TaskEnd {
+    result: NodeResult,
+    rejected: bool,
+    /// Every attempt's, where the result carries the last one's.
+    cost: Option<Cost>,
 }
 
 /// Owns the pool and the semaphores. One per run.
@@ -51,6 +88,7 @@ pub struct Dispatcher {
     /// SWAMP_DEPTH of this process: a nested swamp starts counting where its parent left off.
     base_depth: AtomicU32,
     spawned: AtomicU32,
+    call_seq: AtomicU64,
     settled: Notify,
 }
 
@@ -90,34 +128,127 @@ impl Dispatcher {
             depths: Mutex::new(HashMap::new()),
             base_depth: AtomicU32::new(0),
             spawned: AtomicU32::new(0),
+            call_seq: AtomicU64::new(0),
             settled: Notify::new(),
         })
     }
 
+    /// Continues a run's depths, node budget and tool call sequence from its journal.
+    pub fn seed(&self, view: &RunView) {
+        {
+            let mut depths = self.depths.lock();
+            for t in view.tasks.values() {
+                if let Some(d) = t.depth {
+                    depths.insert(t.logical, d);
+                }
+            }
+            for n in view.nodes.values().filter(|n| n.dispatch.is_some()) {
+                depths.insert(n.id, n.depth);
+            }
+        }
+        let spawned = view
+            .tasks
+            .keys()
+            .filter(|t| !matches!(view.state_of(**t), Some(NodeState::Rejected { .. })))
+            .count() as u32;
+        self.spawned.fetch_max(spawned, Ordering::Relaxed);
+        if let Some(seq) = view.call_seq {
+            self.call_seq.fetch_max(seq.0, Ordering::Relaxed);
+        }
+    }
+
+    pub fn next_call_seq(&self) -> CallSeq {
+        CallSeq(self.call_seq.fetch_add(1, Ordering::Relaxed) + 1)
+    }
+
     /// Every task starts at once; each then queues on its own account's capacity.
+    pub async fn dispatch(self: &Arc<Self>, req: DispatchRequest) -> Dispatched {
+        let planned: Vec<(NodeId, Tier, Vec<Provider>, TaskRequest)> = req
+            .tasks
+            .into_iter()
+            .map(|task| {
+                let tier = self.tier_of(&task);
+                (NodeId::new(), tier, self.provider_order(&task, tier), task)
+            })
+            .collect();
+        let record = DispatchRecord {
+            id: req.id,
+            run: self.journal.run(),
+            caller: req.caller,
+            call_seq: req.call_seq,
+            wait: req.wait,
+            max_wait_s: req.max_wait.map(|d| d.as_secs()),
+            tasks: planned
+                .iter()
+                .map(|(logical, tier, order, task)| TaskRef {
+                    logical: *logical,
+                    title: task.title.clone(),
+                    tier: *tier,
+                    provider: first(order),
+                })
+                .collect(),
+            at: time::OffsetDateTime::now_utc(),
+        };
+        journal_issued(&self.journal, record).await;
+
+        let ids: Vec<NodeId> = planned.iter().map(|(logical, ..)| *logical).collect();
+        let handles: Vec<_> = planned
+            .into_iter()
+            .map(|(logical, tier, order, task)| {
+                let me = Arc::clone(self);
+                let (dispatch, caller) = (req.id, req.caller);
+                tokio::spawn(async move {
+                    me.dispatch_as(logical, dispatch, caller, tier, order, task)
+                        .await
+                })
+            })
+            .collect();
+        let settler = {
+            let me = Arc::clone(self);
+            let (dispatch, caller) = (req.id, req.caller);
+            tokio::spawn(async move {
+                let ends: Vec<TaskEnd> = futures::future::join_all(handles)
+                    .await
+                    .into_iter()
+                    .filter_map(Result::ok)
+                    .collect();
+                me.settle_dispatch(dispatch, caller, &ends).await;
+            })
+        };
+        // Never block forever: whatever is still running comes back marked "running".
+        match req.max_wait {
+            Some(max) => {
+                let _ = tokio::time::timeout(max, settler).await;
+            }
+            None => {
+                let _ = settler.await;
+            }
+        }
+        Dispatched {
+            id: req.id,
+            results: self.await_nodes(&ids, Some(Duration::ZERO)).await,
+        }
+    }
+
     pub async fn dispatch_batch(
         self: &Arc<Self>,
         parent: NodeId,
         tasks: Vec<TaskRequest>,
         max_wait: Duration,
     ) -> Vec<NodeResult> {
-        let mut ids = Vec::with_capacity(tasks.len());
-        let mut handles = Vec::with_capacity(tasks.len());
-        for task in tasks {
-            let id = NodeId::new();
-            ids.push(id);
-            let me = Arc::clone(self);
-            handles.push(tokio::spawn(async move {
-                me.dispatch_as(id, parent, task).await
-            }));
-        }
-        // Never block forever: whatever is still running comes back marked "running".
-        let _ = tokio::time::timeout(max_wait, futures::future::join_all(handles)).await;
-        self.await_nodes(&ids, Some(Duration::ZERO)).await
+        let req = DispatchRequest {
+            max_wait: Some(max_wait),
+            ..DispatchRequest::new(parent, tasks)
+        };
+        self.dispatch(req).await.results
     }
 
     pub async fn dispatch_one(self: &Arc<Self>, parent: NodeId, task: TaskRequest) -> NodeResult {
-        self.dispatch_as(NodeId::new(), parent, task).await
+        self.dispatch(DispatchRequest::new(parent, vec![task]))
+            .await
+            .results
+            .pop()
+            .expect("a dispatch that blocks until settled has every result")
     }
 
     pub async fn await_nodes(&self, ids: &[NodeId], timeout: Option<Duration>) -> Vec<NodeResult> {
@@ -211,18 +342,34 @@ impl Dispatcher {
     async fn dispatch_as(
         self: &Arc<Self>,
         id: NodeId,
+        dispatch: DispatchId,
         parent: NodeId,
+        tier: Tier,
+        order: Vec<Provider>,
         task: TaskRequest,
-    ) -> NodeResult {
-        let tier = task
-            .tier
-            .or(self.cfg.dispatch.default_tier)
-            .unwrap_or(Tier::Mid);
-        let order = self.provider_order(&task, tier);
-        let provider = order.first().copied().unwrap_or(Provider::Anthropic);
+    ) -> TaskEnd {
+        let provider = first(&order);
 
         if let Some(reason) = self.reject_reason(&task, parent) {
-            return self.settle(finished(id, &task, tier, provider, None, Some(reason)));
+            if let Err(e) = self
+                .journal
+                .emit_durable(
+                    Some(id),
+                    JournalEvent::DispatchRejected {
+                        dispatch,
+                        logical: id,
+                        reason: reason.clone(),
+                    },
+                )
+                .await
+            {
+                tracing::warn!(node = %id.short(), "cannot journal DispatchRejected: {e}");
+            }
+            return TaskEnd {
+                result: self.settle(finished(id, &task, tier, provider, None, Some(reason))),
+                rejected: true,
+                cost: None,
+            };
         }
 
         let depth = self.depth_of(parent) + 1;
@@ -233,7 +380,6 @@ impl Dispatcher {
 
         let cancel = CancellationToken::new();
         self.cancels.lock().insert(id, cancel.clone());
-        self.spawned.fetch_add(1, Ordering::Relaxed);
 
         let cx = NodeCtx {
             cfg: Arc::clone(&self.cfg),
@@ -251,11 +397,39 @@ impl Dispatcher {
             deadline: tokio::time::Instant::now() + self.cfg.node_timeout(tier),
             parent: Some(parent),
             logical: id,
+            dispatch: Some(dispatch),
+            depth,
             cancel,
         };
         let spec = self.launch_spec(&task, tier, provider);
         let outcome = run_node(&cx, spec, &task).await;
-        self.settle(from_outcome(id, &task, tier, provider, outcome))
+        let cost = total_cost(outcome.attempts.iter().map(|a| a.cost));
+        TaskEnd {
+            result: self.settle(from_outcome(id, &task, tier, provider, outcome)),
+            rejected: false,
+            cost,
+        }
+    }
+
+    async fn settle_dispatch(&self, dispatch: DispatchId, caller: NodeId, ends: &[TaskEnd]) {
+        let mut counts = DispatchCounts::default();
+        for end in ends {
+            let n = match (end.rejected, end.result.state) {
+                (true, _) => &mut counts.rejected,
+                (false, "succeeded") => &mut counts.succeeded,
+                (false, "cancelled") => &mut counts.cancelled,
+                _ => &mut counts.failed,
+            };
+            *n += 1;
+        }
+        let cost = total_cost(ends.iter().map(|e| e.cost));
+        journal_settled(&self.journal, dispatch, caller, counts, cost).await;
+    }
+
+    fn tier_of(&self, task: &TaskRequest) -> Tier {
+        task.tier
+            .or(self.cfg.dispatch.default_tier)
+            .unwrap_or(Tier::Mid)
     }
 
     /// Hard limits: refusing is the answer, not queueing.
@@ -281,7 +455,14 @@ impl Dispatcher {
             .limits
             .max_nodes_per_run
             .unwrap_or(DEFAULT_MAX_NODES_PER_RUN);
-        if self.spawned.load(Ordering::Relaxed) >= max_nodes {
+        // Reserved atomically: two tasks of one batch must not share the last slot.
+        if self
+            .spawned
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
+                (n < max_nodes).then_some(n + 1)
+            })
+            .is_err()
+        {
             return Some(Failure::WorkerError {
                 subtype: "max_nodes_per_run".into(),
                 detail: format!("run already spawned limits.max_nodes_per_run = {max_nodes} nodes"),
@@ -365,6 +546,50 @@ impl Dispatcher {
         self.settled.notify_waiters();
         result
     }
+}
+
+/// Durable, and before any task of the dispatch starts.
+pub(crate) async fn journal_issued(journal: &JournalHandle, record: DispatchRecord) {
+    let (id, caller) = (record.id, record.caller);
+    let event = JournalEvent::DispatchIssued {
+        record: Box::new(record),
+    };
+    if let Err(e) = journal.emit_durable(Some(caller), event).await {
+        tracing::warn!("cannot journal DispatchIssued {id}: {e}");
+    }
+}
+
+pub(crate) async fn journal_settled(
+    journal: &JournalHandle,
+    dispatch: DispatchId,
+    caller: NodeId,
+    counts: DispatchCounts,
+    cost: Option<Cost>,
+) {
+    let event = JournalEvent::DispatchSettled {
+        dispatch,
+        counts,
+        cost,
+    };
+    if let Err(e) = journal.emit_durable(Some(caller), event).await {
+        tracing::warn!("cannot journal DispatchSettled {dispatch}: {e}");
+    }
+}
+
+pub(crate) fn first(order: &[Provider]) -> Provider {
+    order.first().copied().unwrap_or(Provider::Anthropic)
+}
+
+/// Known costs summed; estimated as soon as any part is. None when nothing reported one.
+pub(crate) fn total_cost(costs: impl Iterator<Item = Option<Cost>>) -> Option<Cost> {
+    costs.flatten().reduce(|a, b| Cost {
+        usd: a.usd + b.usd,
+        basis: if a.basis == CostBasis::Reported && b.basis == CostBasis::Reported {
+            CostBasis::Reported
+        } else {
+            CostBasis::Estimated
+        },
+    })
 }
 
 fn running(id: NodeId, task: &TaskRequest, tier: Tier, provider: Provider) -> NodeResult {

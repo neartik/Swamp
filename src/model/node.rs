@@ -1,4 +1,4 @@
-use crate::ids::{NodeId, RunId};
+use crate::ids::{DispatchId, NodeId, RunId};
 use crate::model::core::{
     AccountId, Cost, FileChange, NodeKind, NodeState, Provider, SessionHandle, Tier, Usage,
     WorkspaceRef,
@@ -52,6 +52,12 @@ pub struct NodeRecord {
     /// Byte offset consumed so far in nodes/<id>/stream.jsonl. Restart resumes exactly here.
     pub stream_offset: u64,
     pub unparsed_lines: u32,
+    /// Nesting depth below the run root: the brain's workers are 1. Zero in schema 1.
+    #[serde(default)]
+    pub depth: u32,
+    /// The dispatch that created this node's logical task. None in schema 1.
+    #[serde(default)]
+    pub dispatch: Option<DispatchId>,
 }
 
 impl NodeRecord {
@@ -156,6 +162,8 @@ mod tests {
             summary: Some("done".into()),
             stream_offset: 4096,
             unparsed_lines: 1,
+            depth: 1,
+            dispatch: Some(DispatchId::from_str("01ARZ3NDEKTSV4RRFFQ69G5FAY").unwrap()),
         }
     }
 
@@ -187,5 +195,15 @@ mod tests {
         let json = serde_json::to_string(&n).unwrap();
         assert_eq!(serde_json::from_str::<NodeRecord>(&json).unwrap(), n);
         insta::assert_json_snapshot!(n);
+    }
+
+    #[test]
+    fn a_schema_1_record_reads_without_depth_or_dispatch() {
+        let mut json = serde_json::to_value(sample()).unwrap();
+        let obj = json.as_object_mut().unwrap();
+        obj.remove("depth");
+        obj.remove("dispatch");
+        let n: NodeRecord = serde_json::from_value(json).unwrap();
+        assert_eq!((n.depth, n.dispatch), (0, None));
     }
 }

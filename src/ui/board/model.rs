@@ -269,9 +269,10 @@ pub fn section_of(state: &NodeState) -> Section {
             Section::InFlight
         }
         NodeState::Queued | NodeState::Blocked { .. } => Section::Waiting,
-        NodeState::Succeeded | NodeState::Failed { .. } | NodeState::Cancelled { .. } => {
-            Section::Recent
-        }
+        NodeState::Succeeded
+        | NodeState::Failed { .. }
+        | NodeState::Cancelled { .. }
+        | NodeState::Rejected { .. } => Section::Recent,
     }
 }
 
@@ -708,6 +709,8 @@ mod tests {
                     summary: None,
                     stream_offset: 0,
                     unparsed_lines: 0,
+                    depth: 1,
+                    dispatch: None,
                 }),
             },
         }

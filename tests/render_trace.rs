@@ -106,6 +106,8 @@ fn record(n: &Node) -> NodeRecord {
         summary: None,
         stream_offset: 0,
         unparsed_lines: 0,
+        depth: 1,
+        dispatch: None,
     }
 }
 

@@ -1,5 +1,5 @@
-use crate::dispatch::Dispatcher;
-use crate::ids::NodeId;
+use crate::dispatch::{DispatchRequest, Dispatcher};
+use crate::ids::{CallSeq, DispatchId, NodeId};
 use crate::journal::record::NoteAuthor;
 use crate::journal::{JournalEvent, LlmDigest};
 use crate::mcp::jsonrpc::RpcError;
@@ -150,9 +150,12 @@ pub fn schemas() -> Vec<ToolSchema> {
 }
 
 pub async fn call(disp: &Arc<Dispatcher>, name: &str, args: Value) -> Result<Value, RpcError> {
-    journal_call(disp, name, &args).await;
+    let seq = disp.next_call_seq();
+    if name == "swamp_dispatch" {
+        return dispatch(disp, seq, args).await;
+    }
+    journal_call(disp, seq, name, &args, None).await;
     match name {
-        "swamp_dispatch" => dispatch(disp, args).await,
         "swamp_await" => await_nodes(disp, args).await,
         "swamp_status" => status(disp, args).await,
         "swamp_result" => result(disp, args),
@@ -193,17 +196,45 @@ fn yes() -> bool {
     true
 }
 
-async fn dispatch(disp: &Arc<Dispatcher>, args: Value) -> Result<Value, RpcError> {
-    let args: DispatchArgs = parse_args(args)?;
+fn dispatch_args(raw: Value) -> Result<DispatchArgs, RpcError> {
+    let args: DispatchArgs = parse_args(raw)?;
     if args.tasks.is_empty() {
         return Err(RpcError::invalid_params("`tasks` must not be empty"));
     }
+    Ok(args)
+}
+
+async fn dispatch(disp: &Arc<Dispatcher>, seq: CallSeq, raw: Value) -> Result<Value, RpcError> {
+    let args = match dispatch_args(raw.clone()) {
+        Ok(a) => a,
+        Err(e) => {
+            journal_call(disp, seq, "swamp_dispatch", &raw, None).await;
+            return Err(e);
+        }
+    };
+    let id = DispatchId::new();
+    journal_call(disp, seq, "swamp_dispatch", &raw, Some(id)).await;
     let budget = Duration::from_secs(args.max_wait_s.unwrap_or(DEFAULT_MAX_WAIT_S));
-    let wait = if args.wait { budget } else { SETTLE };
-    let results = disp.dispatch_batch(parent(disp), args.tasks, wait).await;
+    let out = disp
+        .dispatch(DispatchRequest {
+            id,
+            caller: caller(disp),
+            call_seq: Some(seq),
+            tasks: args.tasks,
+            wait: args.wait,
+            max_wait: Some(if args.wait { budget } else { SETTLE }),
+        })
+        .await;
     Ok(json!({
-        "nodes": results.iter().map(|r| result_json(disp, r)).collect::<Vec<_>>(),
-        "running": results.iter().filter(|r| r.state == "running").count(),
+        "dispatch_id": out.id.to_string(),
+        "nodes": out.results.iter().map(|r| {
+            let mut v = result_json(disp, r);
+            if let Some(obj) = v.as_object_mut() {
+                obj.insert("logical".into(), json!(r.node.to_string()));
+            }
+            v
+        }).collect::<Vec<_>>(),
+        "running": out.results.iter().filter(|r| r.state == "running").count(),
     }))
 }
 
@@ -295,7 +326,7 @@ struct NoteArgs {
 fn note(disp: &Arc<Dispatcher>, args: Value) -> Result<Value, RpcError> {
     let args: NoteArgs = parse_args(args)?;
     disp.journal.emit(
-        Some(parent(disp)),
+        Some(caller(disp)),
         JournalEvent::Note {
             author: NoteAuthor::Brain,
             text: args.text,
@@ -322,9 +353,8 @@ fn result_bytes(disp: &Arc<Dispatcher>) -> usize {
         .unwrap_or(DEFAULT_RESULT_BYTES)
 }
 
-/// Nodes the brain creates hang off a run-scoped root, so depth and parentage stay meaningful
-/// even though a tool call carries no node id of its own.
-fn parent(disp: &Arc<Dispatcher>) -> NodeId {
+/// The brain, whose id is the run's: its dispatches hang off the node that asked for them.
+fn caller(disp: &Arc<Dispatcher>) -> NodeId {
     NodeId(disp.journal.run().0)
 }
 
@@ -367,31 +397,46 @@ fn one_result_json(r: &NodeResult, max_bytes: usize) -> Value {
     value
 }
 
-/// Every tool call is journaled with its arguments on disk: the brain's reasoning, preserved.
-async fn journal_call(disp: &Arc<Dispatcher>, name: &str, args: &Value) {
+/// Every tool call is journaled, its arguments in one file per call that is never overwritten.
+async fn journal_call(
+    disp: &Arc<Dispatcher>,
+    seq: CallSeq,
+    name: &str,
+    args: &Value,
+    dispatch: Option<DispatchId>,
+) {
     let text = serde_json::to_string(args).unwrap_or_else(|_| "null".to_owned());
     let sha: String = Sha256::digest(text.as_bytes())
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect();
     let dir = disp.journal.paths().dir.join("tools");
-    let path = dir.join(format!("{name}-{}.json", &sha[..16]));
+    let path = dir.join(format!("{seq}-{name}.json"));
     if let Err(e) = write_args(&dir, &path, &text).await {
         tracing::warn!("cannot record tool arguments at {path}: {e}");
     }
     disp.journal.emit(
-        Some(parent(disp)),
+        Some(caller(disp)),
         JournalEvent::BrainToolCall {
             tool: name.to_owned(),
             args_sha256: sha,
             args_path: path,
+            call_seq: Some(seq),
+            dispatch,
         },
     );
 }
 
 async fn write_args(dir: &Utf8PathBuf, path: &Utf8PathBuf, text: &str) -> std::io::Result<()> {
+    use tokio::io::AsyncWriteExt;
     tokio::fs::create_dir_all(dir).await?;
-    tokio::fs::write(path, text).await
+    let mut f = tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .await?;
+    f.write_all(text.as_bytes()).await?;
+    f.flush().await
 }
 
 /// A worker that emits the closing delimiter must not be able to end the envelope early.

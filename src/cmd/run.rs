@@ -2,9 +2,10 @@ use crate::cli::RunArgs;
 use crate::cmd::{Ctx, RunSession, parse_duration, task_text, title_of, write_result};
 use crate::config::Config;
 use crate::dispatch::{NodeCtx, NodeOutcome, NodeRunner, run_node};
-use crate::ids::{NodeId, NodeIds, RunId};
+use crate::ids::{DispatchId, NodeId, NodeIds, RunId};
 use crate::journal::paths::RunPaths;
 use crate::model::core::{AccountId, NodeKind, NodeState, Provider, Tier};
+use crate::model::dispatch::{DispatchCounts, DispatchRecord, TaskRef};
 use crate::model::failure::Failure;
 use crate::model::node::{NodeRecord, WorkResultRef};
 use crate::model::result::{IsolationMode, NodeResult, TaskRequest};
@@ -40,7 +41,7 @@ pub async fn run(ctx: &Ctx, args: &RunArgs) -> anyhow::Result<i32> {
         println!("run {}", session.paths.run);
     }
     if args.no_brain {
-        single_node(ctx, session, args, task).await
+        single_node(ctx, session, args, task, depth).await
     } else {
         with_brain(ctx, session, args, task, depth).await
     }
@@ -68,6 +69,7 @@ async fn single_node(
     session: RunSession,
     args: &RunArgs,
     task: String,
+    depth: u32,
 ) -> anyhow::Result<i32> {
     let tier = args
         .tier
@@ -85,6 +87,30 @@ async fn single_node(
     let order = provider_order(&session.cfg, &request, tier);
     let provider = order.first().copied().unwrap_or(Provider::Anthropic);
     let spec = launch_spec(&session.cfg, &request, tier, provider, &session.paths);
+
+    // The run root is the caller of its one-task dispatch.
+    let logical = NodeId::new();
+    let root = NodeId(session.paths.run.0);
+    let dispatch = DispatchId::new();
+    crate::dispatch::journal_issued(
+        &session.journal,
+        DispatchRecord {
+            id: dispatch,
+            run: session.paths.run,
+            caller: root,
+            call_seq: None,
+            wait: !args.detach,
+            max_wait_s: None,
+            tasks: vec![TaskRef {
+                logical,
+                title: request.title.clone(),
+                tier,
+                provider,
+            }],
+            at: time::OffsetDateTime::now_utc(),
+        },
+    )
+    .await;
 
     let cancel = CancellationToken::new();
     let cx = NodeCtx {
@@ -105,19 +131,25 @@ async fn single_node(
         deadline: Instant::now() + session.cfg.node_timeout(tier),
         // No brain, no parent: this node is the run.
         parent: None,
-        logical: NodeId::new(),
+        logical,
+        dispatch: Some(dispatch),
+        depth: depth + 1,
         cancel: cancel.clone(),
     };
 
     if args.detach {
         let paths = session.paths.clone();
-        tokio::spawn(async move { run_node(&cx, spec, &request).await });
+        tokio::spawn(async move {
+            let outcome = run_node(&cx, spec, &request).await;
+            settle(&cx, dispatch, root, &outcome).await;
+        });
         wait_for_spawn(&paths).await;
         println!("detached; follow with `swamp trace {} --follow`", paths.run);
         return Ok(0);
     }
 
     let (outcome, interrupted) = supervise(&cx, spec, &request, &cancel).await;
+    settle(&cx, dispatch, root, &outcome).await;
     // The context holds journal and pool handles; the writer task cannot drain until it goes.
     drop(cx);
     let result = node_result(&request, tier, provider, &outcome);
@@ -143,6 +175,17 @@ async fn single_node(
     ctx.paths.deregister_run(paths.run).ok();
     report(ctx, &paths, &result)?;
     Ok(exit_code(outcome.failure.as_ref(), interrupted))
+}
+
+async fn settle(cx: &NodeCtx, dispatch: DispatchId, caller: NodeId, outcome: &NodeOutcome) {
+    let mut counts = DispatchCounts::default();
+    match &outcome.failure {
+        None => counts.succeeded = 1,
+        Some(Failure::Cancelled { .. }) => counts.cancelled = 1,
+        Some(_) => counts.failed = 1,
+    }
+    let cost = crate::dispatch::total_cost(outcome.attempts.iter().map(|a| a.cost));
+    crate::dispatch::journal_settled(&cx.journal, dispatch, caller, counts, cost).await;
 }
 
 /// Ctrl-C cancels the node, which kills its process group, and the loop still returns so the

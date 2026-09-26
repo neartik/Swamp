@@ -3,16 +3,19 @@ use crate::config::{Config, MAX_COOLDOWN};
 use crate::dispatch::account::{Account, AccountState, Health, QuotaSource, UsageLedger};
 use crate::dispatch::cooldown::cooldown_for;
 use crate::dispatch::persist::{self, StateMap};
-use crate::dispatch::policy::{Rank, Scoring, SelectionPolicy, explain, rank, score};
+use crate::dispatch::policy::{
+    Ineligible, Rank, Scoring, SelectionPolicy, explain, gate, rank, score,
+};
 use crate::ids::NodeId;
 use crate::journal::{JournalEvent, JournalHandle};
 use crate::model::core::{
-    AccountId, Cost, LimitReached, LimitScope, Provider, RateLimitSnapshot, Usage,
+    AccountId, Cost, LimitReached, LimitScope, NodeState, Provider, RateLimitSnapshot, Usage,
 };
+use crate::model::dispatch::Phase;
 use crate::model::failure::Failure;
 use camino::Utf8PathBuf;
 use parking_lot::Mutex;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
@@ -48,6 +51,8 @@ pub struct AccountPool {
     stderr_notices: AtomicBool,
     /// Coalesces the cross-process state file writes: one flush in flight at a time.
     persisting: Mutex<PersistGate>,
+    /// Blocked states journaled per task, collected by `take_blocked`.
+    blocked: Mutex<HashMap<NodeId, NodeState>>,
 }
 
 #[derive(Default)]
@@ -114,6 +119,7 @@ enum Capacity {
     AllExhausted {
         retry_at: OffsetDateTime,
         why: String,
+        ineligible: Vec<(AccountId, Ineligible)>,
     },
     Exhausted {
         reason: String,
@@ -197,6 +203,7 @@ impl AccountPool {
             cursor: AtomicU64::new(0),
             stderr_notices: AtomicBool::new(false),
             persisting: Mutex::new(PersistGate::default()),
+            blocked: Mutex::new(HashMap::new()),
         }))
     }
 
@@ -248,7 +255,11 @@ impl AccountPool {
                     }
                 },
                 Capacity::Busy { next_reset } => next_reset,
-                Capacity::AllExhausted { retry_at, why } => {
+                Capacity::AllExhausted {
+                    retry_at,
+                    why,
+                    ineligible,
+                } => {
                     // Once per blocked node, never once per loop iteration.
                     if !announced {
                         announced = true;
@@ -272,9 +283,27 @@ impl AccountPool {
                             node,
                             JournalEvent::NodeBlocked {
                                 until: retry_at,
-                                why,
+                                why: why.clone(),
+                                ineligible,
                             },
                         );
+                        // Only a task waiting for its lease gets here, so it leaves Queued.
+                        if let Some(id) = node {
+                            let blocked = NodeState::Blocked {
+                                until: retry_at,
+                                why: why.clone(),
+                            };
+                            self.blocked.lock().insert(id, blocked.clone());
+                            crate::dispatch::emit(
+                                &self.journal,
+                                node,
+                                JournalEvent::NodeStateChanged {
+                                    from: Phase::Queued,
+                                    to: blocked,
+                                    why,
+                                },
+                            );
+                        }
                     }
                     Some(retry_at)
                 }
@@ -300,6 +329,11 @@ impl AccountPool {
         }
     }
 
+    /// The Blocked state journaled for `node`, if any, forgotten on read.
+    pub fn take_blocked(&self, node: NodeId) -> Option<NodeState> {
+        self.blocked.lock().remove(&node)
+    }
+
     /// Why every candidate for `provider` is unusable right now, if they all are. Cheap and
     /// non-blocking, so a caller with another provider to try decides before anyone waits.
     pub fn all_exhausted(
@@ -308,7 +342,7 @@ impl AccountPool {
         exclude: &HashSet<AccountId>,
     ) -> Option<NoCapacity> {
         match self.capacity(provider, exclude) {
-            Capacity::AllExhausted { retry_at, why } => {
+            Capacity::AllExhausted { retry_at, why, .. } => {
                 Some(NoCapacity::AllExhausted { retry_at, why })
             }
             // No timer will rescue this provider, so failover is the only thing that can.
@@ -387,7 +421,7 @@ impl AccountPool {
                     }
                 }
                 Capacity::Busy { next_reset } => next_reset,
-                Capacity::AllExhausted { retry_at, why } => {
+                Capacity::AllExhausted { retry_at, why, .. } => {
                     if !announced {
                         announced = true;
                         tracing::warn!(
@@ -787,10 +821,22 @@ impl AccountPool {
         let pool_window = pool_window(&live);
         let (mut busy, mut retry_at) = (false, None::<OffsetDateTime>);
         let mut why: Vec<String> = Vec::new();
+        let mut ineligible = Vec::new();
         let brain_held = self.brain_held.lock().clone();
         for (a, s) in &live {
             if score(self.policy, a, s, pool_window, &self.scoring, now).is_some() {
                 return Capacity::Ready;
+            }
+            if let Some(g) = gate(
+                s.health,
+                s.cooldown_until,
+                s.quota.as_ref(),
+                s.inflight,
+                a.max_concurrency,
+                &self.scoring,
+                now,
+            ) {
+                ineligible.push((a.id.clone(), g));
             }
             match self.block_reason(a, s, now) {
                 // A slot the brain holds for the whole run comes back to nobody, so it must
@@ -812,6 +858,7 @@ impl AccountPool {
             (false, Some(retry_at)) => Capacity::AllExhausted {
                 retry_at,
                 why: why.join("; "),
+                ineligible,
             },
             (false, None) if why.is_empty() => Capacity::Exhausted {
                 reason: self.no_account_error(provider, exclude).to_string(),

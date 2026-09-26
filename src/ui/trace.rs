@@ -52,7 +52,13 @@ fn visible(view: &RunView, o: &TraceOpts) -> Vec<TreeRow> {
     view.tree()
         .into_iter()
         .filter(|r| o.depth.is_none_or(|d| r.depth <= d))
-        .filter(|r| !o.failed || matches!(r.state, NodeState::Failed { .. }))
+        .filter(|r| {
+            !o.failed
+                || matches!(
+                    r.state,
+                    NodeState::Failed { .. } | NodeState::Rejected { .. }
+                )
+        })
         .filter(|r| match o.node {
             None => true,
             Some(id) => r.logical == id || r.attempts.contains(&id),
@@ -114,9 +120,6 @@ fn total_cost(view: &RunView) -> String {
 
 /// One collapsed row: the headline, its attempt chain, its failure and its branch.
 fn block(view: &RunView, row: &TreeRow, siblings: bool, o: &TraceOpts) -> String {
-    let Some(rec) = latest(view, row) else {
-        return String::new();
-    };
     let indent = "  ".repeat(row.depth as usize);
     let stem = if row.depth == 0 {
         "* ".to_owned()
@@ -129,6 +132,9 @@ fn block(view: &RunView, row: &TreeRow, siblings: bool, o: &TraceOpts) -> String
         format!("{indent}|    ")
     } else {
         format!("{indent}     ")
+    };
+    let Some(rec) = latest(view, row) else {
+        return unstarted(view, row, &stem, &detail);
     };
 
     let tier = if rec.kind == NodeKind::Worker {
@@ -188,6 +194,37 @@ fn block(view: &RunView, row: &TreeRow, siblings: bool, o: &TraceOpts) -> String
                 out.push_str(&format!("{detail}  {}\n", event_text(ev)));
             }
         }
+    }
+    out
+}
+
+/// A task with no attempt yet has no node id, so its row leads with the logical one.
+fn unstarted(view: &RunView, row: &TreeRow, stem: &str, detail: &str) -> String {
+    let tier = view
+        .tasks
+        .get(&row.logical)
+        .map(|t| format!("[{}] ", fmt::pad(&t.tier.to_string(), 4)))
+        .unwrap_or_default();
+    let mut out = format!(
+        "{stem}{}  {tier}{}  {}  {}  {:>7}  {:>7}  {:>7}  {}\n",
+        row.logical.short(),
+        fmt::pad(&row.title, TITLE_WIDTH),
+        fmt::pad("-", ACCOUNT_WIDTH),
+        fmt::pad("-", MODEL_WIDTH),
+        "-",
+        "-",
+        "-",
+        fmt::state_word(&row.state),
+    );
+    match &row.state {
+        NodeState::Rejected { reason } => {
+            out.push_str(&format!("{detail}{}\n", failure_detail(reason)));
+        }
+        NodeState::Failed { failure } => {
+            out.push_str(&format!("{detail}{}\n", failure_detail(failure)));
+        }
+        NodeState::Blocked { why, .. } => out.push_str(&format!("{detail}blocked: {why}\n")),
+        _ => {}
     }
     out
 }

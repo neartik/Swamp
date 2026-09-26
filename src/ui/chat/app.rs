@@ -459,7 +459,7 @@ impl App {
         let mut out = Vec::new();
         for l in lines {
             self.view.apply(l);
-            if let JournalEvent::NodeBlocked { until, why } = &l.event {
+            if let JournalEvent::NodeBlocked { until, why, .. } = &l.event {
                 out.push(self.blocked(*until, why));
             }
         }

@@ -320,6 +320,8 @@ impl Launch {
             summary: None,
             stream_offset: 0,
             unparsed_lines: 0,
+            depth: crate::worker::depth_from_env(),
+            dispatch: None,
         };
         self.journal
             .emit_durable(

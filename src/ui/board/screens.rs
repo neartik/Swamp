@@ -150,6 +150,8 @@ impl Spawn {
             summary: None,
             stream_offset: 0,
             unparsed_lines: 0,
+            depth: 1,
+            dispatch: None,
         };
         JournalLine {
             seq,
@@ -294,6 +296,7 @@ fn journal_b() -> Vec<JournalLine> {
             event: JournalEvent::NodeBlocked {
                 until: fx::at(200 + 38 * 60),
                 why: "main cooling until 14:45".into(),
+                ineligible: Vec::new(),
             },
         },
         ok.line(4),

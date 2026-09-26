@@ -92,6 +92,21 @@ impl Failure {
                 | Self::Cancelled { .. }
         )
     }
+    /// The serialized tag.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::RateLimited { .. } => "rate_limited",
+            Self::AuthExpired { .. } => "auth_expired",
+            Self::Overloaded { .. } => "overloaded",
+            Self::Timeout { .. } => "timeout",
+            Self::WorkerError { .. } => "worker_error",
+            Self::PermissionDenied { .. } => "permission_denied",
+            Self::Crashed { .. } => "crashed",
+            Self::Truncated { .. } => "truncated",
+            Self::NoCapacity { .. } => "no_capacity",
+            Self::Cancelled { .. } => "cancelled",
+        }
+    }
 }
 
 #[cfg(test)]

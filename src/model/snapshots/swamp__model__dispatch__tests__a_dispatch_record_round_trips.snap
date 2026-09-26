@@ -1,0 +1,21 @@
+---
+source: src/model/dispatch.rs
+expression: r
+---
+{
+  "id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+  "run": "01ARZ3NDEKTSV4RRFFQ69G5FAW",
+  "caller": "01ARZ3NDEKTSV4RRFFQ69G5FAW",
+  "call_seq": 3,
+  "wait": true,
+  "max_wait_s": 600,
+  "tasks": [
+    {
+      "logical": "01ARZ3NDEKTSV4RRFFQ69G5FAX",
+      "title": "lex",
+      "tier": "mid",
+      "provider": "anthropic"
+    }
+  ],
+  "at": "2023-11-14T22:13:20Z"
+}

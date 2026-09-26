@@ -73,6 +73,7 @@ pub fn glyph(s: &NodeState) -> &'static str {
         NodeState::Succeeded => "✔",
         NodeState::Failed { .. } => "✘",
         NodeState::Cancelled { .. } => "⊘",
+        NodeState::Rejected { .. } => "⊗",
     }
 }
 
@@ -87,6 +88,7 @@ pub fn state_word(s: &NodeState) -> &'static str {
         NodeState::Succeeded => "ok",
         NodeState::Failed { .. } => "failed",
         NodeState::Cancelled { .. } => "cancelled",
+        NodeState::Rejected { .. } => "rejected",
     }
 }
 

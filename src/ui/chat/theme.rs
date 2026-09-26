@@ -202,7 +202,7 @@ impl Theme {
     pub fn state_glyph(&self, s: &NodeState) -> &'static str {
         match s {
             NodeState::Succeeded => self.g(Glyph::Succeeded),
-            NodeState::Failed { .. } => self.g(Glyph::Failed),
+            NodeState::Failed { .. } | NodeState::Rejected { .. } => self.g(Glyph::Failed),
             NodeState::Cancelled { .. } => self.g(Glyph::Cancelled),
             NodeState::Orphaned { .. } => self.g(Glyph::Orphaned),
             NodeState::Queued | NodeState::Blocked { .. } => self.g(Glyph::Queued),
@@ -214,7 +214,7 @@ impl Theme {
     pub fn state_role(&self, s: &NodeState) -> Role {
         match s {
             NodeState::Succeeded => Role::Ok,
-            NodeState::Failed { .. } => Role::Err,
+            NodeState::Failed { .. } | NodeState::Rejected { .. } => Role::Err,
             NodeState::Running { .. } => Role::Run,
             _ => Role::Meta,
         }

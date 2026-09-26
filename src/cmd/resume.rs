@@ -5,6 +5,7 @@ use crate::journal::fold::RunView;
 use crate::journal::paths::RunPaths;
 use crate::journal::record::JournalEvent;
 use crate::model::core::{NodeKind, NodeState, SessionHandle, Usage, WorkspaceRef};
+use crate::model::dispatch::Phase;
 use crate::model::failure::Failure;
 use crate::model::node::NodeRecord;
 use crate::model::result::{IsolationMode, NodeResult};
@@ -296,6 +297,34 @@ async fn attach(
             },
         )
         .await?;
+    let why = format!(
+        "recovered: {}",
+        out.failure.as_ref().map_or("succeeded", Failure::kind)
+    );
+    session.journal.emit(
+        Some(node),
+        JournalEvent::NodeStateChanged {
+            from: Phase::from(&record.state),
+            to: state.clone(),
+            why: why.clone(),
+        },
+    );
+    // Recovery never retries, so the recovered attempt ends its task too.
+    if let Some(task) = view
+        .tasks
+        .get(&record.logical)
+        .and_then(|t| t.state.as_ref())
+        .filter(|s| !s.is_terminal())
+    {
+        session.journal.emit(
+            Some(record.logical),
+            JournalEvent::NodeStateChanged {
+                from: Phase::from(task),
+                to: state.clone(),
+                why,
+            },
+        );
+    }
 
     write_result(
         &session.paths,

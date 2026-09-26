@@ -364,7 +364,7 @@ fn health_color(h: Health) -> Color {
 fn state_color(s: &NodeState) -> Color {
     match s {
         NodeState::Succeeded => Color::Green,
-        NodeState::Failed { .. } => Color::Red,
+        NodeState::Failed { .. } | NodeState::Rejected { .. } => Color::Red,
         NodeState::Running { .. } => Color::Cyan,
         NodeState::Cancelled { .. } | NodeState::Orphaned { .. } => Color::Yellow,
         _ => Color::Gray,
@@ -603,6 +603,8 @@ mod tests {
             summary: None,
             stream_offset: 0,
             unparsed_lines: 0,
+            depth: 1,
+            dispatch: None,
         }
     }
 

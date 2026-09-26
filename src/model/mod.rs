@@ -1,4 +1,5 @@
 pub mod core;
+pub mod dispatch;
 pub mod event;
 pub mod failure;
 pub mod node;
@@ -9,6 +10,7 @@ pub use core::{
     LimitScope, LimitStatus, LimitWindow, NodeKind, NodeState, Provider, RateLimitSnapshot,
     SessionHandle, Tier, Usage, WorkspaceRef,
 };
+pub use dispatch::{DispatchCounts, DispatchRecord, DispatchState, NodeTransition, Phase, TaskRef};
 pub use event::WorkerEvent;
 pub use failure::{Detector, Failure};
 pub use node::{ExitInfo, NodeRecord, WorkResultRef};

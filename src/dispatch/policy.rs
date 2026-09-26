@@ -133,7 +133,8 @@ fn inputs(a: &Account, s: &AccountState, pool_window: u64, now: OffsetDateTime) 
 
 /// Why an account cannot take work right now. `score` returns `None` for exactly these, so
 /// the dispatcher's decision and any surface explaining one read the same gate.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Ineligible {
     Disabled,
     AuthBroken,

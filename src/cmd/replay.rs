@@ -140,6 +140,8 @@ fn from_result(ctx: &Ctx, paths: &RunPaths, r: &serde_json::Value) -> Option<Nod
         summary: text("summary"),
         stream_offset: 0,
         unparsed_lines: 0,
+        depth: 0,
+        dispatch: None,
     })
 }
 
@@ -147,7 +149,7 @@ fn from_result(ctx: &Ctx, paths: &RunPaths, r: &serde_json::Value) -> Option<Nod
 /// raw streams instead of losing it.
 async fn rewrite(ctx: &Ctx, paths: &RunPaths, records: Vec<NodeRecord>) -> anyhow::Result<u32> {
     let journal = paths.journal();
-    let carried = account_lines(&journal);
+    let carried = carried_lines(&journal);
     if journal.is_file() {
         std::fs::rename(&journal, journal.with_extension("jsonl.prev"))?;
     }
@@ -300,10 +302,10 @@ async fn rewrite(ctx: &Ctx, paths: &RunPaths, records: Vec<NodeRecord>) -> anyho
     Ok(count)
 }
 
-/// Account history no raw stream carries: which account served the run, its health and
-/// cooldown, and the pool's token counters. The rewrite replaces the journal, so these lines
-/// are copied across it verbatim instead of being dropped with it.
-fn account_lines(journal: &camino::Utf8Path) -> Vec<JournalLine> {
+/// History no raw stream carries: which account served the run, its health and cooldown, the
+/// pool's token counters, and the dispatches that grouped its tasks. The rewrite replaces the
+/// journal, so these lines are copied across it verbatim instead of being dropped with it.
+fn carried_lines(journal: &camino::Utf8Path) -> Vec<JournalLine> {
     #[derive(Default)]
     struct Accounts(Vec<JournalLine>);
     impl crate::journal::fold::Projection for Accounts {
@@ -314,6 +316,10 @@ fn account_lines(journal: &camino::Utf8Path) -> Vec<JournalLine> {
                 JournalEvent::AccountSelected { .. }
                     | JournalEvent::AccountHealth { .. }
                     | JournalEvent::AccountUsage { .. }
+                    | JournalEvent::DispatchIssued { .. }
+                    | JournalEvent::TaskQueued { .. }
+                    | JournalEvent::DispatchRejected { .. }
+                    | JournalEvent::DispatchSettled { .. }
             ) {
                 self.0.push(l.clone());
             }

@@ -170,6 +170,11 @@ fn is_barrier(event: &JournalEvent) -> bool {
         JournalEvent::RunStarted { .. }
             | JournalEvent::NodeSpawned { .. }
             | JournalEvent::ProcessStarted { .. }
+            | JournalEvent::ProcessExited { .. }
+            | JournalEvent::DispatchIssued { .. }
+            | JournalEvent::TaskQueued { .. }
+            | JournalEvent::DispatchRejected { .. }
+            | JournalEvent::DispatchSettled { .. }
             | JournalEvent::WorktreeCreated { .. }
             | JournalEvent::NodeFinished { .. }
             | JournalEvent::Adopted { .. }
