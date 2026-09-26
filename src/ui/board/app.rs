@@ -129,6 +129,13 @@ impl App {
     /// newest running task under `follow`, to what needs attention until the user moved.
     pub fn sync(&mut self, board: &mut Board) {
         board.clamp();
+        if self
+            .notice
+            .as_ref()
+            .is_some_and(|(_, _, until)| *until <= Instant::now())
+        {
+            self.notice = None;
+        }
         let rows = self.visible(&board.rows());
         let pick = if self.follow {
             newest_running(&rows)

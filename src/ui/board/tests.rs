@@ -413,6 +413,41 @@ fn the_hints_are_the_key_tables() {
     assert!(!last.contains("cancel"), "{last}");
 }
 
+/// Any pane, however small, draws: the detail gives up lines before the body does, and the
+/// selection stays in view while the body scrolls.
+#[test]
+fn every_pane_size_draws_and_keeps_the_selection_in_view() {
+    let mut b = board();
+    let ascii = Theme {
+        ascii: true,
+        ..Theme::plain()
+    };
+    for theme in [Theme::plain(), ascii] {
+        let mut app = App::new(true);
+        for width in [0u16, 20, 40, 60, 100, 160] {
+            for height in 0u16..30 {
+                let lines = app.lines(&b, Rect::new(0, 0, width, height), &theme, 0, MAX_AGE);
+                for line in text_of(&lines) {
+                    assert!(
+                        unicode_width::UnicodeWidthStr::width(line.as_str()) <= width as usize,
+                        "{width}x{height}: {line:?}"
+                    );
+                }
+            }
+        }
+    }
+    let mut app = App::new(true);
+    app.touched = true;
+    b.selected = Selection::Account(AccountId("main".into()));
+    app.on_key(&mut b, key(KeyCode::Up));
+    let lines = app.lines(&b, Rect::new(0, 0, 60, 20), &Theme::plain(), 0, MAX_AGE);
+    let text = text_of(&lines).join("\n");
+    assert!(
+        text.contains("\u{258c}"),
+        "the selected row is on screen: {text}"
+    );
+}
+
 // ---------------------------------------------------------------- cancel
 
 /// `k` then `y` is exactly one cancel, of what is selected.
