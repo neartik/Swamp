@@ -26,6 +26,8 @@ pub struct Scenario {
     pub last_message: Option<String>,
     /// Brain mode: dispatched through the MCP bridge before the turn ends.
     pub dispatch: Vec<BrainTask>,
+    /// How many identical `swamp_dispatch` calls the brain makes; 0 means one.
+    pub dispatch_calls: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -92,6 +94,12 @@ impl Scenario {
 
     pub fn says(mut self, line: &str) -> Scenario {
         self.stderr.push(line.to_owned());
+        self
+    }
+
+    /// Repeats the brain's `swamp_dispatch` call, arguments and all, `n` times.
+    pub fn dispatch_calls(mut self, n: u32) -> Scenario {
+        self.dispatch_calls = n;
         self
     }
 

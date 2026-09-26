@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 use swamp::config::{Config, load, resolve, validate};
-use swamp::dispatch::policy::{Rank, Scoring, SelectionPolicy, explain, rank, score};
+use swamp::dispatch::policy::{Ineligible, Rank, Scoring, SelectionPolicy, explain, rank, score};
 use swamp::dispatch::{Account, AccountPool, AccountState, Health, NoCapacity};
 use swamp::journal::JournalHandle;
 use swamp::journal::paths::RunPaths;
@@ -695,11 +695,37 @@ async fn a_blocked_node_journals_one_line_and_does_not_spin() {
         "acquire spun: {} wakeups",
         h.pool.wakeups() - before
     );
-    let blocked: Vec<_> = drain(&mut h.events)
-        .into_iter()
-        .filter(|(n, e)| matches!(e, JournalEvent::NodeBlocked { .. }) && *n == Some(node))
+    let events = drain(&mut h.events);
+    let blocked: Vec<_> = events
+        .iter()
+        .filter_map(|(n, e)| match e {
+            JournalEvent::NodeBlocked { ineligible, .. } if *n == Some(node) => Some(ineligible),
+            _ => None,
+        })
         .collect();
     assert_eq!(blocked.len(), 1, "one NodeBlocked per blocked node");
+    let mut accounts: Vec<_> = blocked[0]
+        .iter()
+        .map(|(a, why)| (a.0.as_str(), *why))
+        .collect();
+    accounts.sort_by_key(|(a, _)| *a);
+    assert_eq!(
+        accounts,
+        vec![("alt", Ineligible::Cooling), ("main", Ineligible::Cooling)],
+        "the verdict is structured per account"
+    );
+    let changes: Vec<_> = events
+        .iter()
+        .filter(|(n, e)| matches!(e, JournalEvent::NodeStateChanged { .. }) && *n == Some(node))
+        .collect();
+    assert_eq!(changes.len(), 1, "the task left Queued once");
+    assert!(
+        matches!(
+            h.pool.take_blocked(node),
+            Some(swamp::NodeState::Blocked { .. })
+        ),
+        "the caller collects the state it left Queued for"
+    );
 }
 
 /// 11. `esc esc` while blocked comes back at once, and it is a cancellation, not a capacity

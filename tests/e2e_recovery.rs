@@ -7,6 +7,7 @@ use nix::unistd::Pid;
 use std::time::Duration;
 use support::{Harness, Scenario, wait_for};
 use swamp::model::core::NodeState;
+use swamp::model::dispatch::Phase;
 
 const TASK: &str = "port the parser to the new lexer";
 const PATIENCE: Duration = Duration::from_secs(30);
@@ -43,6 +44,10 @@ fn a_killed_supervisor_leaves_an_adoptable_worker_and_resume_finishes_it() {
         node.state
     );
     assert!(node.stream_offset > 0, "nothing was parsed before the kill");
+    assert_eq!(node.depth, 1);
+    let dispatch = node
+        .dispatch
+        .expect("a --no-brain node still has its dispatch");
 
     // The plan spends nothing: it reports that the worker is alive and where to resume it.
     h.swamp(&["resume", "last", "--plan"])
@@ -81,6 +86,16 @@ fn a_killed_supervisor_leaves_an_adoptable_worker_and_resume_finishes_it() {
     let view = h.last_view();
     let node = view.nodes.values().next().expect("the node");
     assert_eq!(node.state, NodeState::Succeeded);
+    // Recovery keeps the node where it was: same depth, same dispatch, same task.
+    assert_eq!(node.depth, 1);
+    assert_eq!(node.dispatch, Some(dispatch));
+    assert_eq!(view.tasks[&node.logical].depth, Some(1));
+    assert_eq!(view.dispatches[&dispatch].tasks, vec![node.logical]);
+    let chain = &view.transitions[&node.id];
+    let last = chain.last().expect("the recovery is a transition");
+    assert_eq!(last.from, Phase::Running);
+    assert_eq!(last.to, NodeState::Succeeded);
+    assert_eq!(view.state_of(node.logical), Some(NodeState::Succeeded));
     assert!(
         node.work.as_ref().is_some_and(|w| !w.empty),
         "the diff was captured"
@@ -254,4 +269,49 @@ fn a_reparse_keeps_the_account_rows_no_raw_stream_can_rebuild() {
     assert_eq!(kept.window_tokens, recorded.window_tokens);
     assert_eq!(kept.health, recorded.health);
     assert_eq!(after.nodes.len(), before.nodes.len(), "the nodes reparsed");
+}
+
+/// `ProcessStarted` with no `ProcessExited` and a dead pid reads as orphaned.
+#[test]
+fn a_node_killed_mid_run_reads_orphaned() {
+    let h = Harness::new().scenario(
+        "main",
+        Scenario::claude().slow(900).edits("fixed.txt", "patched\n"),
+    );
+    let mut child = h.spawn(&["run", "--no-brain", TASK]);
+    wait_for("the run directory", PATIENCE, || !h.runs().is_empty());
+    let journal = h.last_run().journal();
+    wait_for("the worker process", PATIENCE, || {
+        std::fs::read_to_string(&journal)
+            .map(|t| t.contains(r#""ev":"process_started""#))
+            .unwrap_or(false)
+    });
+    let worker = worker_pid(&h);
+
+    kill(Pid::from_raw(child.id() as i32), Signal::SIGKILL).expect("SIGKILL the supervisor");
+    let _ = child.wait();
+    // The worker leads its own process group.
+    kill(Pid::from_raw(-worker), Signal::SIGKILL).expect("SIGKILL the worker");
+    wait_for("the worker to go", PATIENCE, || {
+        kill(Pid::from_raw(worker), None).is_err()
+    });
+
+    let text = std::fs::read_to_string(&journal).expect("journal");
+    assert!(text.contains(r#""ev":"process_started""#));
+    assert!(!text.contains(r#""ev":"process_exited""#), "{text}");
+
+    let run = h.last_run();
+    let mut view = h.last_view();
+    let id = view.nodes.values().next().expect("the node").id;
+    assert!(matches!(view.nodes[&id].state, NodeState::Running { .. }));
+    view.mark_orphans(&|n| swamp::worker::liveness::is_ours(&run.pidfile(n)));
+    assert!(
+        matches!(view.nodes[&id].state, NodeState::Orphaned { pid, .. } if pid == worker),
+        "{:?}",
+        view.nodes[&id].state
+    );
+    h.swamp(&["trace", "last"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("orphaned"));
 }

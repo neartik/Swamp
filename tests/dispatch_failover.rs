@@ -6,20 +6,24 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use swamp::config::{Config, load, resolve, validate};
+use swamp::dispatch::DispatchRequest;
 use swamp::dispatch::{AccountPool, Dispatcher, Health, NodeCtx, NodeRunner, run_node};
-use swamp::journal::JournalHandle;
+use swamp::journal::fold::Scope;
 use swamp::journal::paths::{Paths, RunPaths};
 use swamp::journal::writer::{FsyncPolicy, Writer};
+use swamp::journal::{JournalHandle, Projection, RunView};
+use swamp::model::core::NodeState;
 use swamp::model::core::{
     AccountId, LimitScope, NodeKind, Provider, SessionHandle, Tier, WorkspaceRef,
 };
+use swamp::model::dispatch::{DispatchState, Phase};
 use swamp::model::failure::{Detector, Failure};
 use swamp::model::node::WorkResultRef;
 use swamp::model::result::{IsolationMode, TaskRequest};
 use swamp::worker::RunOutcome;
 use swamp::worker::adapter::{LaunchSpec, SessionPlan};
 use swamp::workspace::{Git, NodeWorktree, WorkspaceManager};
-use swamp::{JournalEvent, NodeId, NodeIds, RunId, SwampError};
+use swamp::{JournalEvent, JournalLine, NodeId, NodeIds, RunId, SwampError};
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
@@ -242,7 +246,7 @@ fn config(extra: &str) -> Arc<Config> {
 
 struct Fixture {
     _dir: tempfile::TempDir,
-    _events: Events,
+    events: Mutex<Events>,
     root: Utf8PathBuf,
     cfg: Arc<Config>,
     journal: JournalHandle,
@@ -278,7 +282,7 @@ async fn fixture(extra: &str) -> Fixture {
     .expect("pool");
     Fixture {
         _dir: dir,
-        _events: rx,
+        events: Mutex::new(rx),
         root,
         cfg,
         journal,
@@ -287,6 +291,29 @@ async fn fixture(extra: &str) -> Fixture {
 }
 
 impl Fixture {
+    /// The durable lines on disk, then everything still queued for the writer, in emit order.
+    fn view(&self) -> RunView {
+        let mut lines = swamp::journal::replay(&self.journal.paths.journal(), Collect::default())
+            .expect("replay");
+        let mut seq = lines.last().map_or(0, |l| l.seq + 1);
+        let mut rx = self.events.lock().expect("events");
+        while let Ok((node, event)) = rx.try_recv() {
+            lines.push(JournalLine {
+                seq,
+                at: time::OffsetDateTime::now_utc(),
+                run: self.journal.run,
+                node,
+                event,
+            });
+            seq += 1;
+        }
+        let mut view = RunView::default();
+        for l in &lines {
+            view.apply(l);
+        }
+        view
+    }
+
     fn ctx(&self, runner: Arc<dyn NodeRunner>, deadline: Duration) -> NodeCtx {
         NodeCtx {
             cfg: Arc::clone(&self.cfg),
@@ -299,6 +326,8 @@ impl Fixture {
             deadline: Instant::now() + deadline,
             parent: None,
             logical: NodeId::new(),
+            dispatch: None,
+            depth: 1,
             cancel: CancellationToken::new(),
         }
     }
@@ -380,6 +409,19 @@ fn health_of(pool: &Arc<AccountPool>, who: &AccountId) -> Health {
         .find(|(_, a, _)| a == who)
         .map(|(_, _, s)| s.health)
         .expect("a configured account")
+}
+
+#[derive(Default)]
+struct Collect(Vec<JournalLine>);
+
+impl Projection for Collect {
+    type Out = Vec<JournalLine>;
+    fn apply(&mut self, l: &JournalLine) {
+        self.0.push(l.clone());
+    }
+    fn finish(self) -> Vec<JournalLine> {
+        self.0
+    }
 }
 
 // ---------------------------------------------------------------- tests
@@ -970,4 +1012,144 @@ async fn a_cancelled_same_account_backoff_returns_at_once() {
     for (_, id, s) in f.pool.snapshot() {
         assert_eq!(s.inflight, 0, "{} still holds the backoff's slot", id.0);
     }
+}
+
+// ---------------------------------------------------------------- dispatch records
+
+/// A rotation is a second attempt of the same task: one logical id, one dispatch.
+#[tokio::test]
+async fn a_rotate_retry_shares_its_logical_id_and_dispatch() {
+    let f = fixture(TWO_ACCOUNTS).await;
+    let runner = Scripted::new(&f.root, vec![failed(rate_limited()), success()]);
+    let disp = f.dispatcher(runner.clone()).await;
+    let caller = NodeId(f.journal.run().0);
+    let out = disp
+        .dispatch(DispatchRequest::new(caller, vec![task("port the parser")]))
+        .await;
+    let result = &out.results[0];
+    assert!(result.ok, "{:?}", result.failure);
+    assert_eq!(result.attempts, 2);
+
+    let view = f.view();
+    let logical = result.node;
+    let attempts = view.attempts(logical);
+    assert_eq!(attempts.len(), 2);
+    assert_eq!(attempts[1].retry_of, Some(attempts[0].id));
+    for a in &attempts {
+        assert_eq!(a.logical, logical);
+        assert_eq!(a.dispatch, Some(out.id));
+        assert_eq!(a.depth, 1);
+    }
+    assert_ne!(attempts[0].account, attempts[1].account);
+
+    let d = &view.dispatches[&out.id];
+    assert_eq!(d.tasks, vec![logical]);
+    assert_eq!(d.state, DispatchState::Settled);
+    assert_eq!(d.counts.map(|c| c.succeeded), Some(1));
+    assert_eq!(d.record.as_ref().map(|r| r.caller), Some(caller));
+    assert_eq!(view.tasks[&logical].depth, Some(1));
+    assert_eq!(view.state_of(logical), Some(NodeState::Succeeded));
+
+    let phases: Vec<Phase> = view.transitions[&logical]
+        .iter()
+        .map(|t| Phase::from(&t.to))
+        .collect();
+    assert_eq!(
+        phases,
+        vec![
+            Phase::Leased,
+            Phase::Queued,
+            Phase::Leased,
+            Phase::Succeeded
+        ],
+        "the task went back to waiting between its attempts"
+    );
+    let r = view.rollup(Scope::Dispatch(out.id));
+    assert_eq!((r.nodes, r.failed), (1, 0));
+}
+
+/// A refused task is still a fact: it is journaled and the fold can name it.
+#[tokio::test]
+async fn a_max_nodes_overflow_journals_a_rejection_the_fold_can_see() {
+    let f = fixture(&format!(
+        "{TWO_ACCOUNTS}\n[limits]\nmax_nodes_per_run = 1\n"
+    ))
+    .await;
+    let runner = Scripted::new(&f.root, vec![]);
+    let disp = f.dispatcher(runner.clone()).await;
+    let caller = NodeId(f.journal.run().0);
+    let out = disp
+        .dispatch(DispatchRequest::new(
+            caller,
+            vec![task("first"), task("second")],
+        ))
+        .await;
+    assert_eq!(runner.calls().len(), 1);
+    let rejected = out
+        .results
+        .iter()
+        .find(|r| !r.ok)
+        .expect("one task over the limit");
+
+    let view = f.view();
+    match view.state_of(rejected.node) {
+        Some(NodeState::Rejected {
+            reason: Failure::WorkerError { subtype, .. },
+        }) => assert_eq!(subtype, "max_nodes_per_run"),
+        other => panic!("expected a rejection, got {other:?}"),
+    }
+    assert!(view.attempts(rejected.node).is_empty());
+    let d = &view.dispatches[&out.id];
+    assert_eq!(d.tasks.len(), 2);
+    let counts = d.counts.expect("the dispatch settled");
+    assert_eq!((counts.succeeded, counts.rejected), (1, 1));
+    assert_eq!(view.totals().rejected, 1);
+    assert!(
+        view.tree().iter().any(|r| r.logical == rejected.node),
+        "a rejected task is a row of the tree"
+    );
+}
+
+/// A seeded dispatcher keeps the run's depths, node budget and tool call sequence.
+#[tokio::test]
+async fn a_seeded_dispatcher_continues_the_run_it_resumes() {
+    let f = fixture(&format!(
+        "{TWO_ACCOUNTS}\n[limits]\nmax_depth = 1\nmax_nodes_per_run = 2\n"
+    ))
+    .await;
+    let runner = Scripted::new(&f.root, vec![]);
+    let first = f.dispatcher(runner.clone()).await;
+    let caller = NodeId(f.journal.run().0);
+    let done = first.dispatch_one(caller, task("first")).await;
+    assert!(done.ok);
+    assert_eq!(first.next_call_seq().0, 1);
+    let view = f.view();
+
+    let fresh = f.dispatcher(runner.clone()).await;
+    let nested = fresh.dispatch_one(done.node, task("nested")).await;
+    assert!(
+        nested.ok,
+        "an unseeded dispatcher forgets the parent's depth"
+    );
+
+    let seeded = f.dispatcher(runner.clone()).await;
+    seeded.seed(&view);
+    let nested = seeded.dispatch_one(done.node, task("nested")).await;
+    let detail = match nested.failure {
+        Some(Failure::WorkerError { detail, .. }) => detail,
+        other => panic!("expected a max_depth rejection, got {other:?}"),
+    };
+    assert!(detail.contains("max_depth"), "{detail}");
+    let sibling = seeded.dispatch_one(caller, task("second")).await;
+    assert!(sibling.ok, "one node of the budget is left");
+    let over = seeded.dispatch_one(caller, task("third")).await;
+    assert!(
+        !over.ok,
+        "the budget counts the nodes spawned before the resume"
+    );
+
+    let mut journaled = RunView::default();
+    journaled.call_seq = Some(swamp::CallSeq(7));
+    seeded.seed(&journaled);
+    assert_eq!(seeded.next_call_seq().0, 8);
 }

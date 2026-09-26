@@ -17,7 +17,7 @@ use swamp::model::node::WorkResultRef;
 use swamp::worker::RunOutcome;
 use swamp::worker::adapter::LaunchSpec;
 use swamp::workspace::{Git, NodeWorktree, WorkspaceManager};
-use swamp::{NodeId, RunId};
+use swamp::{DispatchId, NodeId, RunId};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use tokio_util::sync::CancellationToken;
@@ -363,6 +363,32 @@ async fn dispatch_creates_nodes_journals_the_call_and_wraps_worker_text() {
             .expect("recorded arguments")
             .contains("port the parser")
     );
+
+    // The response, the tool call and the dispatch record name the same dispatch.
+    let dispatch = out["dispatch_id"].as_str().expect("a dispatch id");
+    assert!(dispatch.starts_with("dsp_"), "{dispatch}");
+    let dispatch: DispatchId = dispatch.parse().expect("the dispatch id parses back");
+    assert_eq!(node["logical"], node["node"]);
+    let dispatch = json!(dispatch);
+    assert_eq!(call["dispatch"], dispatch);
+    assert_eq!(call["call_seq"], json!(1));
+    assert!(
+        args_path.ends_with("tools/1-swamp_dispatch.json"),
+        "{args_path}"
+    );
+    let issued = journal
+        .lines()
+        .map(|l| serde_json::from_str::<Value>(l).expect("journal line"))
+        .find(|l| l["ev"] == json!("dispatch_issued"))
+        .expect("the dispatch is journaled");
+    assert_eq!(issued["record"]["id"], dispatch);
+    assert_eq!(issued["record"]["call_seq"], json!(1));
+    let logical: NodeId = node["logical"]
+        .as_str()
+        .expect("logical")
+        .parse()
+        .expect("id");
+    assert_eq!(issued["record"]["tasks"][0]["logical"], json!(logical));
 
     h.server.abort();
 }
