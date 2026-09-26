@@ -7,7 +7,6 @@ max_nodes_per_run     = 32
 max_depth             = 2          # brain -> worker -> refused (also via SWAMP_DEPTH)
 brain_read_budget     = 8          # reads the brain may do before its first dispatch
 worker_timeout        = "25m"
-brain_turn_timeout    = "15m"
 grace_period          = "5s"       # SIGTERM -> SIGKILL window; also how long quitting chat waits
 max_prompt_bytes      = 200000
 max_result_bytes      = 8000       # cap on worker output fed back to the brain

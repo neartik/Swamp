@@ -19,7 +19,6 @@ max_nodes_per_run = 32
 max_depth = 2
 brain_read_budget = 8
 worker_timeout = "25m"
-brain_turn_timeout = "15m"
 grace_period = "5s"
 max_prompt_bytes = 200000
 max_result_bytes = 8000

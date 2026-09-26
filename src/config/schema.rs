@@ -49,6 +49,7 @@ pub struct Limits {
     pub brain_read_budget: Option<u32>,
     #[serde(default, with = "humantime_serde")]
     pub worker_timeout: Option<Duration>,
+    /// Unused: still parsed so older config files load.
     #[serde(default, with = "humantime_serde")]
     pub brain_turn_timeout: Option<Duration>,
     #[serde(default, with = "humantime_serde")]

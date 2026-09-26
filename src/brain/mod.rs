@@ -35,7 +35,6 @@ use tokio::task::JoinHandle;
 /// The only transport that works on a subscription alone. `api` needs a key and a feature.
 const CLI_TRANSPORT: &str = "cli";
 const EVENT_QUEUE: usize = 512;
-const DEFAULT_TURN_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 const DEFAULT_GRACE: Duration = Duration::from_secs(5);
 
 pub enum BrainEvent {
@@ -154,10 +153,6 @@ pub fn build(
         journal,
         account: lease.account.clone(),
         model,
-        turn_timeout: cfg
-            .limits
-            .brain_turn_timeout
-            .unwrap_or(DEFAULT_TURN_TIMEOUT),
         grace: cfg.limits.grace_period.unwrap_or(DEFAULT_GRACE),
         session: Arc::new(Mutex::new(None)),
         totals: Arc::new(Mutex::new(Totals::default())),
@@ -178,7 +173,6 @@ pub struct Launch {
     pub journal: JournalHandle,
     pub account: AccountId,
     pub model: String,
-    pub turn_timeout: Duration,
     /// How long shutdown lets a turn wind down before it is cut off.
     pub grace: Duration,
     pub session: Arc<Mutex<Option<SessionHandle>>>,
