@@ -5,7 +5,7 @@ use crate::dispatch::{NodeCtx, NodeOutcome, NodeRunner, run_node};
 use crate::ids::{DispatchId, NodeId, NodeIds, RunId};
 use crate::journal::paths::RunPaths;
 use crate::model::core::{AccountId, NodeKind, NodeState, Provider, Tier};
-use crate::model::dispatch::{DispatchCounts, DispatchRecord, TaskRef};
+use crate::model::dispatch::{DispatchCounts, DispatchRecord, TaskRef, settled_state};
 use crate::model::failure::Failure;
 use crate::model::node::{NodeRecord, WorkResultRef};
 use crate::model::result::{IsolationMode, NodeResult, TaskRequest};
@@ -85,7 +85,7 @@ async fn single_node(
         deps: Vec::new(),
     };
     let order = provider_order(&session.cfg, &request, tier);
-    let provider = order.first().copied().unwrap_or(Provider::Anthropic);
+    let provider = crate::dispatch::primary_provider(&order);
     let spec = launch_spec(&session.cfg, &request, tier, provider, &session.paths);
 
     // The run root is the caller of its one-task dispatch.
@@ -132,7 +132,7 @@ async fn single_node(
         // No brain, no parent: this node is the run.
         parent: None,
         logical,
-        dispatch: Some(dispatch),
+        dispatch,
         depth: depth + 1,
         cancel: cancel.clone(),
     };
@@ -179,11 +179,7 @@ async fn single_node(
 
 async fn settle(cx: &NodeCtx, dispatch: DispatchId, caller: NodeId, outcome: &NodeOutcome) {
     let mut counts = DispatchCounts::default();
-    match &outcome.failure {
-        None => counts.succeeded = 1,
-        Some(Failure::Cancelled { .. }) => counts.cancelled = 1,
-        Some(_) => counts.failed = 1,
-    }
+    counts.count(&settled_state(outcome.failure.as_ref()));
     let cost = crate::dispatch::total_cost(outcome.attempts.iter().map(|a| a.cost));
     crate::dispatch::journal_settled(&cx.journal, dispatch, caller, counts, cost).await;
 }

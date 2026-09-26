@@ -7,7 +7,7 @@ use nix::unistd::Pid;
 use std::time::Duration;
 use support::{Harness, Scenario, wait_for};
 use swamp::model::core::NodeState;
-use swamp::model::dispatch::Phase;
+use swamp::model::dispatch::{DispatchState, Phase};
 
 const TASK: &str = "port the parser to the new lexer";
 const PATIENCE: Duration = Duration::from_secs(30);
@@ -96,6 +96,30 @@ fn a_killed_supervisor_leaves_an_adoptable_worker_and_resume_finishes_it() {
     assert_eq!(last.from, Phase::Running);
     assert_eq!(last.to, NodeState::Succeeded);
     assert_eq!(view.state_of(node.logical), Some(NodeState::Succeeded));
+    // The supervisor that would have settled the dispatch died with it.
+    let settled = &view.dispatches[&dispatch];
+    assert_eq!(settled.state, DispatchState::Settled);
+    assert_eq!(settled.counts.map(|c| c.succeeded), Some(1));
+    assert!(view.finished);
+    let text = std::fs::read_to_string(&journal).expect("journal");
+    let order: Vec<&str> = text
+        .lines()
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .filter_map(|v| v["ev"].as_str().map(str::to_owned))
+        .filter(|ev| ev == "dispatch_settled" || ev == "run_finished")
+        .map(|ev| {
+            if ev == "run_finished" {
+                "run"
+            } else {
+                "dispatch"
+            }
+        })
+        .collect();
+    assert_eq!(
+        order,
+        vec!["dispatch", "run"],
+        "the run ends after its dispatch"
+    );
     assert!(
         node.work.as_ref().is_some_and(|w| !w.empty),
         "the diff was captured"
@@ -269,6 +293,21 @@ fn a_reparse_keeps_the_account_rows_no_raw_stream_can_rebuild() {
     assert_eq!(kept.window_tokens, recorded.window_tokens);
     assert_eq!(kept.health, recorded.health);
     assert_eq!(after.nodes.len(), before.nodes.len(), "the nodes reparsed");
+
+    // Task state lives in the transitions no raw stream carries.
+    for logical in before.tasks.keys() {
+        assert_eq!(
+            after.state_of(*logical),
+            before.state_of(*logical),
+            "{logical}"
+        );
+        assert_eq!(after.state_of(*logical), Some(NodeState::Succeeded));
+    }
+    for (id, d) in &before.dispatches {
+        let kept = &after.dispatches[id];
+        assert_eq!((kept.state, &kept.tasks), (d.state, &d.tasks), "{id}");
+    }
+    assert_eq!(after.totals().failed, before.totals().failed);
 }
 
 /// `ProcessStarted` with no `ProcessExited` and a dead pid reads as orphaned.
@@ -314,4 +353,68 @@ fn a_node_killed_mid_run_reads_orphaned() {
         .assert()
         .success()
         .stdout(predicates::str::contains("orphaned"));
+}
+
+/// `chat --resume` continues a conversation, so its dispatcher is seeded from the resumed run:
+/// the call sequence picks up where that run stopped instead of restarting at 1.
+#[test]
+fn a_resumed_conversation_continues_the_call_sequence_it_resumes() {
+    use swamp::journal::record::{JournalEvent, JournalLine};
+    use swamp::model::core::NodeKind;
+
+    let h = Harness::new().max_concurrency(3).scenario(
+        "main",
+        Scenario::claude()
+            .edits("worker-{n}.txt", "written by invocation {n}\n")
+            .dispatches("lex", "write the lexer"),
+    );
+    h.swamp(&["run", TASK]).assert().success();
+    let first = h.last_run().run;
+    let before = h
+        .view(first)
+        .call_seq
+        .expect("the first run made a tool call");
+
+    h.swamp(&["chat", "--resume", &first.to_string()])
+        .write_stdin("port it again\n/quit\n")
+        .assert()
+        .success();
+    let run = h.last_run();
+    assert_ne!(run.run, first, "chat --resume starts its own run");
+
+    let lines: Vec<JournalLine> = h
+        .journal_text(run.run)
+        .lines()
+        .map(|l| serde_json::from_str(l).expect("a journal line"))
+        .collect();
+    let seqs: Vec<u64> = lines
+        .iter()
+        .filter_map(|l| match &l.event {
+            JournalEvent::BrainToolCall { tool, call_seq, .. } if tool == "swamp_dispatch" => {
+                call_seq.map(|s| s.0)
+            }
+            _ => None,
+        })
+        .collect();
+    assert!(!seqs.is_empty(), "the resumed brain dispatched again");
+    assert!(
+        seqs.iter().all(|s| *s > before.0),
+        "the call sequence restarted: {seqs:?} after {before:?}"
+    );
+
+    let view = h.view(run.run);
+    let brain = view
+        .nodes
+        .values()
+        .find(|n| n.kind == NodeKind::Brain)
+        .expect("a brain node");
+    let workers: Vec<_> = view
+        .nodes
+        .values()
+        .filter(|n| n.kind == NodeKind::Worker)
+        .collect();
+    assert!(!workers.is_empty(), "the dispatch spawned a worker");
+    for w in workers {
+        assert_eq!(w.depth, brain.depth + 1, "{}", w.id);
+    }
 }

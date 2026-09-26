@@ -1817,13 +1817,11 @@ pub enum JournalEvent {
     BrainToolCall { tool: String, args_sha256: String, args_path: Utf8PathBuf,
                     #[serde(default)] call_seq: Option<CallSeq>,
                     #[serde(default)] dispatch: Option<DispatchId> },
-    // ---- schema 2 ----
     /// Durable, before any task of the dispatch starts. Line node: the caller.
     DispatchIssued { record: Box<DispatchRecord> },
     /// Durable, before the task waits for a lease, so a waiting task is visible before
     /// attempt 1 exists. Line node: the logical id.
-    TaskQueued { logical: NodeId, dispatch: Option<DispatchId>, title: String, tier: Tier,
-                 depth: u32 },
+    TaskQueued { logical: NodeId, dispatch: DispatchId, title: String, tier: Tier, depth: u32 },
     /// A hard limit refused the task (deps, max_depth, max_nodes_per_run); it is never queued.
     DispatchRejected { dispatch: DispatchId, logical: NodeId, reason: Failure },
     /// Line node: a logical task (Queued -> Blocked -> Leased, back to Queued on a rotation,

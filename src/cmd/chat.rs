@@ -33,6 +33,13 @@ pub async fn run(ctx: &Ctx, args: &ChatArgs) -> anyhow::Result<i32> {
     let provider = cfg.brain.provider.unwrap_or(Provider::Anthropic);
     let dispatcher = session.dispatcher();
     dispatcher.set_base_depth(depth);
+    // A resumed conversation continues its run's node budget and tool call sequence.
+    if let Some(run) = resume {
+        match ctx.view(&ctx.paths.run_paths(run), false) {
+            Ok(view) => dispatcher.seed(&view),
+            Err(e) => tracing::warn!("cannot seed the dispatcher from run {run}: {e:#}"),
+        }
+    }
     let (server, socket) = McpServer::bind(
         &session.paths,
         dispatcher.clone(),

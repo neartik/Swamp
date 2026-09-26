@@ -61,8 +61,7 @@ pub struct NodeCtx {
     pub parent: Option<NodeId>,
     /// Stable across attempts: every attempt is its own node grouped under this id.
     pub logical: NodeId,
-    /// None for a task run outside any dispatch.
-    pub dispatch: Option<DispatchId>,
+    pub dispatch: DispatchId,
     pub depth: u32,
     pub cancel: CancellationToken,
 }
@@ -218,11 +217,15 @@ async fn attempt_loop(
                         cx.deadline,
                         Some(logical),
                         Some(&cx.cancel),
+                        &mut |blocked| {
+                            let why = match &blocked {
+                                NodeState::Blocked { why, .. } => why.clone(),
+                                _ => String::new(),
+                            };
+                            phase.to(blocked, why);
+                        },
                     )
                     .await;
-                if let Some(blocked) = cx.pool.take_blocked(logical) {
-                    phase.state = blocked;
-                }
                 match acquired {
                     Ok(l) => {
                         phase.to(
@@ -348,7 +351,7 @@ async fn attempt_loop(
             stream_offset: 0,
             unparsed_lines: 0,
             depth: cx.depth,
-            dispatch: cx.dispatch,
+            dispatch: Some(cx.dispatch),
         };
         // Journaled durably BEFORE spawning, so a crash still leaves a node with full provenance.
         if let Err(e) = cx

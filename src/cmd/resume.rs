@@ -1,11 +1,13 @@
 use crate::cli::ResumeArgs;
 use crate::cmd::{Ctx, RunSession, write_result};
-use crate::ids::{NodeId, NodeIds};
+use crate::ids::{DispatchId, NodeId, NodeIds};
 use crate::journal::fold::RunView;
 use crate::journal::paths::RunPaths;
 use crate::journal::record::JournalEvent;
-use crate::model::core::{NodeKind, NodeState, SessionHandle, Usage, WorkspaceRef};
-use crate::model::dispatch::Phase;
+use crate::model::core::{
+    CancelSource, Cost, NodeKind, NodeState, SessionHandle, Usage, WorkspaceRef,
+};
+use crate::model::dispatch::{DispatchCounts, DispatchState, Phase};
 use crate::model::failure::Failure;
 use crate::model::node::NodeRecord;
 use crate::model::result::{IsolationMode, NodeResult};
@@ -86,16 +88,17 @@ pub async fn run(ctx: &Ctx, args: &ResumeArgs) -> anyhow::Result<i32> {
     crate::cmd::guard_depth(&ctx.cfg)?;
     let paths = ctx.run_paths(args.run.as_deref())?;
     let view = ctx.view(&paths, false)?;
+    let wanted = |id: NodeId| {
+        args.only.is_empty() || args.only.iter().any(|spec| super::node_matches(id, spec))
+    };
     let mut steps = plan(&view, &paths);
-    if !args.only.is_empty() {
-        steps.retain(|s| {
-            args.only
-                .iter()
-                .any(|spec| super::node_matches(s.node(), spec))
-        });
-    }
+    steps.retain(|s| wanted(s.node()));
+    let ends: Vec<TaskEnd> = open_tasks(&view)
+        .into_iter()
+        .filter(|e| wanted(e.logical))
+        .collect();
 
-    if steps.is_empty() {
+    if steps.is_empty() && ends.is_empty() && open_dispatches(&view).is_empty() {
         println!("run {} has nothing to recover", paths.run);
         return Ok(0);
     }
@@ -103,6 +106,9 @@ pub async fn run(ctx: &Ctx, args: &ResumeArgs) -> anyhow::Result<i32> {
         let mut text = format!("recovery plan for run {}\n", paths.run);
         for s in &steps {
             text.push_str(&format!("  {}\n", s.describe(&view)));
+        }
+        for end in &ends {
+            text.push_str(&format!("  {}\n", end.describe(&view)));
         }
         text.push_str("nothing was started: rerun without --plan to act on this plan\n");
         ctx.out(&text);
@@ -143,6 +149,7 @@ pub async fn run(ctx: &Ctx, args: &ResumeArgs) -> anyhow::Result<i32> {
         }
     }
 
+    close_open(ctx, &session, &paths, &wanted).await?;
     let totals = ctx.view(&paths, false)?.totals();
     session
         .finish(
@@ -211,6 +218,120 @@ pub fn plan(view: &RunView, paths: &RunPaths) -> Vec<Recovery> {
         }
     }
     out
+}
+
+/// A task that nothing will ever move again: no attempt of it is left to recover.
+#[derive(Debug, Clone)]
+pub struct TaskEnd {
+    pub logical: NodeId,
+    pub from: Phase,
+    pub to: NodeState,
+}
+
+impl TaskEnd {
+    fn describe(&self, view: &RunView) -> String {
+        let title = view
+            .tasks
+            .get(&self.logical)
+            .map(|t| t.title.clone())
+            .unwrap_or_default();
+        format!(
+            "end        {} {title}: the supervisor is gone, the task ends {}",
+            self.logical.short(),
+            crate::ui::fmt::state_word(&self.to)
+        )
+    }
+}
+
+/// Open tasks with no live attempt: they end as their last attempt did, or cancelled.
+pub fn open_tasks(view: &RunView) -> Vec<TaskEnd> {
+    view.tasks
+        .keys()
+        .filter_map(|logical| {
+            let state = view.state_of(*logical)?;
+            let attempts = view.attempts(*logical);
+            if state.is_terminal() || attempts.iter().any(|a| !a.state.is_terminal()) {
+                return None;
+            }
+            let to = attempts.last().map_or(
+                NodeState::Cancelled {
+                    by: CancelSource::Shutdown,
+                },
+                |a| a.state.clone(),
+            );
+            Some(TaskEnd {
+                logical: *logical,
+                from: Phase::from(&state),
+                to,
+            })
+        })
+        .collect()
+}
+
+/// Open dispatches whose every task has ended, with what their `DispatchSettled` carries.
+pub fn open_dispatches(view: &RunView) -> Vec<(NodeId, DispatchId, DispatchCounts, Option<Cost>)> {
+    view.dispatches
+        .values()
+        .filter(|d| d.id != DispatchId::LEGACY && d.state == DispatchState::Open)
+        .filter_map(|d| {
+            let caller = d.record.as_ref()?.caller;
+            let mut counts = DispatchCounts::default();
+            for t in &d.tasks {
+                let state = view.state_of(*t).filter(NodeState::is_terminal)?;
+                counts.count(&state);
+            }
+            let cost = crate::dispatch::total_cost(
+                d.tasks
+                    .iter()
+                    .flat_map(|t| view.attempts(*t))
+                    .map(|a| a.cost),
+            );
+            Some((caller, d.id, counts, cost))
+        })
+        .collect()
+}
+
+/// Ends the tasks the crash stranded, then settles the dispatches they close.
+async fn close_open(
+    ctx: &Ctx,
+    session: &RunSession,
+    paths: &RunPaths,
+    wanted: &dyn Fn(NodeId) -> bool,
+) -> anyhow::Result<()> {
+    let view = ctx.view(paths, false)?;
+    for end in open_tasks(&view).into_iter().filter(|e| wanted(e.logical)) {
+        session
+            .journal
+            .emit_durable(
+                Some(end.logical),
+                JournalEvent::NodeStateChanged {
+                    from: end.from,
+                    to: end.to.clone(),
+                    why: "interrupted".into(),
+                },
+            )
+            .await?;
+        println!(
+            "ended task {} as {}",
+            end.logical.short(),
+            crate::ui::fmt::state_word(&end.to)
+        );
+    }
+    let view = ctx.view(paths, false)?;
+    for (caller, dispatch, counts, cost) in open_dispatches(&view) {
+        session
+            .journal
+            .emit_durable(
+                Some(caller),
+                JournalEvent::DispatchSettled {
+                    dispatch,
+                    counts,
+                    cost,
+                },
+            )
+            .await?;
+    }
+    Ok(())
 }
 
 fn dirty(node: &NodeRecord) -> bool {
@@ -301,14 +422,17 @@ async fn attach(
         "recovered: {}",
         out.failure.as_ref().map_or("succeeded", Failure::kind)
     );
-    session.journal.emit(
-        Some(node),
-        JournalEvent::NodeStateChanged {
-            from: Phase::from(&record.state),
-            to: state.clone(),
-            why: why.clone(),
-        },
-    );
+    session
+        .journal
+        .emit_durable(
+            Some(node),
+            JournalEvent::NodeStateChanged {
+                from: Phase::from(&record.state),
+                to: state.clone(),
+                why: why.clone(),
+            },
+        )
+        .await?;
     // Recovery never retries, so the recovered attempt ends its task too.
     if let Some(task) = view
         .tasks
@@ -316,14 +440,17 @@ async fn attach(
         .and_then(|t| t.state.as_ref())
         .filter(|s| !s.is_terminal())
     {
-        session.journal.emit(
-            Some(record.logical),
-            JournalEvent::NodeStateChanged {
-                from: Phase::from(task),
-                to: state.clone(),
-                why,
-            },
-        );
+        session
+            .journal
+            .emit_durable(
+                Some(record.logical),
+                JournalEvent::NodeStateChanged {
+                    from: Phase::from(task),
+                    to: state.clone(),
+                    why,
+                },
+            )
+            .await?;
     }
 
     write_result(

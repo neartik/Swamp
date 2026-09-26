@@ -302,36 +302,47 @@ async fn rewrite(ctx: &Ctx, paths: &RunPaths, records: Vec<NodeRecord>) -> anyho
     Ok(count)
 }
 
-/// History no raw stream carries: which account served the run, its health and cooldown, the
-/// pool's token counters, and the dispatches that grouped its tasks. The rewrite replaces the
-/// journal, so these lines are copied across it verbatim instead of being dropped with it.
+/// Lines no raw stream can rebuild, copied across the rewrite.
 fn carried_lines(journal: &camino::Utf8Path) -> Vec<JournalLine> {
     #[derive(Default)]
-    struct Accounts(Vec<JournalLine>);
-    impl crate::journal::fold::Projection for Accounts {
+    struct Carried {
+        lines: Vec<JournalLine>,
+        attempts: std::collections::HashSet<crate::ids::NodeId>,
+    }
+    impl crate::journal::fold::Projection for Carried {
         type Out = Vec<JournalLine>;
         fn apply(&mut self, l: &JournalLine) {
-            if matches!(
-                l.event,
+            let carry = match &l.event {
+                JournalEvent::NodeSpawned { node } => {
+                    self.attempts.insert(node.id);
+                    false
+                }
+                // An attempt's state is re-derived from its stream; a task's is not.
+                JournalEvent::NodeStateChanged { .. } => {
+                    l.node.is_some_and(|n| !self.attempts.contains(&n))
+                }
                 JournalEvent::AccountSelected { .. }
-                    | JournalEvent::AccountHealth { .. }
-                    | JournalEvent::AccountUsage { .. }
-                    | JournalEvent::DispatchIssued { .. }
-                    | JournalEvent::TaskQueued { .. }
-                    | JournalEvent::DispatchRejected { .. }
-                    | JournalEvent::DispatchSettled { .. }
-            ) {
-                self.0.push(l.clone());
+                | JournalEvent::AccountHealth { .. }
+                | JournalEvent::AccountUsage { .. }
+                | JournalEvent::BrainToolCall { .. }
+                | JournalEvent::DispatchIssued { .. }
+                | JournalEvent::TaskQueued { .. }
+                | JournalEvent::DispatchRejected { .. }
+                | JournalEvent::DispatchSettled { .. } => true,
+                _ => false,
+            };
+            if carry {
+                self.lines.push(l.clone());
             }
         }
         fn finish(self) -> Vec<JournalLine> {
-            self.0
+            self.lines
         }
     }
     if !journal.is_file() {
         return Vec::new();
     }
-    crate::journal::reader::replay(journal, Accounts::default()).unwrap_or_default()
+    crate::journal::reader::replay(journal, Carried::default()).unwrap_or_default()
 }
 
 fn line(

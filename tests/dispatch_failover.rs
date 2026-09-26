@@ -8,6 +8,7 @@ use std::time::Duration;
 use swamp::config::{Config, load, resolve, validate};
 use swamp::dispatch::DispatchRequest;
 use swamp::dispatch::{AccountPool, Dispatcher, Health, NodeCtx, NodeRunner, run_node};
+use swamp::ids::DispatchId;
 use swamp::journal::fold::Scope;
 use swamp::journal::paths::{Paths, RunPaths};
 use swamp::journal::writer::{FsyncPolicy, Writer};
@@ -326,7 +327,7 @@ impl Fixture {
             deadline: Instant::now() + deadline,
             parent: None,
             logical: NodeId::new(),
-            dispatch: None,
+            dispatch: DispatchId::new(),
             depth: 1,
             cancel: CancellationToken::new(),
         }
@@ -1108,6 +1109,26 @@ async fn a_max_nodes_overflow_journals_a_rejection_the_fold_can_see() {
         view.tree().iter().any(|r| r.logical == rejected.node),
         "a rejected task is a row of the tree"
     );
+}
+
+/// A call that stops waiting at once still names every task it created, rejected ones too.
+#[tokio::test]
+async fn a_dispatch_that_does_not_wait_still_answers_for_every_task() {
+    let f = fixture(&format!(
+        "{TWO_ACCOUNTS}\n[limits]\nmax_nodes_per_run = 1\n"
+    ))
+    .await;
+    let runner = Scripted::slow(&f.root, Duration::from_millis(300));
+    let disp = f.dispatcher(runner.clone()).await;
+    let caller = NodeId(f.journal.run().0);
+    let out = disp
+        .dispatch(DispatchRequest {
+            wait: false,
+            max_wait: Some(Duration::ZERO),
+            ..DispatchRequest::new(caller, vec![task("first"), task("second")])
+        })
+        .await;
+    assert_eq!(out.results.len(), 2, "{:?}", out.results);
 }
 
 /// A seeded dispatcher keeps the run's depths, node budget and tool call sequence.

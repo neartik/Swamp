@@ -11,11 +11,10 @@ use crate::journal::{JournalEvent, JournalHandle};
 use crate::model::core::{
     AccountId, Cost, LimitReached, LimitScope, NodeState, Provider, RateLimitSnapshot, Usage,
 };
-use crate::model::dispatch::Phase;
 use crate::model::failure::Failure;
 use camino::Utf8PathBuf;
 use parking_lot::Mutex;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
@@ -51,8 +50,6 @@ pub struct AccountPool {
     stderr_notices: AtomicBool,
     /// Coalesces the cross-process state file writes: one flush in flight at a time.
     persisting: Mutex<PersistGate>,
-    /// Blocked states journaled per task, collected by `take_blocked`.
-    blocked: Mutex<HashMap<NodeId, NodeState>>,
 }
 
 #[derive(Default)]
@@ -203,7 +200,6 @@ impl AccountPool {
             cursor: AtomicU64::new(0),
             stderr_notices: AtomicBool::new(false),
             persisting: Mutex::new(PersistGate::default()),
-            blocked: Mutex::new(HashMap::new()),
         }))
     }
 
@@ -219,13 +215,14 @@ impl AccountPool {
         exclude: &HashSet<AccountId>,
         deadline: Instant,
     ) -> Result<Lease, NoCapacity> {
-        self.acquire_node(provider, exclude, deadline, None, None)
+        self.acquire_node(provider, exclude, deadline, None, None, &mut |_| {})
             .await
     }
 
     /// A blocked node waits for a window to roll instead of failing: an overnight run wants
     /// the lease it will get in 40 minutes, not an error now. `node` is what the one
-    /// `NodeBlocked` line is attributed to, `cancel` is what makes `esc esc` prompt.
+    /// `NodeBlocked` line is attributed to, `cancel` is what makes `esc esc` prompt, and
+    /// `on_blocked` hears the Blocked state once, when the wait starts.
     pub async fn acquire_node(
         self: &Arc<Self>,
         provider: Provider,
@@ -233,6 +230,7 @@ impl AccountPool {
         deadline: Instant,
         node: Option<NodeId>,
         cancel: Option<&CancellationToken>,
+        on_blocked: &mut (dyn FnMut(NodeState) + Send),
     ) -> Result<Lease, NoCapacity> {
         let mut announced = false;
         loop {
@@ -287,23 +285,10 @@ impl AccountPool {
                                 ineligible,
                             },
                         );
-                        // Only a task waiting for its lease gets here, so it leaves Queued.
-                        if let Some(id) = node {
-                            let blocked = NodeState::Blocked {
-                                until: retry_at,
-                                why: why.clone(),
-                            };
-                            self.blocked.lock().insert(id, blocked.clone());
-                            crate::dispatch::emit(
-                                &self.journal,
-                                node,
-                                JournalEvent::NodeStateChanged {
-                                    from: Phase::Queued,
-                                    to: blocked,
-                                    why,
-                                },
-                            );
-                        }
+                        on_blocked(NodeState::Blocked {
+                            until: retry_at,
+                            why,
+                        });
                     }
                     Some(retry_at)
                 }
@@ -327,11 +312,6 @@ impl AccountPool {
                 _ = cancelled(cancel) => {}
             }
         }
-    }
-
-    /// The Blocked state journaled for `node`, if any, forgotten on read.
-    pub fn take_blocked(&self, node: NodeId) -> Option<NodeState> {
-        self.blocked.lock().remove(&node)
     }
 
     /// Why every candidate for `provider` is unusable right now, if they all are. Cheap and

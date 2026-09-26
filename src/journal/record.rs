@@ -163,7 +163,7 @@ pub enum JournalEvent {
     /// Before the task waits for a lease. Line node: the logical id.
     TaskQueued {
         logical: NodeId,
-        dispatch: Option<DispatchId>,
+        dispatch: DispatchId,
         title: String,
         tier: Tier,
         depth: u32,

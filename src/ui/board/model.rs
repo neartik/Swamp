@@ -212,11 +212,9 @@ impl RunPane {
     }
 
     fn row(&self, r: &TreeRow) -> Option<NodeRow> {
-        let n = r
-            .attempts
-            .iter()
-            .rev()
-            .find_map(|a| self.view.nodes.get(a))?;
+        let Some(n) = r.attempts.iter().rev().find_map(|a| self.view.nodes.get(a)) else {
+            return self.unstarted(r);
+        };
         Some(NodeRow {
             run: self.run,
             logical: r.logical,
@@ -228,12 +226,48 @@ impl RunPane {
             tier: n.tier,
             model: n.model.clone(),
             title: fmt::sanitize(&n.title),
-            state: n.state.clone(),
+            state: r.state.clone(),
             created_at: n.created_at,
             started_at: n.started_at,
             ended_at: n.ended_at,
             usage: n.usage,
             cost: n.cost,
+            stale: self.stale.is_some(),
+        })
+    }
+
+    /// A task queued, blocked or rejected before its first attempt existed.
+    fn unstarted(&self, r: &TreeRow) -> Option<NodeRow> {
+        let t = self.view.tasks.get(&r.logical)?;
+        let record = self
+            .view
+            .dispatches
+            .get(&t.dispatch)
+            .and_then(|d| d.record.as_ref());
+        let provider = record
+            .and_then(|d| d.tasks.iter().find(|x| x.logical == r.logical))
+            .map_or(Provider::Anthropic, |x| x.provider);
+        let created_at = record
+            .map(|d| d.at)
+            .or(self.view.header.as_ref().map(|h| h.started_at))
+            .unwrap_or(OffsetDateTime::UNIX_EPOCH);
+        Some(NodeRow {
+            run: self.run,
+            logical: r.logical,
+            id: r.logical,
+            attempt: 0,
+            brain: false,
+            provider,
+            account: None,
+            tier: t.tier,
+            model: None,
+            title: fmt::sanitize(&t.title),
+            state: r.state.clone(),
+            created_at,
+            started_at: None,
+            ended_at: None,
+            usage: Usage::default(),
+            cost: None,
             stale: self.stale.is_some(),
         })
     }
@@ -452,9 +486,9 @@ impl Board {
             self.focus = None;
         }
         if let Selection::Node { run, logical } = &self.selected {
-            let gone = self
-                .pane(*run)
-                .is_none_or(|p| !p.view.by_logical.contains_key(logical));
+            let gone = self.pane(*run).is_none_or(|p| {
+                !p.view.by_logical.contains_key(logical) && !p.view.tasks.contains_key(logical)
+            });
             if gone {
                 self.selected = Selection::None;
             }

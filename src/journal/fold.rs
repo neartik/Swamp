@@ -370,7 +370,7 @@ impl RunView {
                 tier,
                 depth,
             } => {
-                let d = dispatch.unwrap_or(DispatchId::LEGACY);
+                let d = *dispatch;
                 let caller = self.dispatch_view(d).record.as_ref().map(|r| r.caller);
                 self.dispatch_view(d).add(*logical);
                 let t = self.tasks.entry(*logical).or_insert_with(|| TaskView {

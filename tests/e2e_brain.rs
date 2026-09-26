@@ -324,7 +324,7 @@ fn identical_dispatch_calls_are_distinct_dispatches() {
             .expect("the dispatch is journaled");
         let queued = lines
             .iter()
-            .position(|l| matches!(&l.event, JournalEvent::TaskQueued { dispatch, .. } if *dispatch == Some(*id)))
+            .position(|l| matches!(&l.event, JournalEvent::TaskQueued { dispatch, .. } if *dispatch == *id))
             .expect("its task is journaled");
         assert!(issued < queued);
     }
@@ -400,9 +400,36 @@ fn replay_leaves_the_run_view_unchanged() {
             v.totals().cost_usd,
         )
     };
-    let before = digest(&h.last_view());
+    let view = h.last_view();
+    let before = digest(&view);
     let journal = h.journal_text(h.last_run().run);
     h.swamp(&["replay", "last"]).assert().success();
     assert_eq!(h.journal_text(h.last_run().run), journal);
     assert_eq!(digest(&h.last_view()), before);
+
+    // A reparse rewrites the journal: the tree and the dispatch grouping have to survive it.
+    let shape = |v: &swamp::RunView| {
+        let tree: Vec<_> = v
+            .tree()
+            .iter()
+            .map(|r| (r.logical, r.depth, r.state.clone()))
+            .collect();
+        let dispatches: Vec<_> = v
+            .dispatches
+            .values()
+            .map(|d| (d.id, d.state, d.tasks.clone()))
+            .collect();
+        format!("{tree:?}|{dispatches:?}|{:?}", v.call_seq)
+    };
+    h.swamp(&["replay", "last", "--reparse"]).assert().success();
+    let after = h.last_view();
+    assert_ne!(
+        h.journal_text(h.last_run().run),
+        journal,
+        "the journal was rewritten"
+    );
+    assert_eq!(shape(&after), shape(&view));
+    for t in view.tasks.keys() {
+        assert_eq!(after.state_of(*t), Some(NodeState::Succeeded), "{t}");
+    }
 }

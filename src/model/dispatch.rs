@@ -43,6 +43,20 @@ pub struct DispatchCounts {
     pub rejected: u32,
 }
 
+impl DispatchCounts {
+    /// A task that has not ended counts nowhere.
+    pub fn count(&mut self, s: &NodeState) {
+        let n = match s {
+            NodeState::Succeeded => &mut self.succeeded,
+            NodeState::Failed { .. } => &mut self.failed,
+            NodeState::Cancelled { .. } => &mut self.cancelled,
+            NodeState::Rejected { .. } => &mut self.rejected,
+            _ => return,
+        };
+        *n += 1;
+    }
+}
+
 /// `NodeState` without its payload.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

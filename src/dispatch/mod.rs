@@ -14,7 +14,7 @@ use crate::config::Config;
 use crate::ids::{CallSeq, DispatchId, NodeId, NodeIds};
 use crate::journal::{JournalEvent, JournalHandle, RunView};
 use crate::model::core::{Cost, CostBasis, NodeKind, NodeState, Provider, Tier};
-use crate::model::dispatch::{DispatchCounts, DispatchRecord, TaskRef};
+use crate::model::dispatch::{DispatchCounts, DispatchRecord, TaskRef, settled_state};
 use crate::model::failure::Failure;
 use crate::model::node::WorkResultRef;
 use crate::model::result::{IsolationMode, NodeResult, TaskRequest};
@@ -68,8 +68,7 @@ pub struct Dispatched {
 }
 
 struct TaskEnd {
-    result: NodeResult,
-    rejected: bool,
+    state: NodeState,
     /// Every attempt's, where the result carries the last one's.
     cost: Option<Cost>,
 }
@@ -184,7 +183,7 @@ impl Dispatcher {
                     logical: *logical,
                     title: task.title.clone(),
                     tier: *tier,
-                    provider: first(order),
+                    provider: primary_provider(order),
                 })
                 .collect(),
             at: time::OffsetDateTime::now_utc(),
@@ -192,6 +191,16 @@ impl Dispatcher {
         journal_issued(&self.journal, record).await;
 
         let ids: Vec<NodeId> = planned.iter().map(|(logical, ..)| *logical).collect();
+        // Every id answers, even one whose task has not been polled when the wait ends.
+        {
+            let mut results = self.results.lock();
+            for (logical, tier, order, task) in &planned {
+                results.insert(
+                    *logical,
+                    running(*logical, task, *tier, primary_provider(order)),
+                );
+            }
+        }
         let handles: Vec<_> = planned
             .into_iter()
             .map(|(logical, tier, order, task)| {
@@ -348,9 +357,17 @@ impl Dispatcher {
         order: Vec<Provider>,
         task: TaskRequest,
     ) -> TaskEnd {
-        let provider = first(&order);
+        let provider = primary_provider(&order);
 
         if let Some(reason) = self.reject_reason(&task, parent) {
+            self.settle(finished(
+                id,
+                &task,
+                tier,
+                provider,
+                None,
+                Some(reason.clone()),
+            ));
             if let Err(e) = self
                 .journal
                 .emit_durable(
@@ -366,17 +383,13 @@ impl Dispatcher {
                 tracing::warn!(node = %id.short(), "cannot journal DispatchRejected: {e}");
             }
             return TaskEnd {
-                result: self.settle(finished(id, &task, tier, provider, None, Some(reason))),
-                rejected: true,
+                state: NodeState::Rejected { reason },
                 cost: None,
             };
         }
 
         let depth = self.depth_of(parent) + 1;
         self.depths.lock().insert(id, depth);
-        self.results
-            .lock()
-            .insert(id, running(id, &task, tier, provider));
 
         let cancel = CancellationToken::new();
         self.cancels.lock().insert(id, cancel.clone());
@@ -397,30 +410,22 @@ impl Dispatcher {
             deadline: tokio::time::Instant::now() + self.cfg.node_timeout(tier),
             parent: Some(parent),
             logical: id,
-            dispatch: Some(dispatch),
+            dispatch,
             depth,
             cancel,
         };
         let spec = self.launch_spec(&task, tier, provider);
         let outcome = run_node(&cx, spec, &task).await;
         let cost = total_cost(outcome.attempts.iter().map(|a| a.cost));
-        TaskEnd {
-            result: self.settle(from_outcome(id, &task, tier, provider, outcome)),
-            rejected: false,
-            cost,
-        }
+        let state = settled_state(outcome.failure.as_ref());
+        self.settle(from_outcome(id, &task, tier, provider, outcome));
+        TaskEnd { state, cost }
     }
 
     async fn settle_dispatch(&self, dispatch: DispatchId, caller: NodeId, ends: &[TaskEnd]) {
         let mut counts = DispatchCounts::default();
         for end in ends {
-            let n = match (end.rejected, end.result.state) {
-                (true, _) => &mut counts.rejected,
-                (false, "succeeded") => &mut counts.succeeded,
-                (false, "cancelled") => &mut counts.cancelled,
-                _ => &mut counts.failed,
-            };
-            *n += 1;
+            counts.count(&end.state);
         }
         let cost = total_cost(ends.iter().map(|e| e.cost));
         journal_settled(&self.journal, dispatch, caller, counts, cost).await;
@@ -541,10 +546,9 @@ impl Dispatcher {
         }
     }
 
-    fn settle(&self, result: NodeResult) -> NodeResult {
-        self.results.lock().insert(result.node, result.clone());
+    fn settle(&self, result: NodeResult) {
+        self.results.lock().insert(result.node, result);
         self.settled.notify_waiters();
-        result
     }
 }
 
@@ -576,7 +580,7 @@ pub(crate) async fn journal_settled(
     }
 }
 
-pub(crate) fn first(order: &[Provider]) -> Provider {
+pub(crate) fn primary_provider(order: &[Provider]) -> Provider {
     order.first().copied().unwrap_or(Provider::Anthropic)
 }
 

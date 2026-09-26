@@ -272,6 +272,28 @@ async fn emit_durable_is_on_disk_when_it_returns() {
     task.await.expect("writer task");
 }
 
+/// A durable line never overtakes the lines emitted before it, or a settled dispatch can reach
+/// disk ahead of the task transitions it summarises.
+#[tokio::test]
+async fn a_durable_line_lands_behind_every_earlier_emit() {
+    let sb = sandbox();
+    let (handle, task) = open(&sb.paths, FsyncPolicy::Never).await;
+    for i in 0..50 {
+        handle.emit(None, note(&format!("queued-{i}")));
+    }
+    let seq = handle
+        .emit_durable(None, note("durable"))
+        .await
+        .expect("durable emit");
+    assert_eq!(seq, 50);
+    let text = std::fs::read_to_string(sb.paths.journal()).expect("journal");
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines.len(), 51, "every earlier emit is on disk too");
+    assert!(lines[49].contains("queued-49") && lines[50].contains("durable"));
+    drop(handle);
+    task.await.expect("writer task");
+}
+
 /// The child half of `emit_durable_survives_sigkill`: writes durably, then dies hard.
 #[tokio::test]
 #[ignore]
@@ -1125,7 +1147,7 @@ fn issued(d: DispatchId, seq: u64, tasks: &[(NodeId, &str)]) -> JournalEvent {
 fn queued(logical: NodeId, d: DispatchId, title: &str) -> JournalEvent {
     JournalEvent::TaskQueued {
         logical,
-        dispatch: Some(d),
+        dispatch: d,
         title: title.to_owned(),
         tier: Tier::Mid,
         depth: 1,
@@ -1474,4 +1496,117 @@ fn a_node_whose_process_exited_is_never_an_orphan() {
     let mut view = fold(&lines[..2]);
     view.mark_orphans(&|_| false);
     assert!(matches!(view.nodes[&n].state, NodeState::Orphaned { .. }));
+}
+
+#[test]
+fn the_board_draws_tasks_that_never_reached_an_attempt() {
+    use swamp::ui::board::model::{RunPane, Section};
+    use swamp::ui::board::sources::Tail;
+
+    let (a, c, d) = (nid(1), nid(3), nid(4));
+    let dir = Utf8PathBuf::from("/repo/.swamp/runs/x");
+    let mut pane = RunPane::new(
+        RunPaths {
+            run: rid(0),
+            dir: dir.clone(),
+            sock_dir: dir.clone(),
+        },
+        Tail::detached(dir.join("journal.jsonl").as_str()),
+    );
+    pane.apply(&schema_2());
+    let rows = pane.rows();
+    let row = |id: NodeId| {
+        rows.iter()
+            .find(|r| r.logical == id)
+            .unwrap_or_else(|| panic!("no row for {id}: {rows:?}"))
+    };
+
+    assert!(matches!(row(c).state, NodeState::Rejected { .. }));
+    assert_eq!(row(c).section(), Section::Recent);
+    assert_eq!((row(c).title.as_str(), row(c).attempt), ("docs", 0));
+    assert_eq!(row(d).state, NodeState::Queued);
+    assert_eq!(row(d).section(), Section::Waiting);
+    assert_eq!(
+        row(d).created_at,
+        at(0),
+        "a waiting row counts from its dispatch"
+    );
+    assert_eq!(row(a).state, NodeState::Succeeded);
+}
+
+#[test]
+fn resume_ends_stranded_tasks_and_then_their_dispatch() {
+    use swamp::cmd::resume::{open_dispatches, open_tasks};
+
+    let mut lines = schema_2();
+    let (c, d) = (nid(3), nid(4));
+    let d2 = did(41);
+    let view = fold(&lines);
+    let ends = open_tasks(&view);
+    assert_eq!(ends.len(), 1, "{ends:?}");
+    assert_eq!((ends[0].logical, ends[0].from), (d, Phase::Queued));
+    assert!(matches!(ends[0].to, NodeState::Cancelled { .. }));
+    assert!(
+        open_dispatches(&view).is_empty(),
+        "d2 still has a task open"
+    );
+
+    let seq = lines.len() as u64;
+    lines.push(line(
+        seq,
+        Some(d),
+        changed(ends[0].from, ends[0].to.clone(), "interrupted"),
+    ));
+    let view = fold(&lines);
+    assert!(open_tasks(&view).is_empty());
+    let settle = open_dispatches(&view);
+    assert_eq!(settle.len(), 1);
+    let (caller, id, counts, cost) = settle[0];
+    assert_eq!((caller, id), (nid(0), d2));
+    assert_eq!(
+        counts,
+        DispatchCounts {
+            cancelled: 1,
+            rejected: 1,
+            ..DispatchCounts::default()
+        }
+    );
+    assert!(cost.is_none(), "neither task ran");
+    assert!(view.tasks.contains_key(&c));
+}
+
+/// A task whose last attempt ended while the task itself still reads leased.
+#[test]
+fn resume_ends_a_task_whose_terminal_transition_was_lost() {
+    use swamp::cmd::resume::open_tasks;
+
+    let lines = schema_2();
+    let a = nid(1);
+    let last = lines
+        .iter()
+        .rposition(|l| {
+            l.node == Some(a)
+                && matches!(
+                    l.event,
+                    JournalEvent::NodeStateChanged {
+                        to: NodeState::Succeeded,
+                        ..
+                    }
+                )
+        })
+        .expect("A's terminal transition");
+    let lost: Vec<JournalLine> = lines
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| *i != last)
+        .map(|(_, l)| l.clone())
+        .collect();
+    let view = fold(&lost);
+    assert!(matches!(view.state_of(a), Some(NodeState::Leased { .. })));
+    let ends = open_tasks(&view);
+    let end = ends.iter().find(|e| e.logical == a).expect("A is stranded");
+    assert_eq!(
+        (end.from, end.to.clone()),
+        (Phase::Leased, NodeState::Succeeded)
+    );
 }

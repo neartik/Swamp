@@ -48,11 +48,20 @@ fn parse_duration(s: &str) -> anyhow::Result<Duration> {
     Ok(d)
 }
 
+/// A durable line on its way to the writer task, acked once it is synced.
+pub(crate) type DurableTx = tokio::sync::mpsc::UnboundedSender<(
+    Option<crate::ids::NodeId>,
+    JournalEvent,
+    tokio::sync::oneshot::Sender<anyhow::Result<u64>>,
+)>;
+
 /// Owns the journal fd. One instance per run, driven by the single writer task.
 pub struct Writer {
     pub path: camino::Utf8PathBuf,
     pub policy: FsyncPolicy,
     pub seq: u64,
+    /// Set when a writer task drains the queue, so durable lines queue behind it.
+    pub(crate) durable: Option<DurableTx>,
     file: tokio::fs::File,
     redact: Option<Arc<Redactor>>,
     pending: u32,
@@ -88,6 +97,7 @@ impl Writer {
             path: path.to_path_buf(),
             policy,
             seq,
+            durable: None,
             file,
             redact: None,
             pending: 0,

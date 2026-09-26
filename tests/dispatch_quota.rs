@@ -679,6 +679,7 @@ async fn a_blocked_node_journals_one_line_and_does_not_spin() {
     drain(&mut h.events);
     let node = NodeId::new();
     let before = h.pool.wakeups();
+    let mut reported = Vec::new();
     let got = h
         .pool
         .acquire_node(
@@ -687,6 +688,7 @@ async fn a_blocked_node_journals_one_line_and_does_not_spin() {
             Instant::now() + Duration::from_millis(400),
             Some(node),
             None,
+            &mut |s| reported.push(s),
         )
         .await;
     assert!(matches!(got, Err(NoCapacity::Saturated)), "expected a wait");
@@ -714,17 +716,15 @@ async fn a_blocked_node_journals_one_line_and_does_not_spin() {
         vec![("alt", Ineligible::Cooling), ("main", Ineligible::Cooling)],
         "the verdict is structured per account"
     );
-    let changes: Vec<_> = events
-        .iter()
-        .filter(|(n, e)| matches!(e, JournalEvent::NodeStateChanged { .. }) && *n == Some(node))
-        .collect();
-    assert_eq!(changes.len(), 1, "the task left Queued once");
     assert!(
-        matches!(
-            h.pool.take_blocked(node),
-            Some(swamp::NodeState::Blocked { .. })
-        ),
-        "the caller collects the state it left Queued for"
+        !events
+            .iter()
+            .any(|(_, e)| matches!(e, JournalEvent::NodeStateChanged { .. })),
+        "the task's transition is its caller's to journal"
+    );
+    assert!(
+        matches!(reported.as_slice(), [swamp::NodeState::Blocked { .. }]),
+        "the caller hears the block once: {reported:?}"
     );
 }
 
@@ -751,6 +751,7 @@ async fn a_cancelled_token_ends_the_wait_promptly() {
             Instant::now() + Duration::from_secs(600),
             Some(NodeId::new()),
             Some(&cancel),
+            &mut |_| {},
         )
         .await;
     assert!(
