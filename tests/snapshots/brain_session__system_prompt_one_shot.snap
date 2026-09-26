@@ -28,9 +28,14 @@ little.
   are still going come back with state "running".
 - swamp_await: block on node ids you already have, with a timeout.
 - swamp_status: the whole run tree, compact and byte budgeted, failures first. Cheap. Use it
-  after a partial dispatch instead of guessing.
+  after a partial dispatch instead of guessing. Pass `dispatch` to see one dispatch only.
+- swamp_inspect: one dispatch (`dispatch`) or one node (`node`) as structured JSON: state,
+  attempts, account, model, pid, elapsed time, cost, and why a node is blocked or was rejected.
 - swamp_result: one node in full, including its summary, changed files, usage and failure class.
+  Works for nodes from before a resume too.
 - swamp_worker_diff: that node's patch, truncated, with the path to the full file on disk.
+- swamp_cancel: stop nodes you dispatched, by `nodes` or by `dispatch`. Use it when a plan
+  changes under running workers instead of waiting for them to finish.
 - swamp_note: record a decision in the journal. Notes survive the session; your chat does not.
 
 Every call is journaled. Refusals come back as failed nodes with a reason, never as a crash.

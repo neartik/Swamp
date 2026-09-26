@@ -391,7 +391,8 @@ pub mod tool_args {
                 "swamp_result" | "swamp_worker_diff" => {
                     v.get("node").and_then(|n| n.as_str()).map(short_node)
                 }
-                "swamp_status" => Some(String::new()),
+                "swamp_status" => Some(target(&v).unwrap_or_default()),
+                "swamp_inspect" | "swamp_cancel" => target(&v),
                 "swamp_note" => v
                     .get("text")
                     .or_else(|| v.get("note"))
@@ -409,6 +410,21 @@ pub mod tool_args {
     fn count(v: &serde_json::Value, key: &str, word: &str) -> Option<String> {
         let n = v.get(key)?.as_array()?.len();
         Some(format!("{n} {word}{}", if n == 1 { "" } else { "s" }))
+    }
+
+    /// `dispatch 9g5f18`, a short node id, or a node count, whichever the call names.
+    fn target(v: &serde_json::Value) -> Option<String> {
+        if let Some(d) = v.get("dispatch").and_then(|d| d.as_str()) {
+            use std::str::FromStr;
+            let short = crate::ids::DispatchId::from_str(d)
+                .map(|id| id.short())
+                .unwrap_or_else(|_| fmt::truncate(d, 12));
+            return Some(format!("dispatch {short}"));
+        }
+        if let Some(n) = v.get("node").and_then(|n| n.as_str()) {
+            return Some(short_node(n));
+        }
+        count(v, "nodes", "node")
     }
 
     fn short_node(spec: &str) -> String {
@@ -479,6 +495,26 @@ mod tests {
         assert_eq!(
             tool_args::preview("mcp__swamp__swamp_status", "{}", 100),
             ""
+        );
+        assert_eq!(
+            tool_args::preview(
+                "mcp__swamp__swamp_cancel",
+                r#"{"dispatch":"dsp_01ARZ3NDEKTSV4RRFFQ69G5FAV"}"#,
+                100
+            ),
+            "dispatch 9g5fav"
+        );
+        assert_eq!(
+            tool_args::preview("mcp__swamp__swamp_cancel", r#"{"nodes":["a","b"]}"#, 100),
+            "2 nodes"
+        );
+        assert_eq!(
+            tool_args::preview(
+                "mcp__swamp__swamp_inspect",
+                r#"{"node":"nd_01ARZ3NDEKTSV4RRFFQ69G5FAV"}"#,
+                100
+            ),
+            "9g5fav"
         );
         assert_eq!(
             tool_args::preview("Bash", "cargo   test\n--all", 100),

@@ -1,4 +1,5 @@
 pub mod fold;
+pub mod inspect;
 pub mod paths;
 pub mod raw;
 pub mod reader;

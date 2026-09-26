@@ -1312,3 +1312,52 @@ fn resume_ends_a_task_whose_terminal_transition_was_lost() {
         (Phase::Leased, NodeState::Succeeded)
     );
 }
+
+/// `swamp_inspect` names why a task waits with the pool's own structured verdict, and why a
+/// rejected one never ran.
+#[test]
+fn inspect_carries_the_blocked_verdict_and_the_rejection() {
+    use swamp::journal::inspect;
+    let lines = schema_2();
+    let blocked_at = lines
+        .iter()
+        .position(|l| matches!(l.event, JournalEvent::NodeBlocked { .. }))
+        .expect("the fixture blocks a task");
+    let mut view = RunView::default();
+    for l in &lines[..=blocked_at + 1] {
+        view.apply(l);
+    }
+    let b = inspect::task(&view, nid(2), at(10)).expect("task b");
+    assert_eq!(b.state, Phase::Blocked);
+    assert_eq!(b.depth, Some(1));
+    let blocked = b.blocked.expect("a blocked verdict");
+    assert_eq!(blocked.why, "main cooling");
+    assert_eq!(blocked.ineligible.len(), 1);
+    assert_eq!(blocked.ineligible[0].account, AccountId("main".into()));
+    let json = serde_json::to_value(&blocked).expect("json");
+    assert_eq!(
+        json["ineligible"][0]["reason"],
+        serde_json::json!("cooling")
+    );
+
+    let mut view = RunView::default();
+    for l in &lines {
+        view.apply(l);
+    }
+    let c = inspect::task(&view, nid(3), at(10)).expect("task c");
+    assert_eq!(c.state, Phase::Rejected);
+    assert!(c.attempts.is_empty());
+    assert!(matches!(c.rejected, Some(Failure::WorkerError { .. })));
+    assert!(
+        inspect::task(&view, nid(2), at(10))
+            .expect("b")
+            .blocked
+            .is_none()
+    );
+
+    // Any attempt id names its task.
+    let a = inspect::task(&view, nid(11), at(10)).expect("a by its first attempt");
+    assert_eq!(a.node, nid(1));
+    assert_eq!(a.attempts.len(), 2);
+    assert_eq!(a.dispatches, vec![did(42).to_string()]);
+}
