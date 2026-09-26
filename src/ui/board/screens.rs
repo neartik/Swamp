@@ -757,3 +757,26 @@ fn the_delegation_cell_warns_once_the_budget_is_spent() {
         header(&b, 140)
     );
 }
+
+/// An account that never reported a window has one `-` per window, not an empty bar and a
+/// reset countdown to nothing.
+#[test]
+fn an_account_without_quota_leaves_its_bars_blank() {
+    let mut b = board();
+    b.accounts = vec![account(
+        "fresh",
+        Provider::Anthropic,
+        Health::Healthy,
+        Some(2),
+    )];
+    for width in [100u16, 140] {
+        let text = draw(&b, width);
+        fits(&text, width as usize);
+        let line = text
+            .lines()
+            .find(|l| l.contains("fresh"))
+            .expect("the account line");
+        assert!(!line.contains('\u{21bb}'), "{width}: {line}");
+        assert_eq!(line.matches(" - ").count(), 2, "{width}: {line}");
+    }
+}

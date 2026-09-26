@@ -907,14 +907,19 @@ fn window(line: &mut Row, label: &str, w: Option<&LimitWindow>, r: &AccountRow, 
     let t = c.theme;
     let role = pct_role(r, w, c);
     line.add(t, &format!("{label} "), Role::Meta);
+    // No window: one `-` where the percentage goes, the bar and the reset left blank.
     let bar = match w {
         Some(w) => gauge(w.utilization, c.l.bar, t),
-        None => fmt::pad("-", c.l.bar),
+        None => " ".repeat(c.l.bar),
     };
     line.add(t, &bar, role);
     line.pad(1);
     line.add(t, &right(&usage::pct_cell(w), 4), role);
     line.pad(1);
+    if w.is_none() {
+        line.pad(reset_mark(t).width() + 1 + 6);
+        return;
+    }
     line.add(t, reset_mark(t), Role::Meta);
     line.pad(1);
     line.add(t, &fmt::pad(&reset_cell(w, c), 6), Role::Meta);
