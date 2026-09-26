@@ -46,13 +46,7 @@ pub fn view_of(lines: Vec<JournalLine>) -> RunView {
 }
 
 fn line(seq: u64, node: Option<NodeId>, event: JournalEvent) -> JournalLine {
-    JournalLine {
-        seq,
-        at: at(seq as i64),
-        run: run_id(),
-        node,
-        event,
-    }
+    line_at(seq, seq as i64, node, event)
 }
 
 fn header() -> JournalLine {
@@ -334,8 +328,6 @@ pub fn welcome() -> WelcomeInfo {
     }
 }
 
-// ---------------------------------------------------------------- P4 fixture
-
 /// A node id ending in `tail`: `nid("09").short()` is `9g5f09`.
 pub fn nid(tail: &str) -> NodeId {
     NodeId::from_str(&format!(
@@ -357,7 +349,7 @@ pub const TERMS: &str = "score .41 = util .93\u{d7}.50 + load .33\u{d7}.30 + sha
                          \u{2212} weight .00 \u{2212} idle .02";
 
 /// Logical ids of the tasks that ran: the attempts carry the ids the rows show.
-pub fn p4_task(n: u8) -> NodeId {
+pub fn board_task(n: u8) -> NodeId {
     match n {
         1 => nid("11"),
         2 => nid("12"),
@@ -368,7 +360,7 @@ pub fn p4_task(n: u8) -> NodeId {
     }
 }
 
-fn p4_line(seq: u64, offset: i64, node: Option<NodeId>, event: JournalEvent) -> JournalLine {
+fn line_at(seq: u64, offset: i64, node: Option<NodeId>, event: JournalEvent) -> JournalLine {
     JournalLine {
         seq,
         at: at(offset),
@@ -424,9 +416,8 @@ impl Attempt {
 const SONNET: &str = "claude-sonnet-4-5-20250929";
 const OPUS: &str = "claude-opus-4-1-20250805";
 
-/// `docs/BOARD.md` §1 of the P4 spec: two dispatches, a retry, a blocked task and a rejection.
-/// Now is 22:16:40 UTC, `at(200)`; dispatch #1 went out at 22:13:20, `at(0)`.
-pub fn p4_journal() -> Vec<JournalLine> {
+/// `docs/BOARD.md` §1; now is `at(200)` (22:16:40 UTC), dispatch #1 at `at(0)`.
+pub fn board_journal() -> Vec<JournalLine> {
     use crate::dispatch::policy::{Ineligible, SelectionPolicy};
     use crate::ids::CallSeq;
     use crate::model::core::{LimitScope, Provider};
@@ -449,11 +440,11 @@ pub fn p4_journal() -> Vec<JournalLine> {
         ..brain()
     };
     let tasks = [
-        (p4_task(1), "add pagination to /users", Tier::Mid),
-        (p4_task(2), "backfill the users index", Tier::High),
-        (p4_task(3), "rebuild the index", Tier::Mid),
-        (p4_task(4), "write the changelog", Tier::Low),
-        (p4_task(5), "add the /users route", Tier::Low),
+        (board_task(1), "add pagination to /users", Tier::Mid),
+        (board_task(2), "backfill the users index", Tier::High),
+        (board_task(3), "rebuild the index", Tier::Mid),
+        (board_task(4), "write the changelog", Tier::Low),
+        (board_task(5), "add the /users route", Tier::Low),
     ];
     let issued = |dispatch: DispatchId, seq: u64, at_: i64, tasks: &[(NodeId, &str, Tier)]| {
         JournalEvent::DispatchIssued {
@@ -479,7 +470,7 @@ pub fn p4_journal() -> Vec<JournalLine> {
     };
     let first = Attempt {
         id: nid("01"),
-        logical: p4_task(1),
+        logical: board_task(1),
         attempt: 1,
         account: "main",
         model: SONNET,
@@ -491,7 +482,7 @@ pub fn p4_journal() -> Vec<JournalLine> {
     };
     let limited = Attempt {
         id: nid("08"),
-        logical: p4_task(2),
+        logical: board_task(2),
         attempt: 1,
         account: "main",
         model: OPUS,
@@ -512,7 +503,7 @@ pub fn p4_journal() -> Vec<JournalLine> {
     };
     let route = Attempt {
         id: nid("05"),
-        logical: p4_task(5),
+        logical: board_task(5),
         attempt: 1,
         account: "main",
         model: SONNET,
@@ -546,8 +537,8 @@ pub fn p4_journal() -> Vec<JournalLine> {
     };
 
     let mut lines = vec![
-        p4_line(1, -60, None, header().event),
-        p4_line(
+        line_at(1, -60, None, header().event),
+        line_at(
             2,
             -52,
             Some(id(0)),
@@ -555,11 +546,11 @@ pub fn p4_journal() -> Vec<JournalLine> {
                 node: Box::new(brain),
             },
         ),
-        p4_line(3, 0, Some(id(0)), issued(did("18"), 1, 0, &tasks)),
+        line_at(3, 0, Some(id(0)), issued(did("18"), 1, 0, &tasks)),
     ];
     let mut seq = 4;
     for (logical, title, tier) in &tasks {
-        lines.push(p4_line(
+        lines.push(line_at(
             seq,
             0,
             Some(*logical),
@@ -574,12 +565,12 @@ pub fn p4_journal() -> Vec<JournalLine> {
         seq += 1;
     }
     let mut push = |offset: i64, node: NodeId, event: JournalEvent| {
-        lines.push(p4_line(seq, offset, Some(node), event));
+        lines.push(line_at(seq, offset, Some(node), event));
         seq += 1;
     };
     push(
         1,
-        p4_task(3),
+        board_task(3),
         JournalEvent::NodeBlocked {
             until: at(2_480),
             why: "main at capacity, alt quota stop".into(),
@@ -626,7 +617,7 @@ pub fn p4_journal() -> Vec<JournalLine> {
     push(150, route.id, finished(NodeState::Succeeded, &route));
     push(
         150,
-        p4_task(5),
+        board_task(5),
         JournalEvent::NodeStateChanged {
             from: Phase::Running,
             to: NodeState::Succeeded,
@@ -640,15 +631,15 @@ pub fn p4_journal() -> Vec<JournalLine> {
             did("1c"),
             2,
             159,
-            &[(p4_task(6), "probe the migration", Tier::Low)],
+            &[(board_task(6), "probe the migration", Tier::Low)],
         ),
     );
     push(
         159,
-        p4_task(6),
+        board_task(6),
         JournalEvent::DispatchRejected {
             dispatch: did("1c"),
-            logical: p4_task(6),
+            logical: board_task(6),
             reason: crate::model::failure::Failure::WorkerError {
                 subtype: "max_nodes_per_run".into(),
                 detail: "the run already holds 32 nodes".into(),

@@ -17,7 +17,6 @@ use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 const DETACH_WAIT: Duration = Duration::from_secs(60);
-const GRACE: Duration = Duration::from_secs(5);
 
 /// One-shot dispatch. The v1 smoke path when --no-brain is set.
 pub async fn run(ctx: &Ctx, args: &RunArgs) -> anyhow::Result<i32> {
@@ -257,7 +256,7 @@ async fn with_brain(
             code = &mut turn => code,
             () = crate::cmd::shutdown_signal() => {
                 eprintln!("interrupted: cancelling {} nodes", dispatcher.cancel_all());
-                tokio::time::sleep(cfg.limits.grace_period.unwrap_or(GRACE)).await;
+                tokio::time::sleep(cfg.grace_period()).await;
                 6
             }
         }

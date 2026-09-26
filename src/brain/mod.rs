@@ -35,7 +35,6 @@ use tokio::task::JoinHandle;
 /// The only transport that works on a subscription alone. `api` needs a key and a feature.
 const CLI_TRANSPORT: &str = "cli";
 const EVENT_QUEUE: usize = 512;
-const DEFAULT_GRACE: Duration = Duration::from_secs(5);
 
 pub enum BrainEvent {
     Ready {
@@ -153,7 +152,7 @@ pub fn build(
         journal,
         account: lease.account.clone(),
         model,
-        grace: cfg.limits.grace_period.unwrap_or(DEFAULT_GRACE),
+        grace: cfg.grace_period(),
         session: Arc::new(Mutex::new(None)),
         totals: Arc::new(Mutex::new(Totals::default())),
         lease,

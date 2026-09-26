@@ -430,13 +430,13 @@ is attached:
 ```
 
 `swamp chat --board`, inside tmux, runs
-`tmux split-window -h -l 46 -d swamp board --run <id>` once at startup and carries on; outside tmux
-it prints one line naming the command to run in another terminal and does not fail. A `--board-width`
-config key (`ui.board_width`, default 46) sizes the split.
+`tmux split-window -h -l <ui.board_width> -d swamp board --run <id>` once at startup and carries
+on; outside tmux it prints one line naming the command to run in another terminal and does not fail.
+The `ui.board_width` config key (default 46) sizes the split.
 
 **How they find each other: they do not need to.** Both read the same files; there is no IPC, no
 socket, no shared memory. The only coordination is the hint: the board writes `~/.swamp/board.pid`
-(pid plus the tty it owns) at startup and removes it on exit, and chat suppresses the hint when that
+(pid plus the process start time, the same format `worker::liveness::is_ours` checks) at startup and removes it on exit, and chat suppresses the hint when that
 file names a live process. A stale pid file is harmless - chat checks liveness the same way
 `is_ours` does, and the worst case is one extra hint line.
 
@@ -483,7 +483,8 @@ chat.
    frames, a resize from 100 to 40 and back, exactly one board and no torn row.
 8. **Control characters.** A title carrying `\u{1b}[2J` must not repaint the pane.
 9. **Delegation**: within budget the `brain` header cell is the first to drop; past it the cell
-   reads `over` at every tier that has room for it and outlasts the queued count and the cost.
+   reads `over` at every tier from 40 columns up and outlasts the queued count and the cost; on a
+   single-row header too narrow for it, the share and the word `observed` go first.
 10. **tmux smoke script** (`scripts/board-tmux.sh`, manual, not CI).
 
 ---

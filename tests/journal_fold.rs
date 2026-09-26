@@ -211,8 +211,7 @@ async fn emit_durable_is_on_disk_when_it_returns() {
     task.await.expect("writer task");
 }
 
-/// A durable line never overtakes the lines emitted before it, or a settled dispatch can reach
-/// disk ahead of the task transitions it summarises.
+/// A durable line never overtakes the lines emitted before it.
 #[tokio::test]
 async fn a_durable_line_lands_behind_every_earlier_emit() {
     let sb = sandbox();

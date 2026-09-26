@@ -1,4 +1,4 @@
-//! `docs/BOARD.md` §7: the three layout tiers through a `TestBackend`, on the shared P4 journal.
+//! `docs/BOARD.md` §7: the three layout tiers through a `TestBackend`, on the shared board journal.
 
 use crate::dispatch::account::Health;
 use crate::dispatch::policy::{Scoring, SelectionPolicy};
@@ -175,9 +175,9 @@ fn board_of(panes: Vec<RunPane>) -> Board {
     b
 }
 
-/// The P4 fixture, the cursor where it lands before anyone touches a key.
+/// The board fixture, the cursor where it lands before anyone touches a key.
 fn board() -> Board {
-    let mut b = board_of(vec![pane(fx::run_id(), &fx::p4_journal())]);
+    let mut b = board_of(vec![pane(fx::run_id(), &fx::board_journal())]);
     b.selected = attention(&b.rows()).expect("something needs attention");
     b
 }
@@ -185,7 +185,7 @@ fn board() -> Board {
 fn retry() -> Selection {
     Selection::Node {
         run: fx::run_id(),
-        logical: fx::p4_task(2),
+        logical: fx::board_task(2),
     }
 }
 
@@ -195,8 +195,7 @@ fn key(code: KeyCode) -> KeyEvent {
 
 // ---------------------------------------------------------------- tiers
 
-/// The 40-column layout is the contract: a side pane is usually narrow. The same fixture at
-/// every width a tier starts, ends or sits in the middle of.
+/// The same fixture at every width a tier starts, ends or sits in the middle of.
 #[test]
 fn the_board_at_every_tier() {
     let mut b = board();
@@ -204,7 +203,7 @@ fn the_board_at_every_tier() {
         b.selected,
         Selection::Node {
             run: fx::run_id(),
-            logical: fx::p4_task(3),
+            logical: fx::board_task(3),
         },
         "the blocked task needs attention first"
     );
@@ -256,8 +255,7 @@ fn the_tiers_start_where_the_table_says() {
     }
 }
 
-/// At a tier's narrowest width a task at its deepest indent still keeps `title_min` columns
-/// (below 40 the board is best effort), measured on the row the board draws.
+/// At each tier's narrowest width the deepest task row keeps `title_min` title columns.
 #[test]
 fn every_tier_keeps_its_title_minimum() {
     let b = board();
@@ -293,7 +291,7 @@ fn every_tier_keeps_its_title_minimum() {
 /// A nested dispatch sits under the task that issued it, two columns deeper, `by` its caller.
 #[test]
 fn a_nested_dispatch_under_its_task() {
-    let mut lines = fx::p4_journal();
+    let mut lines = fx::board_journal();
     let seq = lines.len() as u64 + 10;
     lines.push(JournalLine {
         seq,
@@ -339,12 +337,11 @@ fn a_nested_dispatch_under_its_task() {
 
 // ---------------------------------------------------------------- runs
 
-/// A schema-2 run and a schema-1 run side by side: the header sums both, the older one is a
-/// single legacy bucket.
+/// The header sums a schema-2 and a schema-1 run; the older one is one legacy bucket.
 #[test]
 fn two_runs_one_of_them_legacy() {
     let mut b = board_of(vec![
-        pane(fx::run_id(), &fx::p4_journal()),
+        pane(fx::run_id(), &fx::board_journal()),
         pane(run_b(), &retag(fx::running(), run_b())),
     ]);
     b.selected = retry();
@@ -430,8 +427,7 @@ fn wide_counts_are_never_cut() {
 
 // ---------------------------------------------------------------- detail
 
-/// Why the retry landed on `alt`: the terms as recorded, who was passed over and why, and
-/// the attempt before it.
+/// Why the retry landed on `alt`: recorded terms, who was passed over, the prior attempt.
 #[test]
 fn the_detail_shows_the_terms_as_recorded() {
     let mut b = board();
@@ -449,17 +445,16 @@ fn the_detail_shows_the_terms_as_recorded() {
     }
 }
 
-/// An account `excluded` names that `accounts.json` has never heard of, and one the recorded
-/// verdict still covers: the live ones say `now`, the recorded one does not.
+/// Live exclusions say `now`; one only the recorded verdict covers does not.
 #[test]
 fn every_exclusion_names_the_gate_that_holds_it_back() {
-    let mut lines = fx::p4_journal();
+    let mut lines = fx::board_journal();
     let seq = lines.len() as u64 + 10;
     lines.push(JournalLine {
         seq,
         at: fx::at(40),
         run: fx::run_id(),
-        node: Some(fx::p4_task(3)),
+        node: Some(fx::board_task(3)),
         event: JournalEvent::AccountSelected {
             account: AccountId("alt".into()),
             exec: "claude-alt".into(),
@@ -476,7 +471,7 @@ fn every_exclusion_names_the_gate_that_holds_it_back() {
         seq: seq + 1,
         at: fx::at(41),
         run: fx::run_id(),
-        node: Some(fx::p4_task(3)),
+        node: Some(fx::board_task(3)),
         event: JournalEvent::NodeStateChanged {
             from: crate::model::dispatch::Phase::Blocked,
             to: NodeState::Leased {
@@ -488,7 +483,7 @@ fn every_exclusion_names_the_gate_that_holds_it_back() {
     let mut b = board_of(vec![pane(fx::run_id(), &lines)]);
     b.selected = Selection::Node {
         run: fx::run_id(),
-        logical: fx::p4_task(3),
+        logical: fx::board_task(3),
     };
     let theme = Theme::plain();
     let c = render::Ctx::new(&b, 100, &theme, 0, MAX_AGE);
@@ -508,7 +503,7 @@ fn every_exclusion_names_the_gate_that_holds_it_back() {
 /// Journals written before WP5 carry `format!("score {sc:.4}")` and nothing else.
 #[test]
 fn the_legacy_reason_degrades_to_one_line() {
-    let mut lines = fx::p4_journal();
+    let mut lines = fx::board_journal();
     let seq = lines.len() as u64 + 10;
     lines.push(JournalLine {
         seq,
@@ -565,7 +560,7 @@ fn the_cancel_prompt_replaces_the_hints() {
 fn every_pager_names_itself() {
     let dir = tempfile::tempdir().expect("tempdir");
     let root = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).expect("utf8");
-    let lines = fx::p4_journal();
+    let lines = fx::board_journal();
     let body: String = lines
         .iter()
         .take(3)
@@ -622,7 +617,7 @@ fn every_pager_names_itself() {
 #[test]
 fn control_characters_never_reach_the_pane() {
     let evil = "\u{1b}[2Jswamp: run succeeded\u{7}";
-    let lines: Vec<JournalLine> = fx::p4_journal()
+    let lines: Vec<JournalLine> = fx::board_journal()
         .into_iter()
         .map(|mut l| {
             if let JournalEvent::NodeSpawned { node } = &mut l.event
@@ -657,8 +652,7 @@ fn every_width_draws_inside_its_pane() {
     }
 }
 
-/// The board's bar is `watch::gauge_bar` with the board's own glyphs: same rounding, so a
-/// percentage can never read one cell apart between `swamp watch` and `swamp board`.
+/// The board's bar rounds like `watch::gauge_bar`, so the two never differ by a cell.
 #[test]
 fn the_bar_fills_exactly_like_watch() {
     let theme = Theme::plain();
@@ -697,10 +691,10 @@ fn every_glyph_is_one_column() {
     }
 }
 
-/// The P4 journal with `n` reads by the brain before its first dispatch.
+/// The board journal with `n` reads by the brain before its first dispatch.
 fn with_brain_reads(n: usize) -> Vec<JournalLine> {
     use crate::model::event::WorkerEvent;
-    let mut lines = fx::p4_journal();
+    let mut lines = fx::board_journal();
     let first = lines
         .iter()
         .position(|l| matches!(l.event, JournalEvent::DispatchIssued { .. }))
@@ -739,7 +733,7 @@ fn the_delegation_cell_warns_once_the_budget_is_spent() {
         fits(&draw(&b, width), width as usize);
         assert!(header(&b, width).contains("1 stuck"), "{width}");
         let warned = header(&b, width).contains("brain 11/8 over");
-        assert_eq!(warned, width != 60, "{width}: {}", header(&b, width));
+        assert!(warned, "{width}: {}", header(&b, width));
     }
     assert!(header(&b, 140).contains("brain 11/8 over (21%)"));
     assert!(!header(&b, 40).contains("~$"), "{}", header(&b, 40));

@@ -620,12 +620,11 @@ mod tests {
         assert!(text.iter().any(|l| l.contains("+4 more")), "{text:?}");
     }
 
-    /// A bound block reads its dispatch: every task has a row from the moment it is
-    /// journaled, ranked, and the block waits for `DispatchSettled` to commit.
+    /// Every task of a bound dispatch has a row, and the block commits on `DispatchSettled`.
     #[test]
     fn a_bound_batch_rows_every_task_of_its_dispatch() {
         use crate::ui::chat::tests_support as fx;
-        let view = view_of(fx::p4_journal());
+        let view = view_of(fx::board_journal());
         let mut b = Batch::new("d1".into(), Some(5), fx::now());
         b.dispatch = Some(fx::did("18"));
         b.refresh(&view, fx::now());
@@ -655,7 +654,7 @@ mod tests {
         use crate::journal::record::JournalLine;
         use crate::model::dispatch::Phase;
         use crate::ui::chat::tests_support as fx;
-        let mut lines: Vec<JournalLine> = fx::p4_journal()
+        let mut lines: Vec<JournalLine> = fx::board_journal()
             .into_iter()
             .filter(|l| l.node != Some(fx::nid("09")))
             .collect();
@@ -664,7 +663,7 @@ mod tests {
             seq,
             at: fx::at(100),
             run: fx::run_id(),
-            node: Some(fx::p4_task(2)),
+            node: Some(fx::board_task(2)),
             event,
         };
         lines.push(at(
@@ -688,7 +687,7 @@ mod tests {
         let row = b
             .rows
             .iter()
-            .find(|r| r.logical == fx::p4_task(2))
+            .find(|r| r.logical == fx::board_task(2))
             .expect("the retried task");
         assert!(row.account.is_empty());
         assert_eq!(row.elapsed, Some(Duration::from_secs(168)));

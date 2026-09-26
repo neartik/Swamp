@@ -977,7 +977,7 @@ pub async fn run_tui(
 
     let mut board = sources.board(Instant::now())?;
     let mut app = App::new(cfg.ui.board_actions.unwrap_or(true));
-    let grace = cfg.limits.grace_period.unwrap_or(StdDuration::from_secs(5));
+    let grace = cfg.grace_period();
     let (tx, mut done) = tokio::sync::mpsc::unbounded_channel::<CancelDone>();
     let _pid = BoardPid::write(&sources.paths.board_pid());
 

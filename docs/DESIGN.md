@@ -1824,6 +1824,9 @@ JSON shapes are in `docs/DISPATCH.md`.
 
 ~/.swamp/
   accounts.json                           # cross-run, cross-repo quota state (fs4-locked)
+  runs.json                               # cross-repo index of live runs, read by swamp board --all (fs4-locked)
+  board.pid                               # the running swamp board, for chat's tmux hint
+  sock/<run_short>.sock                   # MCP control socket, 0600 in a 0700 directory
   worktrees/<repo-name>-<hash8>/<run_short>/<node_short>-<attempt>/   # LOGICAL node short id
 ```
 
@@ -2246,58 +2249,43 @@ node. A run that exists is a run that spent something.
 ## 9. `swamp doctor`
 
 ```
-$ swamp doctor
+$ swamp doctor --schema
 swamp 0.1.0 - macos aarch64
 
 environment
-  ok    git 2.47.1                    worktree support present
-  ok    repo ~/projects/api           HEAD a3f91c2, clean
-  ok    .swamp/ writable              listed in .git/info/exclude
-  ok    ~/.swamp state dir            free 412 GiB
-  ok    swamp resolvable              /usr/local/bin/swamp (needed for the MCP bridge)
-  ok    not inside a worker           SWAMP_DEPTH unset
-
-providers.anthropic (claude-cli)
-  ok    claude-main -> ~/bin/claude-main   wrapper -> claude 2.x
-          auth: subscription (apiKeySource=none)   CLAUDE_CONFIG_DIR=~/.claude
-          tiers: high=opus  mid=sonnet  low=haiku   probe 1.4s
-  ok    claude-alt  -> ~/bin/claude-alt    CLAUDE_CONFIG_DIR=~/.claude-alt
-  ok    claude-work -> ~/bin/claude-alt     CLAUDE_CONFIG_DIR=~/.claude-alt
-  ERROR accounts/collision
-          accounts claude-alt and claude-work resolve to the same binary with the same
-          effective config dir (~/bin/claude-alt env CLAUDE_CONFIG_DIR=~/.claude-alt):
-          they are ONE subscription, so dispatch would double-spend one quota and
-          failover between them is a silent no-op. Give each account a wrapper that
-          sets its own config dir.
-
-providers.openai (codex-cli)
-  ok    codex-main  -> ~/bin/codex-main    wrapper -> codex-cli 0.15.x
-          auth: ChatGPT subscription   CODEX_HOME=~/.codex-main
-
-quota (one line per account, from the last persisted snapshot; no network)
-  ok    providers/claude-main/quota   quota telemetry live  5h 13%  7d 5%  observed 57s ago
-  WARN  providers/claude-alt/quota    no quota source; tokens only, utilization is estimated
-  note  providers/codex-main/quota    quota via app-server  7d 32%  observed 57s ago
-
-protocol (--schema)
-  ok    protocol/schema                     0 of 812 stream lines unparsed (0.0%), 0 of 3
-                                            classifications used the regex fallback (0.0%)
-  ok    protocol/journal                    9g5fav schema 2 (swamp 0.1.0)
-  note  protocol/journal                    8k2m1q schema 1 (swamp 0.1.0): folds, without the
-                                            dispatch lineage schema 2 records
-  ok    protocol/permission_mode            acceptEdits, acceptEdits accepted by claude-main
-
+  ok    environment/git              git version 2.47.1
+  ok    environment/repo             /Users/me/projects/api HEAD a3f91c2, clean
+  ok    environment/.swamp           /Users/me/projects/api/.swamp writable, listed in .git/info/exclude
+  ok    environment/state            /Users/me/.swamp writable
+  ok    environment/swamp            /usr/local/bin/swamp (the MCP bridge is spawned by absolute path)
+  ok    environment/depth            not inside a worker
+accounts
+  ok    accounts/claude-main         claude-main -> /Users/me/bin/claude-main (anthropic) env CLAUDE_CONFIG_DIR
+  ok    accounts/claude-alt          claude-alt -> /Users/me/bin/claude-alt (anthropic) env CLAUDE_CONFIG_DIR
+  ok    accounts/claude-work         claude-alt -> /Users/me/bin/claude-alt (anthropic) env CLAUDE_CONFIG_DIR
+  ok    accounts/codex-main          codex-main -> /Users/me/bin/codex-main (openai) env CODEX_HOME
+  ERROR accounts/collision           accounts claude-alt and claude-work resolve to the same binary with the same effective config dir (/Users/me/bin/claude-alt env CLAUDE_CONFIG_DIR=/Users/me/.claude-alt): they are ONE subscription, so dispatch would double-spend one quota and failover between them is a silent no-op. Give each account a wrapper that sets its own config dir.
+providers
+  ok    providers/claude-main/quota  quota telemetry live  5h 13%  7d 5%  observed 57s ago
+  WARN  providers/claude-alt/quota   no quota source; tokens only, utilization is estimated
+  WARN  providers/claude-work/quota  no quota source; tokens only, utilization is estimated
+  note  providers/codex-main/quota   quota via app-server  7d 32%  observed 57s ago
+  ok    providers/anthropic          tiers: high=opus  mid=sonnet  low=haiku
+  ok    providers/openai             tiers: high=gpt-6-astra  mid=gpt-5.6-sol  low=gpt-5.6-terra
+  WARN  providers/anthropic/permission_mode providers.anthropic.worker.permission_mode = "acceptEdits" denies every Bash call under --permission-prompts none and Bash is not allowed, so it cannot run tests, a build or git; add "Bash" to providers.anthropic.worker.allow_tools
+brain
+  WARN  brain/permission_mode        brain.permission_mode = "acceptEdits" denies every Bash call under --permission-prompts none and Bash is not allowed, so it cannot run tests, a build or git; add "Bash" to brain.allow_tools
+workspace
+  WARN  workspace/link               [workspace] link is empty but ./target is 3.1 GiB; fresh worktrees will rebuild from scratch. Consider link = ["target"]
 config
-  ok    ~/.config/swamp/config.toml         valid
-  WARN  [workspace] link is empty but ./target is 3.1 GiB
-          fresh worktrees will rebuild from scratch; consider link = ["target"]
-  WARN  providers.anthropic.worker.permission_mode = "acceptEdits"
-          denies every Bash call under --permission-prompts none and Bash is not
-          allowed, so workers cannot run tests, a build or git. Add "Bash" to
-          providers.anthropic.worker.allow_tools. ("auto" is not the fix: it denies
-          the file writes instead.) The same check covers [brain].
+  ok    config/sources               /Users/me/.config/swamp/config.toml
+protocol
+  ok    protocol/schema              0 of 812 stream lines unparsed (0.0%), 0 of 3 classifications used the regex fallback (0.0%)
+  ok    protocol/journal             9g5fav schema 2 (swamp 0.1.0)
+  note  protocol/journal             8k2m1q schema 1 (swamp 0.1.0): folds, without the dispatch lineage schema 2 records
+  ok    protocol/permission_mode     acceptEdits accepted by claude-main
 
-3 warnings, 1 error.
+5 warnings, 1 error.
 ```
 
 The most valuable check is `accounts/collision`. Two "accounts" that are one subscription is silent,
@@ -2360,7 +2348,7 @@ unsafe_ack            = false      # required before any --dangerously-* flag is
 
 # ---------------------------------------------------------------- brain
 [brain]
-transport = "cli"                  # "cli" (default, subscription-safe) | "api" (feature api-brain)
+transport = "cli"                  # "cli" is the only transport compiled in; anything else is refused
 provider  = "anthropic"
 account   = "main"
 tier      = "high"

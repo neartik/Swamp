@@ -466,7 +466,7 @@ fn replay_leaves_the_run_view_unchanged() {
     }
 }
 
-/// P5: the brain's reads before its dispatch, not the dispatch call, count against the budget.
+/// The brain's reads before its dispatch, not the dispatch call, count against the budget.
 #[test]
 fn the_brain_reads_before_its_dispatch_are_counted_against_the_budget() {
     let h = Harness::new().scenario(

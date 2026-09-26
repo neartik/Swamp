@@ -179,22 +179,14 @@ pub async fn probe_account(
 }
 
 async fn version_check(exec: &str, env: &BTreeMap<String, String>) -> Option<String> {
-    let mut cmd = tokio::process::Command::new(exec);
-    cmd.arg("--version");
-    for (k, v) in env {
-        cmd.env(k, shellexpand::tilde(v).into_owned());
-    }
-    match tokio::time::timeout(PROBE_TIMEOUT, cmd.output()).await {
-        Ok(Ok(o)) if o.status.success() => None,
-        Ok(Ok(o)) => Some(format!(
+    match super::cli_output(exec, env, "--version", PROBE_TIMEOUT).await {
+        Ok(o) if o.status.success() => None,
+        Ok(o) => Some(format!(
             "`{exec} --version` exited {}: {}",
             o.status.code().unwrap_or(-1),
             String::from_utf8_lossy(&o.stderr).trim()
         )),
-        Ok(Err(e)) => Some(format!("`{exec} --version` failed: {e}")),
-        Err(_) => Some(format!(
-            "`{exec} --version` timed out after {PROBE_TIMEOUT:?}"
-        )),
+        Err(e) => Some(e),
     }
 }
 

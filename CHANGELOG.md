@@ -85,5 +85,6 @@ config keys only ever change additively; anything else that would break a user i
   `dispatch::runner` backs both the dispatcher and `swamp run --no-brain`; the pidfile liveness
   check is `RunPaths::is_live`.
 - CI runs `cargo fmt --check`, `clippy -D warnings` and `cargo test` on Linux and macOS and
-  uploads pending `insta` snapshots on failure. `tests/docs_drift.rs` keeps `docs/DISPATCH.md`,
-  DESIGN §7.2 and the README command table in step with the code.
+  uploads pending `insta` snapshots on failure. `tests/docs_drift.rs` checks the `ev` names in
+  `docs/DISPATCH.md` and DESIGN §7.2 against `JournalEvent`, and that every subcommand has a row
+  in the README command table.

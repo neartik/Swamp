@@ -3,7 +3,6 @@ use crate::cmd::Ctx;
 use crate::dispatch::cancel::{Outcome, Sink, Stop, cancel_node, dispatch_tasks};
 use crate::ids::{DispatchId, NodeId};
 use crate::journal::fold::RunView;
-use crate::journal::inspect;
 use crate::journal::paths::RunPaths;
 use crate::model::core::{CancelSource, NodeKind, NodeState};
 use crate::ui::fmt;
@@ -25,11 +24,7 @@ struct Target {
 /// Cancel a run, a node or a dispatch: kill its process groups and journal each task cancelled.
 pub async fn run(ctx: &Ctx, args: &CancelArgs) -> anyhow::Result<i32> {
     let grace = match args.signal {
-        SignalArg::Term => ctx
-            .cfg
-            .limits
-            .grace_period
-            .unwrap_or(Duration::from_secs(5)),
+        SignalArg::Term => ctx.cfg.grace_period(),
         SignalArg::Kill => Duration::ZERO,
     };
 
@@ -142,7 +137,10 @@ fn resolve(ctx: &Ctx, spec: &str) -> anyhow::Result<Target> {
             None => anyhow::bail!("no run, node or dispatch matches `{spec}`"),
         },
         _ if dispatches.is_empty() => {
-            anyhow::bail!("node `{spec}` is ambiguous: {}", super::candidates(&nodes))
+            anyhow::bail!(
+                "node `{spec}` is ambiguous: {}",
+                super::node_candidates(&nodes)
+            )
         }
         _ if nodes.is_empty() => anyhow::bail!(
             "dispatch `{spec}` is ambiguous: {}",
@@ -150,7 +148,7 @@ fn resolve(ctx: &Ctx, spec: &str) -> anyhow::Result<Target> {
         ),
         _ => anyhow::bail!(
             "`{spec}` is ambiguous: nodes {}; dispatches {}",
-            super::candidates(&nodes),
+            super::node_candidates(&nodes),
             ctx.dispatch_candidates(&dispatches)
         ),
     }
@@ -172,36 +170,13 @@ fn dispatch(ctx: &Ctx, paths: RunPaths, id: DispatchId) -> anyhow::Result<Target
 
 /// A task still waiting for its first attempt has no node to find, only a logical id.
 fn unstarted(ctx: &Ctx, spec: &str) -> anyhow::Result<Option<(RunPaths, NodeId)>> {
-    let mut hits = Vec::new();
-    for run in ctx.paths.list_runs()? {
-        let paths = ctx.paths.run_paths(run);
-        let Ok(view) = RunView::load(&paths.dir, false) else {
-            continue;
-        };
-        for id in inspect::match_tasks(&view, spec) {
-            let title = view
-                .tasks
-                .get(&id)
-                .map(|t| t.title.clone())
-                .unwrap_or_default();
-            hits.push((paths.clone(), id, title));
-        }
-    }
+    let mut hits = ctx.task_hits(spec)?;
     match hits.len() {
         0 => Ok(None),
         1 => Ok(hits.pop().map(|(paths, id, _)| (paths, id))),
         _ => anyhow::bail!(
             "node `{spec}` is ambiguous: {}",
-            hits.iter()
-                .take(8)
-                .map(|(rp, id, title)| format!(
-                    "{} (run {}, {})",
-                    id.short(),
-                    rp.run.short(),
-                    fmt::truncate(title, 40)
-                ))
-                .collect::<Vec<_>>()
-                .join(", ")
+            super::candidates(hits.iter().map(|(rp, id, t)| (rp.run, *id, t.as_str())))
         ),
     }
 }

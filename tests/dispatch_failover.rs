@@ -10,7 +10,7 @@ use swamp::dispatch::DispatchRequest;
 use swamp::dispatch::{AccountPool, Dispatcher, Health, NodeCtx, NodeRunner, run_node};
 use swamp::ids::DispatchId;
 use swamp::journal::fold::Scope;
-use swamp::journal::paths::{Paths, RunPaths};
+use swamp::journal::paths::RunPaths;
 use swamp::journal::writer::{FsyncPolicy, Writer};
 use swamp::journal::{JournalHandle, Projection, RunView};
 use swamp::model::core::NodeState;
@@ -23,7 +23,7 @@ use swamp::model::node::WorkResultRef;
 use swamp::model::result::{IsolationMode, TaskRequest};
 use swamp::worker::RunOutcome;
 use swamp::worker::adapter::{LaunchSpec, SessionPlan};
-use swamp::workspace::{Git, NodeWorktree, WorkspaceManager};
+use swamp::workspace::NodeWorktree;
 use swamp::{JournalEvent, JournalLine, NodeId, NodeIds, RunId, SwampError};
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::time::Instant;
@@ -337,30 +337,10 @@ impl Fixture {
         }
     }
 
-    async fn dispatcher(&self, runner: Arc<dyn NodeRunner>) -> Arc<Dispatcher> {
-        let exec = Arc::new(swamp::worker::Executor {
-            journal: self.journal.clone(),
-            cfg: Arc::clone(&self.cfg),
-        });
-        let ws = WorkspaceManager::new(
-            Git {
-                root: self.root.clone(),
-            },
-            Arc::new(Paths {
-                repo: self.root.clone(),
-                dot_swamp: self.root.join(".swamp"),
-                home_swamp: self.root.join("home"),
-            }),
-            Arc::clone(&self.cfg),
-            self.journal.clone(),
-        )
-        .await
-        .expect("workspace manager");
+    fn dispatcher(&self, runner: Arc<dyn NodeRunner>) -> Arc<Dispatcher> {
         Dispatcher::with_runner(
             Arc::clone(&self.cfg),
             Arc::clone(&self.pool),
-            exec,
-            ws,
             self.journal.clone(),
             runner,
         )
@@ -661,7 +641,7 @@ async fn attempts_are_capped_by_max_attempts() {
 async fn the_dispatcher_rejects_dependent_tasks() {
     let f = fixture(TWO_ACCOUNTS).await;
     let runner = Scripted::new(&f.root, vec![]);
-    let disp = f.dispatcher(runner.clone()).await;
+    let disp = f.dispatcher(runner.clone());
     let mut t = task("second step");
     t.deps = vec![NodeId::new()];
 
@@ -680,7 +660,7 @@ async fn the_dispatcher_rejects_dependent_tasks() {
 async fn the_dispatcher_enforces_max_depth() {
     let f = fixture(&format!("{TWO_ACCOUNTS}\n[limits]\nmax_depth = 0\n")).await;
     let runner = Scripted::new(&f.root, vec![]);
-    let disp = f.dispatcher(runner.clone()).await;
+    let disp = f.dispatcher(runner.clone());
     let result = disp.dispatch_one(NodeId::new(), task("too deep")).await;
     assert!(!result.ok);
     assert!(runner.calls().is_empty(), "a capped node is never spawned");
@@ -698,7 +678,7 @@ async fn the_dispatcher_enforces_max_nodes_per_run() {
     ))
     .await;
     let runner = Scripted::new(&f.root, vec![]);
-    let disp = f.dispatcher(runner.clone()).await;
+    let disp = f.dispatcher(runner.clone());
     let parent = NodeId::new();
     assert!(disp.dispatch_one(parent, task("first")).await.ok);
     let second = disp.dispatch_one(parent, task("second")).await;
@@ -715,7 +695,7 @@ async fn the_dispatcher_enforces_max_nodes_per_run() {
 async fn a_batch_returns_within_max_wait_with_running_nodes() {
     let f = fixture(TWO_ACCOUNTS).await;
     let runner = Scripted::slow(&f.root, Duration::from_secs(30));
-    let disp = f.dispatcher(runner.clone()).await;
+    let disp = f.dispatcher(runner.clone());
     let started = std::time::Instant::now();
     let results = disp
         .dispatch_batch(
@@ -741,7 +721,7 @@ async fn a_batch_returns_within_max_wait_with_running_nodes() {
 async fn a_completed_batch_carries_the_worker_result() {
     let f = fixture(TWO_ACCOUNTS).await;
     let runner = Scripted::new(&f.root, vec![success(), success()]);
-    let disp = f.dispatcher(runner.clone()).await;
+    let disp = f.dispatcher(runner.clone());
     let results = disp
         .dispatch_batch(
             NodeId::new(),
@@ -804,7 +784,7 @@ async fn cross_provider_failover_is_opt_in() {
 async fn cancel_all_only_stops_the_nodes_still_running() {
     let f = fixture(TWO_ACCOUNTS).await;
     let runner = Scripted::slow_call(&f.root, 2, Duration::from_secs(30));
-    let disp = f.dispatcher(runner.clone()).await;
+    let disp = f.dispatcher(runner.clone());
     let brain = NodeId(disp.journal.run().0);
     assert!(disp.dispatch_one(brain, task("first")).await.ok);
     assert!(disp.dispatch_one(brain, task("second")).await.ok);
@@ -829,7 +809,7 @@ async fn cancel_all_only_stops_the_nodes_still_running() {
 #[tokio::test]
 async fn cancelling_an_unknown_node_is_an_error() {
     let f = fixture(TWO_ACCOUNTS).await;
-    let disp = f.dispatcher(Scripted::new(&f.root, vec![])).await;
+    let disp = f.dispatcher(Scripted::new(&f.root, vec![]));
     assert!(disp.cancel(NodeId::new()).await.is_err());
 }
 
@@ -1050,7 +1030,7 @@ async fn a_rotate_retry_shares_its_logical_id_and_dispatch() {
             },
         ],
     );
-    let disp = f.dispatcher(runner.clone()).await;
+    let disp = f.dispatcher(runner.clone());
     let caller = NodeId(f.journal.run().0);
     let out = disp
         .dispatch(DispatchRequest::new(caller, vec![task("port the parser")]))
@@ -1153,7 +1133,7 @@ async fn a_max_nodes_overflow_journals_a_rejection_the_fold_can_see() {
     ))
     .await;
     let runner = Scripted::new(&f.root, vec![]);
-    let disp = f.dispatcher(runner.clone()).await;
+    let disp = f.dispatcher(runner.clone());
     let caller = NodeId(f.journal.run().0);
     let out = disp
         .dispatch(DispatchRequest::new(
@@ -1195,7 +1175,7 @@ async fn a_dispatch_that_does_not_wait_still_answers_for_every_task() {
     ))
     .await;
     let runner = Scripted::slow(&f.root, Duration::from_millis(300));
-    let disp = f.dispatcher(runner.clone()).await;
+    let disp = f.dispatcher(runner.clone());
     let caller = NodeId(f.journal.run().0);
     let out = disp
         .dispatch(DispatchRequest {
@@ -1215,21 +1195,21 @@ async fn a_seeded_dispatcher_continues_the_run_it_resumes() {
     ))
     .await;
     let runner = Scripted::new(&f.root, vec![]);
-    let first = f.dispatcher(runner.clone()).await;
+    let first = f.dispatcher(runner.clone());
     let caller = NodeId(f.journal.run().0);
     let done = first.dispatch_one(caller, task("first")).await;
     assert!(done.ok);
     assert_eq!(first.next_call_seq().0, 1);
     let view = f.view();
 
-    let fresh = f.dispatcher(runner.clone()).await;
+    let fresh = f.dispatcher(runner.clone());
     let nested = fresh.dispatch_one(done.node, task("nested")).await;
     assert!(
         nested.ok,
         "an unseeded dispatcher forgets the parent's depth"
     );
 
-    let seeded = f.dispatcher(runner.clone()).await;
+    let seeded = f.dispatcher(runner.clone());
     seeded.seed(&view);
     let nested = seeded.dispatch_one(done.node, task("nested")).await;
     let detail = match nested.failure {
@@ -1256,12 +1236,12 @@ async fn a_seeded_dispatcher_continues_the_run_it_resumes() {
 async fn a_seeded_nested_task_is_journaled_at_depth_two() {
     let f = fixture(&format!("{TWO_ACCOUNTS}\n[limits]\nmax_depth = 2\n")).await;
     let runner = Scripted::new(&f.root, vec![]);
-    let first = f.dispatcher(runner.clone()).await;
+    let first = f.dispatcher(runner.clone());
     let caller = NodeId(f.journal.run().0);
     let done = first.dispatch_one(caller, task("first")).await;
     assert!(done.ok);
 
-    let seeded = f.dispatcher(runner.clone()).await;
+    let seeded = f.dispatcher(runner.clone());
     seeded.seed(&f.view());
     let nested = seeded.dispatch_one(done.node, task("nested")).await;
     assert!(nested.ok, "{:?}", nested.failure);

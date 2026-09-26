@@ -502,8 +502,7 @@ pub fn is_live(view: &RunView, alive: &dyn Fn(NodeId) -> bool, socket: bool) -> 
 pub struct NodeRow {
     pub run: RunId,
     pub logical: NodeId,
-    /// The live attempt: the id `swamp diff` and `swamp adopt` take. The logical id until
-    /// the task has one.
+    /// The live attempt `swamp diff` and `swamp adopt` take, else the logical id.
     pub id: NodeId,
     /// 0 for a task that never started.
     pub attempt: u32,
@@ -736,8 +735,7 @@ pub struct Summary {
 
 // ---------------------------------------------------------------- board
 
-/// What the cursor is on. Held by identity, not by index, so a rediscovery or a new task
-/// never moves it under the user.
+/// What the cursor is on, held by identity so new rows never move it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum Selection {
     #[default]
@@ -762,8 +760,7 @@ impl Selection {
     }
 }
 
-/// Where the cursor goes until the user moves it: the first task stuck for good, else the
-/// first blocked one, else the first running one, else the brain.
+/// Where the cursor starts: first stuck task, else blocked, else running, else the brain.
 pub fn attention(rows: &Rows) -> Option<Selection> {
     let mut shown = Vec::new();
     for g in rows.runs.iter().flat_map(|r| &r.active) {
@@ -1078,7 +1075,7 @@ mod tests {
     /// Tasks sit under the dispatch that asked for them, dispatches in call order.
     #[test]
     fn tasks_group_under_their_dispatch_in_call_order() {
-        let b = board(vec![pane(&fx::p4_journal())], Vec::new());
+        let b = board(vec![pane(&fx::board_journal())], Vec::new());
         let rows = b.rows();
         let run = &rows.runs[0];
         assert_eq!(run.brain.as_ref().map(|r| r.short()), Some("9g5fav".into()));
@@ -1102,7 +1099,7 @@ mod tests {
     /// Failures first, then running, then blocked, then queued, then done.
     #[test]
     fn tasks_are_ranked_inside_a_dispatch() {
-        let mut lines = fx::p4_journal();
+        let mut lines = fx::board_journal();
         let b = board(vec![pane(&lines)], Vec::new());
         assert_eq!(
             shorts(&b.rows().runs[0].active[0]),
@@ -1112,7 +1109,7 @@ mod tests {
         let seq = lines.len() as u64 + 10;
         lines.push(changed(
             seq,
-            fx::p4_task(4),
+            fx::board_task(4),
             NodeState::Failed {
                 failure: Failure::Timeout { after_s: 60 },
             },
@@ -1132,12 +1129,12 @@ mod tests {
     /// Settled means recent; an open dispatch whose tasks all ended is still open.
     #[test]
     fn only_a_settled_dispatch_moves_to_recent() {
-        let mut lines = fx::p4_journal();
+        let mut lines = fx::board_journal();
         let base = lines.len() as u64 + 10;
         for n in 1..=4u8 {
             lines.push(changed(
                 base + n as u64,
-                fx::p4_task(n),
+                fx::board_task(n),
                 NodeState::Succeeded,
             ));
         }
@@ -1156,7 +1153,7 @@ mod tests {
     /// A task that dispatched work of its own carries that dispatch right under it.
     #[test]
     fn a_nested_dispatch_hangs_under_its_task() {
-        let mut lines = fx::p4_journal();
+        let mut lines = fx::board_journal();
         let seq = lines.len() as u64 + 10;
         lines.push(line(
             seq,
@@ -1250,15 +1247,15 @@ mod tests {
     /// A rotated retry waiting on every account shows the wait, not the attempt that ended.
     #[test]
     fn a_blocked_retry_waits_from_its_last_attempt() {
-        let mut lines: Vec<JournalLine> = fx::p4_journal()
+        let mut lines: Vec<JournalLine> = fx::board_journal()
             .into_iter()
             .filter(|l| l.node != Some(fx::nid("09")))
             .collect();
         let seq = lines.len() as u64 + 10;
-        lines.push(changed(seq, fx::p4_task(2), NodeState::Queued));
+        lines.push(changed(seq, fx::board_task(2), NodeState::Queued));
         lines.push(line(
             seq + 1,
-            fx::p4_task(2),
+            fx::board_task(2),
             JournalEvent::NodeBlocked {
                 until: fx::at(2_480),
                 why: "main at capacity".into(),
@@ -1267,7 +1264,7 @@ mod tests {
         ));
         let pane = pane(&lines);
         let t = pane
-            .task_row(fx::p4_task(2), 0, fx::now())
+            .task_row(fx::board_task(2), 0, fx::now())
             .expect("the task row");
         assert!(matches!(t.row.state, NodeState::Blocked { .. }));
         assert_eq!(t.row.account, None);
@@ -1282,12 +1279,12 @@ mod tests {
 
     #[test]
     fn the_default_selection_is_the_first_stuck_task() {
-        let b = board(vec![pane(&fx::p4_journal())], Vec::new());
+        let b = board(vec![pane(&fx::board_journal())], Vec::new());
         assert_eq!(
             attention(&b.rows()),
             Some(Selection::Node {
                 run: fx::run_id(),
-                logical: fx::p4_task(3),
+                logical: fx::board_task(3),
             }),
             "nothing failed, so the blocked task"
         );
@@ -1316,7 +1313,7 @@ mod tests {
         );
         second.apply(&fx::running());
         let mut b = board(
-            vec![pane(&fx::p4_journal()), second],
+            vec![pane(&fx::board_journal()), second],
             vec![
                 account_row("main", Some(Provider::Anthropic)),
                 account_row("alt", Some(Provider::Anthropic)),
@@ -1347,14 +1344,14 @@ mod tests {
 
     #[test]
     fn an_unstarted_rejected_task_has_no_elapsed() {
-        let b = board(vec![pane(&fx::p4_journal())], Vec::new());
+        let b = board(vec![pane(&fx::board_journal())], Vec::new());
         let rows = b.rows();
         let rejected = &rows.runs[0].recent[0].tasks[0];
         assert!(matches!(rejected.row.state, NodeState::Rejected { .. }));
         assert_eq!(rejected.row.elapsed(b.now), None);
 
         let blocked = rows
-            .task(fx::run_id(), fx::p4_task(3))
+            .task(fx::run_id(), fx::board_task(3))
             .expect("blocked task");
         assert_eq!(
             blocked.row.elapsed(b.now),
@@ -1363,7 +1360,7 @@ mod tests {
         assert_eq!(blocked.ineligible.len(), 2);
 
         let retried = rows
-            .task(fx::run_id(), fx::p4_task(2))
+            .task(fx::run_id(), fx::board_task(2))
             .expect("retried task");
         assert_eq!(
             retried.row.elapsed(b.now),
@@ -1420,21 +1417,20 @@ mod tests {
         assert_eq!(r.score, None);
     }
 
-    /// A real lease is taken before the attempt has an id, so `AccountSelected` names the
-    /// logical id. The detail has to find it there too.
+    /// `AccountSelected` names the logical id, since the lease predates the attempt.
     #[test]
     fn a_note_attributed_to_the_logical_id_still_reaches_the_row() {
-        let mut lines = fx::p4_journal();
+        let mut lines = fx::board_journal();
         let seq = lines.len() as u64 + 10;
         lines.push(selected(
             seq,
-            fx::p4_task(1),
+            fx::board_task(1),
             "score .41 = util .93×.50",
             &[],
         ));
         let pane = pane(&lines);
         let note = pane
-            .note_for(fx::p4_task(1))
+            .note_for(fx::board_task(1))
             .expect("a note for the logical row");
         assert_eq!(note.reason.form, ReasonForm::Terms);
     }
@@ -1442,17 +1438,19 @@ mod tests {
     /// Notes are keyed by attempt; a retry's own note is the one the detail shows.
     #[test]
     fn the_newest_attempt_owns_the_note() {
-        let mut lines = fx::p4_journal();
+        let mut lines = fx::board_journal();
         let seq = lines.len() as u64 + 10;
         lines.push(selected(seq, fx::nid("08"), "score 0.9000", &[]));
         let pane = pane(&lines);
-        let note = pane.note_for(fx::p4_task(2)).expect("a note for the task");
+        let note = pane
+            .note_for(fx::board_task(2))
+            .expect("a note for the task");
         assert_eq!(
             note.reason.form,
             ReasonForm::Terms,
             "the retry's, not attempt 1's"
         );
-        let row = pane.node_row(fx::p4_task(2)).expect("the task row");
+        let row = pane.node_row(fx::board_task(2)).expect("the task row");
         assert_eq!(
             row.id,
             fx::nid("09"),
@@ -1532,7 +1530,7 @@ mod tests {
 
     #[test]
     fn a_selected_dispatch_that_disappears_is_dropped() {
-        let mut b = board(vec![pane(&fx::p4_journal())], Vec::new());
+        let mut b = board(vec![pane(&fx::board_journal())], Vec::new());
         b.selected = Selection::Dispatch {
             run: fx::run_id(),
             id: fx::did("18"),

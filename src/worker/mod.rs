@@ -72,7 +72,6 @@ fn observers() -> &'static Mutex<BTreeMap<NodeId, Arc<dyn EventObserver>>> {
 }
 
 const STDERR_TAIL: usize = 64;
-const DEFAULT_GRACE: Duration = Duration::from_secs(5);
 const EVENT_QUEUE: usize = 256;
 
 pub struct RunOutcome {
@@ -197,7 +196,7 @@ impl Executor {
             journal: Some(&self.journal),
             resume,
             timeout,
-            grace: self.cfg.limits.grace_period.unwrap_or(DEFAULT_GRACE),
+            grace: self.cfg.grace_period(),
             max_line: self
                 .cfg
                 .journal

@@ -259,6 +259,7 @@ Swamp adds `/.swamp/` to `.git/info/exclude`, never to a tracked `.gitignore`.
     run.json                   header: cwd, git HEAD, config hash, version, argv
     journal.jsonl              the run tree, append-only, one JSON object per line
     tools/                     the arguments of every brain tool call
+    cancel/<logical_id>        present once a task is cancelled, by any process
     nodes/<node_short>/
       prompt.md                the exact bytes fed to the worker's stdin
       stream.jsonl             raw provider stdout, verbatim, never rewritten
@@ -272,6 +273,8 @@ Swamp adds `/.swamp/` to `.git/info/exclude`, never to a tracked `.gitignore`.
 
 ~/.swamp/
   accounts.json                cross-run, cross-repo quota and cooldown state (file-locked)
+  runs.json                    cross-repo index of live runs, read by swamp board --all (fs4-locked)
+  board.pid                    the running swamp board, for chat's tmux hint
   sock/<run_short>.sock        MCP control socket, 0600 in a 0700 directory
   worktrees/<repo>-<hash8>/<run_short>/<node_short>-<attempt>/
 ```
@@ -304,8 +307,9 @@ cargo test
 
 CI (`.github/workflows/ci.yml`) runs the same three on `ubuntu-latest` and `macos-latest` with the
 toolchain pinned in `rust-toolchain.toml`, and uploads any pending `insta` `.snap.new` files when
-a run fails. `tests/docs_drift.rs` fails when `docs/DISPATCH.md`, DESIGN §7.2 or the command table
-above stops matching the code. Changes are summarized in [CHANGELOG.md](CHANGELOG.md).
+a run fails. `tests/docs_drift.rs` fails when the `ev` names in `docs/DISPATCH.md` or DESIGN §7.2
+differ from `JournalEvent`, or when a subcommand has no row in the command table above; it does not
+check flags or fields. Changes are summarized in [CHANGELOG.md](CHANGELOG.md).
 
 The end-to-end suite (`tests/e2e_*.rs`) runs the real binary against the fake CLIs in
 `tests/support/`, which are extra `[[bin]]` targets driven by scenario files and replaying the

@@ -15,7 +15,7 @@ unsafe_ack            = false      # required before any --dangerously-* flag is
 
 # ---------------------------------------------------------------- brain
 [brain]
-transport = "cli"                  # "cli" (default, subscription-safe) | "api" (feature api-brain)
+transport = "cli"                  # "cli" is the only transport compiled in; anything else is refused
 provider  = "anthropic"
 account   = "main"
 tier      = "high"

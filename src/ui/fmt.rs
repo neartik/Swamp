@@ -86,15 +86,8 @@ pub fn glyph(s: &NodeState) -> &'static str {
 /// The word `swamp trace` prints in the status column.
 pub fn state_word(s: &NodeState) -> &'static str {
     match s {
-        NodeState::Queued => "queued",
-        NodeState::Blocked { .. } => "blocked",
-        NodeState::Leased { .. } => "leased",
-        NodeState::Running { .. } => "running",
         NodeState::Orphaned { .. } => "orphaned",
-        NodeState::Succeeded => "ok",
-        NodeState::Failed { .. } => "failed",
-        NodeState::Cancelled { .. } => "cancelled",
-        NodeState::Rejected { .. } => "rejected",
+        s => phase_word(crate::model::dispatch::Phase::from(s)),
     }
 }
 
@@ -193,14 +186,19 @@ pub fn clock_day(at: OffsetDateTime, now: OffsetDateTime) -> String {
     format!("{} on {}", clock_hm(at), at.date())
 }
 
-/// `until 22:54 (in 38m)`.
-pub fn until_at(until: OffsetDateTime, now: OffsetDateTime) -> String {
+/// `22:54 (in 38m)`.
+fn when(until: OffsetDateTime, now: OffsetDateTime) -> String {
     let secs = (until - now).whole_seconds().max(0) as u64;
     format!(
-        "until {} (in {})",
+        "{} (in {})",
         clock_day(until, now),
         self::until(Duration::from_secs(secs))
     )
+}
+
+/// `until 22:54 (in 38m)`.
+pub fn until_at(until: OffsetDateTime, now: OffsetDateTime) -> String {
+    format!("until {}", when(until, now))
 }
 
 /// `9g5f09·2` for a retry, the plain short id otherwise.
@@ -220,11 +218,9 @@ pub fn blocked_notice(
     now: OffsetDateTime,
     cancel: &str,
 ) -> String {
-    let secs = (until - now).whole_seconds().max(0) as u64;
     format!(
-        "every {provider} account is at its limit \u{b7} earliest reset {} (in {}) \u{b7} {cancel}",
-        clock_day(until, now),
-        self::until(Duration::from_secs(secs))
+        "every {provider} account is at its limit \u{b7} earliest reset {} \u{b7} {cancel}",
+        when(until, now)
     )
 }
 

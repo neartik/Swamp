@@ -54,11 +54,11 @@ fn pane(run: RunId, lines: &[JournalLine]) -> RunPane {
     pane
 }
 
-/// The P4 run, and a schema-1 run that holds only a legacy bucket.
+/// The board run, and a schema-1 run that holds only a legacy bucket.
 fn board() -> Board {
     let mut b = Board::new(Scoring::default(), SelectionPolicy::default(), fx::now());
     b.runs = vec![
-        pane(fx::run_id(), &fx::p4_journal()),
+        pane(fx::run_id(), &fx::board_journal()),
         pane(run_b(), &fx::fixture()),
     ];
     b.accounts = rows_from_state(&fx::config(), &StateMap::default());
@@ -77,7 +77,7 @@ fn ch(c: char) -> KeyEvent {
 fn task(n: u8) -> Selection {
     Selection::Node {
         run: fx::run_id(),
-        logical: fx::p4_task(n),
+        logical: fx::board_task(n),
     }
 }
 
@@ -187,8 +187,7 @@ fn assert_one_board(vt: &Vt, cols: u16) {
 
 // ---------------------------------------------------------------- §4
 
-/// The cursor walks the brain, each dispatch and its tasks, then the accounts, and stops at
-/// the ends.
+/// The cursor walks brain, dispatches, tasks, then accounts, and stops at the ends.
 #[test]
 fn the_arrows_walk_the_rows_in_draw_order() {
     let mut b = board();
@@ -421,8 +420,7 @@ fn the_hints_are_the_key_tables() {
     assert!(!last.contains("cancel"), "{last}");
 }
 
-/// Any pane, however small, draws: the detail gives up lines before the body does, and the
-/// selection stays in view while the body scrolls.
+/// Any pane size draws, and the selection stays in view while the body scrolls.
 #[test]
 fn every_pane_size_draws_and_keeps_the_selection_in_view() {
     let mut b = board();
@@ -470,7 +468,7 @@ fn a_confirmed_cancel_emits_one_effect() {
         app.on_key(&mut b, ch('y')),
         Action::Cancel(CancelTarget::Task {
             run: fx::run_id(),
-            logical: fx::p4_task(3),
+            logical: fx::board_task(3),
         })
     );
     assert!(app.confirm.is_none());
@@ -600,7 +598,7 @@ fn a_cancel_that_stopped_nothing_says_why() {
     let mut app = App::new(true);
     let target = CancelTarget::Task {
         run: fx::run_id(),
-        logical: fx::p4_task(3),
+        logical: fx::board_task(3),
     };
     app.cancel_done(
         &b,
@@ -644,8 +642,7 @@ fn the_board_pid_is_written_on_start_and_removed_on_exit() {
     assert!(!path.exists(), "the guard removes it on the way out");
 }
 
-/// `--json` carries the same rows the frame draws, each run's dispatches in the
-/// `swamp dispatches --json` shape and the accounts in `/usage`'s.
+/// `--json` carries the rows the frame draws, in the `dispatches --json` and `/usage` shapes.
 #[test]
 fn the_json_dump_carries_the_frame() {
     let b = board();

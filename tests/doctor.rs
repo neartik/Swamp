@@ -56,6 +56,12 @@ impl Fixture {
     }
 }
 
+fn write_journal(f: &Fixture, run: swamp::ids::RunId, text: &str) {
+    let journal = f.paths.run_paths(run).journal();
+    std::fs::create_dir_all(journal.parent().expect("run dir")).expect("run dir");
+    std::fs::write(journal, text).expect("journal");
+}
+
 fn config(text: &str) -> Config {
     let schema = toml::from_str(text).expect("test config parses");
     let layers = vec![
@@ -245,8 +251,6 @@ async fn schema_drift_across_recent_runs_fails_the_check() {
 
     let f = Fixture::new();
     let run = RunId::new();
-    let dir = f.paths.dot_swamp.join("runs").join(run.to_string());
-    std::fs::create_dir_all(&dir).expect("run dir");
 
     let mut text = String::new();
     for i in 0..4 {
@@ -276,7 +280,7 @@ async fn schema_drift_across_recent_runs_fails_the_check() {
         text.push_str(&serde_json::to_string(&line).expect("json"));
         text.push('\n');
     }
-    std::fs::write(dir.join("journal.jsonl"), text).expect("journal");
+    write_journal(&f, run, &text);
 
     let cfg = healthy(&f);
     let out = checks(&cfg, &f.paths, false, true).await;
@@ -296,9 +300,7 @@ async fn schema_drift_across_recent_runs_fails_the_check() {
 async fn reap_removes_stale_sockets_and_pidfiles() {
     let f = Fixture::new();
     let run = swamp::ids::RunId::new();
-    let dir = f.paths.dot_swamp.join("runs").join(run.to_string());
-    std::fs::create_dir_all(&dir).expect("run dir");
-    std::fs::write(dir.join("journal.jsonl"), "").expect("journal");
+    write_journal(&f, run, "");
     let socket = f.paths.run_paths(run).socket();
     std::fs::create_dir_all(socket.parent().expect("sock dir")).expect("sock dir");
     std::fs::write(&socket, "").expect("socket");
@@ -490,7 +492,7 @@ fn the_design_doc_doctor_sample_matches_what_the_code_emits() {
     let root = Utf8PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let doc = std::fs::read_to_string(root.join("docs/DESIGN.md")).expect("DESIGN.md");
     let sample = doc
-        .split("$ swamp doctor\n")
+        .split("$ swamp doctor")
         .nth(1)
         .and_then(|rest| rest.split("```").next())
         .expect("the §9 doctor sample");
@@ -655,9 +657,7 @@ async fn doctor_output_is_stable() {
     cfg.brain.permission_mode = Some("plan".to_owned());
     cfg.brain.allow_tools.clear();
     let run: swamp::ids::RunId = "01J00000000000000000000000".parse().expect("run id");
-    let dir = f.paths.dot_swamp.join("runs").join(run.to_string());
-    std::fs::create_dir_all(&dir).expect("run dir");
-    std::fs::write(dir.join("journal.jsonl"), "").expect("journal");
+    write_journal(&f, run, "");
 
     let out = checks(&cfg, &f.paths, false, true).await;
     let exe = std::env::current_exe().expect("current exe");
@@ -721,16 +721,10 @@ fn run_started(schema: u32) -> String {
 async fn schema_reports_the_journal_schema_of_each_recent_run() {
     use swamp::journal::record::SCHEMA_VERSION;
     let f = Fixture::new();
-    let runs = f.paths.dot_swamp.join("runs");
     let mut ids = Vec::new();
     for schema in [1, SCHEMA_VERSION, SCHEMA_VERSION + 1] {
         let run = swamp::ids::RunId::new();
-        std::fs::create_dir_all(runs.join(run.to_string())).expect("run dir");
-        std::fs::write(
-            runs.join(run.to_string()).join("journal.jsonl"),
-            run_started(schema),
-        )
-        .expect("journal");
+        write_journal(&f, run, &run_started(schema));
         ids.push((run, schema));
     }
     let out = checks(&healthy(&f), &f.paths, false, true).await;
@@ -797,8 +791,6 @@ async fn schema_reports_a_newer_journal_this_swamp_cannot_parse() {
     use swamp::journal::record::SCHEMA_VERSION;
     let f = Fixture::new();
     let run = swamp::ids::RunId::new();
-    let dir = f.paths.dot_swamp.join("runs").join(run.to_string());
-    std::fs::create_dir_all(&dir).expect("run dir");
     let line = serde_json::json!({
         "seq": 0,
         "at": "2026-01-01T00:00:00Z",
@@ -809,7 +801,7 @@ async fn schema_reports_a_newer_journal_this_swamp_cannot_parse() {
         "argv": "swamp run",
         "workspace": {"required": true},
     });
-    std::fs::write(dir.join("journal.jsonl"), format!("{line}\n")).expect("journal");
+    write_journal(&f, run, &format!("{line}\n"));
     let out = checks(&healthy(&f), &f.paths, false, true).await;
     let c = out
         .iter()
@@ -823,4 +815,28 @@ async fn schema_reports_a_newer_journal_this_swamp_cannot_parse() {
         "{}",
         c.detail
     );
+}
+
+/// An unreadable runs directory is an error, not "no recorded runs".
+#[cfg(unix)]
+#[tokio::test]
+async fn schema_fails_when_the_runs_directory_cannot_be_read() {
+    use std::os::unix::fs::PermissionsExt;
+    let f = Fixture::new();
+    let runs = f.paths.dot_swamp.join("runs");
+    std::fs::create_dir_all(&runs).expect("runs dir");
+    std::fs::set_permissions(&runs, std::fs::Permissions::from_mode(0o000)).expect("chmod");
+    if std::fs::read_dir(&runs).is_ok() {
+        return;
+    }
+    let out = checks(&healthy(&f), &f.paths, false, true).await;
+    std::fs::set_permissions(&runs, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    for name in ["protocol/journal", "protocol/schema"] {
+        let c = out
+            .iter()
+            .find(|c| c.name == name)
+            .unwrap_or_else(|| panic!("no {name} check"));
+        assert_eq!(c.level, Level::Error, "{name}: {}", c.detail);
+        assert!(c.detail.contains("cannot list runs"), "{}", c.detail);
+    }
 }

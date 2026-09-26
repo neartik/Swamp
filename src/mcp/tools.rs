@@ -499,12 +499,7 @@ async fn cancel(disp: &Arc<Dispatcher>, args: Value) -> Result<Value, RpcError> 
         }
     }
     // Long enough for a SIGTERM to land and the task to settle, never the full grace period.
-    let settle = disp
-        .cfg
-        .limits
-        .grace_period
-        .unwrap_or(Duration::from_secs(5))
-        + SETTLE;
+    let settle = disp.cfg.grace_period() + SETTLE;
     let results = disp.await_nodes(&cancelled, Some(settle)).await;
     Ok(json!({
         "cancelled": cancelled.iter().map(ToString::to_string).collect::<Vec<_>>(),

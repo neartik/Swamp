@@ -1,4 +1,4 @@
-//! P5: the docs name the same journal events and commands the code has, so neither can drift.
+//! The docs name the same journal event tags and subcommands the code has.
 
 use camino::Utf8PathBuf;
 use clap::CommandFactory;

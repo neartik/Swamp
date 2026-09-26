@@ -6,8 +6,7 @@ use crate::ui::chat::blocks::text_of;
 use crate::ui::chat::theme::Theme;
 use std::time::{Duration, Instant};
 
-/// The dispatch board of `docs/BOARD.md`. It tails journals and reads `accounts.json`; it
-/// never talks to a supervisor, and the one thing it changes is a confirmed cancel.
+/// The dispatch board of `docs/BOARD.md`; its only write is a confirmed cancel.
 pub async fn run(ctx: &Ctx, args: &BoardArgs) -> anyhow::Result<i32> {
     let scope = match (&args.run, args.all) {
         (Some(spec), _) => Scope::Pinned(ctx.paths.resolve_run(spec)?),

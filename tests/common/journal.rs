@@ -225,8 +225,7 @@ pub fn tool_call(seq: u64, d: DispatchId) -> JournalEvent {
     }
 }
 
-/// A fails over, its second attempt runs E one level down, B is blocked first, C is rejected
-/// and D is still queued.
+/// A fails over and nests E, B was blocked, C rejected, D still queued.
 pub fn schema_2() -> Vec<JournalLine> {
     let (brain, a, b, c, d, e) = (nid(0), nid(1), nid(2), nid(3), nid(4), nid(5));
     let (a1, a2, b1, e1) = (nid(11), nid(12), nid(21), nid(51));

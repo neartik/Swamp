@@ -365,8 +365,10 @@ Shown only when `TMUX` is set and `~/.swamp/board.pid` names no live process
 (`journal::paths::board_is_alive`, the same start-time check `worker::liveness::is_ours` uses).
 The decision is one pure function, `ui::chat::board_hint(in_tmux, board_alive) -> Option<&str>`,
 so it is unit-tested without a terminal. `swamp chat --board` runs
-`tmux split-window -h -l 46 -d swamp board` when `TMUX` is set, or prints one line naming the
-command otherwise, then always continues into chat - a pane it could not open is never fatal.
+`tmux split-window -h -l <ui.board_width, default 46> -d swamp board --run <run>` when `TMUX` is
+set, pinning the board to the chat's run, or otherwise prints
+``run `swamp board --run <id>` in another pane``, then always continues into chat - a pane it
+could not open is never fatal.
 
 ---
 

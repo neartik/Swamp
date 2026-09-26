@@ -277,12 +277,11 @@ pub fn bottom(text: &str, role: Role, bold: bool, c: &Ctx) -> Line<'static> {
 
 // ---------------------------------------------------------------- header
 
-/// `swamp board   2 running · 1 stuck · 1 queued · ~$0.43 · observed 4s ago`, on two rows at
-/// Narrow; the optional cells drop, in order, when they do not fit.
+/// `swamp board   2 running · 1 stuck · ~$0.43 · observed 4s ago`; optional cells drop to fit.
 pub fn header(b: &Board, rows: &Rows, c: &Ctx) -> Vec<Line<'static>> {
     let s = b.summary(rows);
     let cells = header_cells(&s, b.read_budget, c.l.band != Band::Narrow);
-    let fresh = freshness(b, c);
+    let fresh = freshness(b, c, false);
     // Within budget the delegation cell is the first to go; past it, it outlasts the cost.
     let over = s.brain.is_some_and(|w| w.over(b.read_budget));
     let drops = if over {
@@ -311,10 +310,17 @@ pub fn header(b: &Board, rows: &Rows, c: &Ctx) -> Vec<Line<'static>> {
     }
     let gap = TITLE.width() + 2;
     let room = c.w().saturating_sub(gap);
-    // Freshness never drops: the counts before it give way first.
-    let fresh_text = fmt::truncate(&fresh.text, room);
-    let rest_room = room.saturating_sub(fresh_text.width() + SEP.width());
-    let cells = order::fit(cells, rest_room, &drops);
+    // Freshness never drops; past the budget it and the share shorten before the warning goes.
+    let fit = |fresh: &Cell, cells: Vec<Cell>| {
+        let text = fmt::truncate(&fresh.text, room);
+        let rest = room.saturating_sub(text.width() + SEP.width());
+        (text, rest, order::fit(cells, rest, &drops))
+    };
+    let (mut fresh_text, mut rest_room, mut cells) = fit(&fresh, cells);
+    if over && !cells.iter().any(|c| c.key == "brain") {
+        let compact = header_cells(&s, b.read_budget, false);
+        (fresh_text, rest_room, cells) = fit(&freshness(b, c, true), compact);
+    }
     let mut spans = order::spans(&cells, c.theme, rest_room);
     let rest_w: usize = spans.iter().map(|s| s.content.width()).sum();
     if rest_w > 0 {
@@ -351,17 +357,21 @@ fn header_cells(s: &Summary, budget: u32, share: bool) -> Vec<Cell> {
     cells
 }
 
-/// How far behind the persisted account snapshot is. Past `quota_max_age` it stops being a
-/// lag and becomes the reason dispatch is wrong, so it changes colour.
-fn freshness(b: &Board, c: &Ctx) -> Cell {
+/// How far behind the account snapshot is, red past `quota_max_age`; `short` drops "observed".
+fn freshness(b: &Board, c: &Ctx, short: bool) -> Cell {
     let Some(at) = b.accounts_at else {
         return Cell::new("fresh", "not observed", Role::Meta);
     };
     let age: StdDuration = (c.now - at).try_into().unwrap_or(StdDuration::ZERO);
-    let text = if age.as_secs() < 60 {
-        format!("observed {}s ago", age.as_secs())
+    let ago = if age.as_secs() < 60 {
+        format!("{}s ago", age.as_secs())
     } else {
-        format!("observed {} ago", fmt::until(age))
+        format!("{} ago", fmt::until(age))
+    };
+    let text = if short {
+        ago
+    } else {
+        format!("observed {ago}")
     };
     let role = if age > c.max_age {
         Role::Err

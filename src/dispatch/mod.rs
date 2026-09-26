@@ -37,7 +37,6 @@ use tokio_util::sync::CancellationToken;
 const DEFAULT_MAX_ATTEMPTS: u32 = 3;
 const DEFAULT_MAX_NODES_PER_RUN: u32 = 32;
 const DEFAULT_MAX_DEPTH: u32 = 2;
-const DEFAULT_GRACE: Duration = Duration::from_secs(5);
 
 pub(crate) fn emit(h: &JournalHandle, node: Option<NodeId>, event: JournalEvent) {
     h.emit(node, event);
@@ -82,8 +81,6 @@ struct TaskEnd {
 pub struct Dispatcher {
     pub cfg: Arc<Config>,
     pub pool: Arc<AccountPool>,
-    pub exec: Arc<Executor>,
-    pub workspace: Arc<WorkspaceManager>,
     pub journal: JournalHandle,
     runner: Arc<dyn NodeRunner>,
     results: Mutex<HashMap<NodeId, NodeResult>>,
@@ -104,24 +101,20 @@ impl Dispatcher {
         ws: Arc<WorkspaceManager>,
         journal: JournalHandle,
     ) -> Arc<Self> {
-        let runner = Arc::new(DirectRunner::new(Arc::clone(&exec), Arc::clone(&ws)));
-        Self::with_runner(cfg, pool, exec, ws, journal, runner)
+        let runner = Arc::new(DirectRunner::new(exec, ws));
+        Self::with_runner(cfg, pool, journal, runner)
     }
 
-    /// The seam WP4's tests drive: a scripted runner in place of real processes and worktrees.
+    /// The seam the tests drive: a scripted runner in place of real processes and worktrees.
     pub fn with_runner(
         cfg: Arc<Config>,
         pool: Arc<AccountPool>,
-        exec: Arc<Executor>,
-        ws: Arc<WorkspaceManager>,
         journal: JournalHandle,
         runner: Arc<dyn NodeRunner>,
     ) -> Arc<Self> {
         Arc::new(Self {
             cfg,
             pool,
-            exec,
-            workspace: ws,
             journal,
             runner,
             results: Mutex::new(HashMap::new()),
@@ -326,7 +319,7 @@ impl Dispatcher {
                 |s| Phase::from(&s),
             )));
         }
-        let grace = self.cfg.limits.grace_period.unwrap_or(DEFAULT_GRACE);
+        let grace = self.cfg.grace_period();
         let stop = match &token {
             Some(t) => Stop::Token(t),
             None => Stop::Kill { grace },

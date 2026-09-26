@@ -77,7 +77,10 @@ pub async fn checks(cfg: &Config, paths: &Paths, probe: bool, schema: bool) -> V
 
 /// `--schema`: the journal schema each recent run was written with.
 fn journal_schemas(paths: &Paths) -> Vec<Check> {
-    let runs = paths.list_runs().unwrap_or_default();
+    let runs = match paths.list_runs() {
+        Ok(runs) => runs,
+        Err(e) => return vec![unlisted("protocol/journal", &e)],
+    };
     let mut out: Vec<Check> = runs
         .into_iter()
         .take(RECENT_RUNS)
@@ -125,6 +128,29 @@ fn journal_schemas(paths: &Paths) -> Vec<Check> {
     out
 }
 
+/// `exec arg` with the account's env, stdin closed and killed on timeout.
+pub(crate) async fn cli_output(
+    exec: &str,
+    env: &std::collections::BTreeMap<String, String>,
+    arg: &str,
+    timeout: std::time::Duration,
+) -> Result<std::process::Output, String> {
+    let mut cmd = tokio::process::Command::new(exec);
+    cmd.arg(arg)
+        .stdin(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .envs(crate::config::resolve::expand_env(env));
+    match tokio::time::timeout(timeout, cmd.output()).await {
+        Ok(Ok(o)) => Ok(o),
+        Ok(Err(e)) => Err(format!("`{exec} {arg}` failed: {e}")),
+        Err(_) => Err(format!("`{exec} {arg}` timed out after {timeout:?}")),
+    }
+}
+
+fn unlisted(name: &'static str, e: &anyhow::Error) -> Check {
+    Check::new(name, Level::Error, format!("cannot list runs: {e:#}"))
+}
+
 /// Read loosely, so a newer swamp's `run_started` still names its schema.
 fn run_schema(journal: &camino::Utf8Path) -> Option<(u64, String)> {
     use std::io::BufRead;
@@ -149,7 +175,10 @@ fn schema_drift(paths: &Paths) -> Check {
     let mut unparsed = 0u64;
     let mut detections = 0u64;
     let mut pattern = 0u64;
-    let runs = paths.list_runs().unwrap_or_default();
+    let runs = match paths.list_runs() {
+        Ok(runs) => runs,
+        Err(e) => return unlisted("protocol/schema", &e),
+    };
     for run in runs.into_iter().take(RECENT_RUNS) {
         let journal = paths.run_paths(run).journal();
         let Ok(text) = std::fs::read_to_string(&journal) else {

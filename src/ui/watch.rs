@@ -546,7 +546,7 @@ pub async fn run_tui(paths: RunPaths, cfg: Arc<Config>) -> anyhow::Result<()> {
     let backend = ratatui::backend::CrosstermBackend::new(std::io::stdout());
     let mut terminal = ratatui::Terminal::new(backend)?;
     let mut keys = crossterm::event::EventStream::new();
-    let grace = cfg.limits.grace_period.unwrap_or(Duration::from_secs(5));
+    let grace = cfg.grace_period();
     let (tx, mut done) = tokio::sync::mpsc::unbounded_channel::<CancelDone>();
 
     loop {

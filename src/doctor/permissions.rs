@@ -168,7 +168,12 @@ pub(crate) fn spelling(modes: &[(&str, String)], choices: &[String], exec: &str)
         }
     }
     if wrong.is_empty() {
-        let names: Vec<&str> = modes.iter().map(|(_, m)| m.as_str()).collect();
+        let mut names: Vec<&str> = Vec::new();
+        for (_, m) in modes {
+            if !names.contains(&m.as_str()) {
+                names.push(m);
+            }
+        }
         return Check::new(
             NAME,
             Level::Ok,
@@ -206,16 +211,8 @@ pub(crate) fn permission_mode_choices(help: &str) -> Option<Vec<String>> {
 }
 
 async fn help_text(exec: &str, env: &std::collections::BTreeMap<String, String>) -> Option<String> {
-    let mut cmd = tokio::process::Command::new(exec);
-    cmd.arg("--help")
-        .stdin(std::process::Stdio::null())
-        .kill_on_drop(true);
-    for (k, v) in env {
-        cmd.env(k, shellexpand::tilde(v).into_owned());
-    }
-    let out = tokio::time::timeout(HELP_TIMEOUT, cmd.output())
+    let out = super::cli_output(exec, env, "--help", HELP_TIMEOUT)
         .await
-        .ok()?
         .ok()?;
     out.status
         .success()
@@ -272,6 +269,16 @@ mod tests {
             "claude",
         );
         assert_eq!(ok.level, Level::Ok, "{}", ok.detail);
+
+        let same = [
+            (
+                "providers.anthropic.worker.permission_mode",
+                "acceptEdits".into(),
+            ),
+            ("brain.permission_mode", "acceptEdits".into()),
+        ];
+        let c = spelling(&same, &choices, "claude-main");
+        assert_eq!(c.detail, "acceptEdits accepted by claude-main");
     }
 
     #[test]
